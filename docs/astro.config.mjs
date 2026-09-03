@@ -636,6 +636,16 @@ export default defineConfig({
                 },
               ],
             },
+            {
+              label: 'Greengrass',
+              collapsed: true,
+              items: [
+                {
+                  label: 'py#greengrass-component',
+                  link: '/guides/py-greengrass-component',
+                },
+              ],
+            },
           ],
         },
         {
