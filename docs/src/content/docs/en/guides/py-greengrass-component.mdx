@@ -1,23 +1,24 @@
 ---
-title: py#greengrass-component
-description: Add an AWS IoT Greengrass component to a Python project
+title: Greengrass Component (Python)
+description: Add an AWS IoT Greengrass v2 component to a Python project
 generator: py#greengrass-component
 ---
 
 import { FileTree } from '@astrojs/starlight/components';
 import RunGenerator from '@components/run-generator.astro';
 import GeneratorParameters from '@components/generator-parameters.astro';
-import Infrastructure from '@components/infrastructure.astro';
-import Snippet from '@components/snippet.astro';
+import NxCommands from '@components/nx-commands.astro';
 import OptionFilter from '@components/option-filter.astro';
 
-TODO: Add an overview of your generator here.
+The `py#greengrass-component` generator adds an [AWS IoT Greengrass v2](https://docs.aws.amazon.com/greengrass/v2/developerguide/what-is-iot-greengrass.html) component to an existing Python project: a recipe, a sample entrypoint, and the Nx targets to package the component and deploy it locally to a core device.
+
+This is a packaging-and-local-deployment slice only: there is no `infra`/`iac` option yet, so the generator never touches `packages/common/constructs` or `packages/common/terraform`, and it never publishes a component version to AWS IoT Greengrass. Publishing a `ComponentVersion` and deploying it to a thing or thing group is planned for a follow-up generator.
 
 ## Usage
 
-### Generate a py#greengrass-component
+### Generate a Greengrass component
 
-You can generate a py#greengrass-component in two ways:
+You can generate a Greengrass component in two ways:
 
 <RunGenerator generator="py#greengrass-component" />
 
@@ -27,47 +28,173 @@ You can generate a py#greengrass-component in two ways:
 
 ## Generator Output
 
-The generator will create the following project files:
+The generator adds the following files to your project:
 
 <FileTree>
- - todo.txt Update this section with what your generator generates!
+
+- greengrass
+  - \<component-name>
+    - recipe.yaml the component recipe — user-owned from first generation onward
+    - gdk-config.json a [GDK](https://github.com/aws-greengrass/aws-greengrass-gdk-cli)-shaped build config — framework-owned
+    - main.py the component entrypoint — user-owned from first generation onward
+- tests
+  - greengrass
+    - test_\<component_name>.py a starter test that loads main.py by file path
+
 </FileTree>
 
-### Infrastructure
+## The Four Targets
 
-<Snippet name="shared-constructs" />
+The generator wires four targets onto the host project, prefixed with the component's kebab-case name (`<c>` below):
 
-<Infrastructure>
-<Fragment slot="cdk">
+| Target             | Purpose                                                                          | Cached | Depends on    |
+| ------------------ | --------------------------------------------------------------------------------- | ------ | ------------- |
+| `<c>-vendor`       | Exports and vendors your project's Python dependencies for the target platform    | Yes    | `compile`     |
+| `<c>-artifact`     | Zips the component's source and vendored dependencies into a GDK-shaped layout    | Yes    | `<c>-vendor`  |
+| `<c>-deploy-local`  | Creates a local deployment via `greengrass-cli` — runs **on** the core device      | No     | `<c>-artifact` |
+| `<c>-logs`         | Tails the component's log file — runs **on** the core device                      | No     | -              |
+
+`<c>-artifact` is also wired onto the project's `build` and `assemble` targets, so a normal build always produces a fresh artifact.
+
+### Vendoring dependencies (`<c>-vendor`)
+
+<NxCommands commands={['run <project>:<component-name>-vendor']} />
+
+This target uses [`uv export`](https://docs.astral.sh/uv/reference/cli/#uv-export) followed by [`uv pip install --only-binary :all:`](https://docs.astral.sh/uv/reference/cli/#uv-pip-install) to download platform-specific wheels for your dependencies, targeting:
+
+- `--python-version`, the lowest `major.minor` in your project's `[project].requires-python` (not the Lambda runtime version — a core device is not a Lambda function)
+- `--python-platform`, derived from the `platform` option (`x86_64-manylinux_2_28` for `linux-amd64`, `aarch64-manylinux_2_28` for `linux-arm64`)
+
+`--only-binary :all:` matters: without it, `uv` can fall back to building an sdist for the *host* architecture, silently producing a binary that will not load on the target device.
+
+### Building the artifact (`<c>-artifact`)
+
+<NxCommands commands={['run <project>:<component-name>-artifact']} />
+
+This packages `greengrass/<component-name>/` (excluding `recipe.yaml` and `gdk-config.json`) plus the vendored dependencies into a zip, and writes the resolved recipe alongside it:
+
 <FileTree>
-  - packages/common/constructs/src
-    - app
-      - todo.txt document app specific cdk constructs if any
-    - core
-      - todo.txt document core cdk constructs if any
-</FileTree>
-</Fragment>
-<Fragment slot="terraform">
-<FileTree>
-  - packages/common/terraform/src
-    - app
-      - todo.txt document app specific tf modules if any
-    - core
-      - todo.txt document core tf modules if any
-</FileTree>
-</Fragment>
-</Infrastructure>
 
-:::danger
-Delete this section if your generator does not create infrastructure
+- dist/\<project-root>/greengrass/\<component-name>
+  - vendor vendored dependencies from `<c>-vendor`
+  - greengrass-build
+    - recipes
+      - \<ComponentName>-\<version>.yaml resolved recipe
+    - artifacts
+      - \<ComponentName>
+        - \<version>
+          - \<component-name>.zip the deployable artifact
+
+</FileTree>
+
+This layout is **GDK-shaped, not GDK-compatible**: it matches the directory structure the [Greengrass Development Kit CLI](https://github.com/aws-greengrass/aws-greengrass-gdk-cli) produces, but it is written under Nx's own `dist/`, not the component folder GDK expects. The vended `gdk-config.json` (`build_system: custom`, `custom_build_command` pointing back at this same target) is there as an escape hatch if you also want to run `gdk component build`/`publish` directly — it is not a dependency of anything this generator wires.
+
+## Deploying and observing locally
+
+:::caution[Run these on the core device]
+`<c>-deploy-local` and `<c>-logs` only make sense executed **on** a Greengrass core device (or a container running the [nucleus](https://docs.aws.amazon.com/greengrass/v2/developerguide/greengrass-nucleus-component.html)) — they call `greengrass-cli`, which is installed alongside the nucleus, not on your development machine. Neither target is wired into the project's `dev` target: a routine `nx run <project>:dev` must never mutate a real device as a side effect.
 :::
 
-## TODO: More Docs!
+<NxCommands commands={['run <project>:<component-name>-deploy-local']} />
 
-Add more documentation detailing things like:
+Creates one local deployment (`greengrass-cli deployment create --recipeDir ... --artifactDir ... --merge <ComponentName>=<version>`) and exits — it does not tail or watch the deployment. Local deployments resolve the recipe's `s3://` placeholder artifact from `--artifactDir` by component name and version; this generator is experimental while that flow is being verified across nucleus versions.
 
-- How to work with the project/code you've generated
-- What new project.json targets have been added and how to run them (using the NxCommands component)
-- Best practices when working with your generated project/code
+<NxCommands commands={['run <project>:<component-name>-logs']} />
 
-See the existing guides for concrete examples.
+Tails the component's log file (`<GREENGRASS_ROOT>/logs/<ComponentName>.log`) in follow mode until you press Ctrl-C.
+
+Both targets read `GREENGRASS_ROOT` from the environment, defaulting to `/greengrass/v2`.
+
+## Recipe ownership
+
+`recipe.yaml` is written once, with the options you chose at generation time, and never rewritten by a later run of this generator — re-running it with the same component name is a clean no-op that leaves your edits alone. Add configuration, lifecycle steps or dependencies directly in the recipe as your component grows.
+
+Two things in the generated recipe are load-bearing and worth understanding before you edit them:
+
+```yaml
+Manifests:
+  - Artifacts:
+      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<component-name>.zip
+        Unarchive: ZIP
+    Lifecycle:
+      Run: python3 {artifacts:decompressedPath}/<component-name>/main.py
+```
+
+- The `BUCKET_NAME` / `COMPONENT_NAME` / `COMPONENT_VERSION` placeholders are the same ones GDK uses. `<c>-artifact` copies them through to the resolved recipe untouched; a later publishing step substitutes them with the real bucket and key.
+- The `Uri` basename must stay `<component-name>.zip`, because that is the name `<c>-artifact` gives the zip, and Greengrass unarchives it to `{artifacts:decompressedPath}/<component-name>/` — which is where the `Run` script looks for `main.py`. `<c>-artifact` fails with an explicit message if you break that pairing.
+
+### Component version immutability
+
+`ComponentVersion` in `recipe.yaml` is user-owned from the start. Once a version of a component is published to AWS IoT Greengrass, that version's content can never change — publishing again under the same version with different content is rejected. **Bump `ComponentVersion` in `recipe.yaml` whenever you change the component**, before building a new artifact. This generator does not publish anything to AWS yet, but the recipe you author now is the one a later publishing step will read as-is.
+
+<OptionFilter when={{ ipc: true }} description="ipc=true wires a least-privilege accessControl block">
+
+### IPC access control
+
+With `ipc: true` (the default), the recipe includes a least-privilege `accessControl` block scoped to the component's own topic:
+
+```yaml
+ComponentConfiguration:
+  DefaultConfiguration:
+    accessControl:
+      aws.greengrass.ipc.pubsub:
+        <ComponentName>:pubsub:1:
+          policyDescription: Allow publishing heartbeat messages to this component's own topic.
+          operations:
+            - aws.greengrass#PublishToTopic
+          resources:
+            - <ComponentName>/heartbeat
+```
+
+Depending on the `awsiotsdk` package alone does not authorize IPC operations — Greengrass enforces this `accessControl` policy independently, so widen `operations`/`resources` here as your component needs to publish or subscribe to more topics.
+
+</OptionFilter>
+
+## Implementing your component
+
+<OptionFilter when={{ ipc: true }} description="ipc=true — main.py publishes over the Greengrass IPC client">
+
+With `ipc: true`, `main.py` uses [`awsiotsdk`](https://github.com/aws-greengrass/aws-iot-device-sdk-python-v2)'s `GreengrassCoreIPCClientV2` to publish a heartbeat message to the component's own local topic every 30 seconds:
+
+```python
+from awsiot.greengrasscoreipc.clientv2 import GreengrassCoreIPCClientV2
+from awsiot.greengrasscoreipc.model import JsonMessage, PublishMessage
+
+def publish_heartbeat(client: GreengrassCoreIPCClientV2, sequence: int) -> None:
+    client.publish_to_topic(
+        topic=TOPIC,
+        publish_message=PublishMessage(json_message=JsonMessage(message={"sequence": sequence})),
+    )
+```
+
+</OptionFilter>
+
+<OptionFilter when={{ ipc: false }} description="ipc=false — main.py is a plain long-running loop">
+
+With `ipc: false`, `main.py` is a plain long-running loop that logs a heartbeat every 30 seconds, with no Greengrass SDK dependency at all.
+
+</OptionFilter>
+
+Both variants structure their logic behind `if __name__ == "__main__":`, so the vended `test_main.py` can import `main.py` (by file path — it lives outside your project's importable package, alongside `recipe.yaml`) and exercise its functions without starting the loop.
+
+### The `awscrt` native binding
+
+<OptionFilter when={{ ipc: true }} description="Only relevant when ipc=true, since awsiotsdk depends on awscrt">
+
+`awsiotsdk` depends on [`awscrt`](https://github.com/awslabs/aws-crt-python), which ships a native extension built per architecture — there is no pure-Python fallback. This is exactly why `<c>-vendor` takes an explicit `platform` rather than defaulting to whatever your build machine happens to be: `uv pip install --only-binary :all: --python-platform <platform>` downloads the *target* device's wheel, cross-architecture, without needing that architecture's toolchain locally. One artifact still serves only one architecture — regenerate with the other `platform` value (or add a second component) to support both `linux-amd64` and `linux-arm64` cores from the same project.
+
+</OptionFilter>
+
+## Supported platforms
+
+Only `linux-amd64` and `linux-arm64` core devices are supported today. Multi-architecture manifests (one recipe covering both) and Windows cores are deferred.
+
+### Nucleus classic vs nucleus lite
+
+The generated recipe and targets are verified against the [classic nucleus](https://docs.aws.amazon.com/greengrass/v2/developerguide/greengrass-nucleus-component.html) (`aws.greengrass.Nucleus`). [Nucleus lite](https://docs.aws.amazon.com/greengrass/v2/developerguide/greengrass-nucleus-lite-component.html) (`aws.greengrass.NucleusLite`) is a smaller runtime for constrained devices, and it is not equivalent:
+
+- Lite runs generic components only, and supports a subset of the recipe keys classic accepts.
+- Lite implements a subset of the IPC operations, so an `accessControl` policy that classic honours may not be enforceable there.
+- Lite gained container support only in v2.15 (July 2025).
+
+A component that works on classic can therefore misbehave on lite. Test on the nucleus your fleet actually runs before shipping; there is no runtime capability detection in the generated code.

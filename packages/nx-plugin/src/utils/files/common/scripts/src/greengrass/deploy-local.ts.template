@@ -1,0 +1,67 @@
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+import { readResolvedRecipe } from './recipe-utils<% if (esm) { %>.js<% } %>';
+
+/*
+ * Usage: deploy-local.ts <dist>
+ *
+ * <dist> the component's dist root written by the "-artifact" target: reads
+ *        <dist>/greengrass-build/{recipes,artifacts}
+ *
+ * Creates one local deployment via greengrass-cli and exits - it does not
+ * tail or watch the deployment.
+ */
+
+const log = (msg: string): void => console.error(`[deploy-local] ${msg}`);
+
+function usage(): never {
+  log('Usage: deploy-local.ts <dist>');
+  process.exit(1);
+}
+
+function main(): void {
+  const [dist] = process.argv.slice(2);
+  if (!dist) {
+    usage();
+  }
+
+  const greengrassRoot = process.env.GREENGRASS_ROOT || '/greengrass/v2';
+  const recipeDir = join(dist, 'greengrass-build', 'recipes');
+  const artifactDir = join(dist, 'greengrass-build', 'artifacts');
+
+  let componentName: string;
+  let componentVersion: string;
+  try {
+    ({ componentName, componentVersion } = readResolvedRecipe(recipeDir));
+  } catch (e) {
+    log((e as Error).message);
+    process.exit(1);
+    return;
+  }
+
+  const cli = join(greengrassRoot, 'bin', 'greengrass-cli');
+  const args = [
+    'deployment',
+    'create',
+    '--recipeDir',
+    recipeDir,
+    '--artifactDir',
+    artifactDir,
+    '--merge',
+    `${componentName}=${componentVersion}`,
+  ];
+
+  log(`Deploying ${componentName}=${componentVersion} via ${cli}`);
+  const result = spawnSync(cli, args, { stdio: 'inherit' });
+  if (result.error) {
+    log(
+      `Cannot run "${cli}": ${result.error.message}. Run this target on the ` +
+        'Greengrass core device, and set GREENGRASS_ROOT when the nucleus is ' +
+        'not installed at /greengrass/v2.',
+    );
+    process.exit(1);
+  }
+  process.exit(result.status ?? 1);
+}
+
+main();

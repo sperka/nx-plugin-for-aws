@@ -1,0 +1,124 @@
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import yaml from 'js-yaml';
+import { loadRecipe, validateRecipe } from './recipe-utils<% if (esm) { %>.js<% } %>';
+import { writeZip, type ZipEntry } from './zip-writer<% if (esm) { %>.js<% } %>';
+
+/*
+ * Usage: build-artifact.ts <project-root> <component-dir> <dist>
+ *
+ * <project-root>  path to the host project (e.g. a Python project root)
+ * <component-dir> the component's directory name under <project-root>/greengrass/,
+ *                  which also becomes the artifact zip's base name
+ * <dist>           the component's dist root: reads <dist>/vendor (produced by
+ *                  the "-vendor" target this target depends on) and writes
+ *                  <dist>/greengrass-build/{recipes,artifacts}
+ *
+ * Everything under <project-root>/greengrass/<component-dir>/ is packaged
+ * except recipe.yaml and gdk-config.json, which are framework metadata, not
+ * deployed code.
+ */
+
+const log = (msg: string): void => console.error(`[build-artifact] ${msg}`);
+
+function usage(): never {
+  log('Usage: build-artifact.ts <project-root> <component-dir> <dist>');
+  process.exit(1);
+}
+
+/** Every file under `dir`, recursively, excluding top-level names in `exclude`. */
+function collectFiles(dir: string, exclude: ReadonlySet<string>): string[] {
+  const results: string[] = [];
+  const walk = (current: string, isRoot: boolean): void => {
+    for (const entry of readdirSync(current)) {
+      if (isRoot && exclude.has(entry)) continue;
+      const fullPath = join(current, entry);
+      if (statSync(fullPath).isDirectory()) {
+        walk(fullPath, false);
+      } else {
+        results.push(fullPath);
+      }
+    }
+  };
+  walk(dir, true);
+  return results;
+}
+
+/** Zip entries for every file under `dir`, named relative to `dir` with forward slashes. */
+function entriesFrom(dir: string, exclude: ReadonlySet<string>): ZipEntry[] {
+  return collectFiles(dir, exclude).map((filePath) => ({
+    name: relative(dir, filePath).split('\\').join('/'),
+    data: readFileSync(filePath),
+  }));
+}
+
+function main(): void {
+  const [projectRoot, componentDirName, dist] = process.argv.slice(2);
+  if (!projectRoot || !componentDirName || !dist) {
+    usage();
+  }
+
+  const componentDir = join(projectRoot, 'greengrass', componentDirName);
+  const recipePath = join(componentDir, 'recipe.yaml');
+
+  let componentName: string;
+  let componentVersion: string;
+  let recipe: ReturnType<typeof loadRecipe>;
+  try {
+    recipe = loadRecipe(recipePath);
+    ({ componentName, componentVersion } = validateRecipe(
+      recipe,
+      componentDirName,
+    ));
+  } catch (e) {
+    log((e as Error).message);
+    process.exit(1);
+    return;
+  }
+
+  const vendorDir = join(dist, 'vendor');
+  const artifactDir = join(
+    dist,
+    'greengrass-build',
+    'artifacts',
+    componentName,
+    componentVersion,
+  );
+  const recipesDir = join(dist, 'greengrass-build', 'recipes');
+  mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(recipesDir, { recursive: true });
+
+  // Framework metadata that ships alongside the recipe but never inside the
+  // deployed artifact.
+  const entries = entriesFrom(
+    componentDir,
+    new Set(['recipe.yaml', 'gdk-config.json']),
+  );
+  if (existsSync(vendorDir)) {
+    // requirements.txt is the "-vendor" target's own intermediate, not
+    // something the device needs.
+    entries.push(...entriesFrom(vendorDir, new Set(['requirements.txt'])));
+  }
+  if (entries.length === 0) {
+    log(
+      `Nothing to package: "${componentDir}" has no deployable files and "${vendorDir}" does not exist`,
+    );
+    process.exit(1);
+    return;
+  }
+
+  const zipPath = join(artifactDir, `${componentDirName}.zip`);
+  writeZip(entries, zipPath);
+  log(`wrote ${zipPath}`);
+
+  // The BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION artifact URI placeholders
+  // are left exactly as authored - a later IaC step substitutes them.
+  const recipeOutPath = join(
+    recipesDir,
+    `${componentName}-${componentVersion}.yaml`,
+  );
+  writeFileSync(recipeOutPath, yaml.dump(recipe, { lineWidth: -1 }));
+  log(`wrote ${recipeOutPath}`);
+}
+
+main();

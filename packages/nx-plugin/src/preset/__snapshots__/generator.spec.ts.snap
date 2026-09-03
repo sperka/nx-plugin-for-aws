@@ -103,6 +103,8 @@ The following list of generators are what is currently available in the \`@aws/n
 
 - **py#api**: Create a Python API
 
+- **py#greengrass-component**: Add an AWS IoT Greengrass component to a Python project (experimental)
+
 - **py#lambda-function**: Adds a lambda function to a python project
 
 - **py#mcp-server**: Generate a Python Model Context Protocol (MCP) server for providing context to Large Language Models
