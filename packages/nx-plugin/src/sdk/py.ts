@@ -11,14 +11,14 @@ export type { PyApiGeneratorSchema } from '../py/api/schema';
 
 export { pyDynamoDBGenerator } from '../py/dynamodb/generator.js';
 export type { PyDynamoDBGeneratorSchema } from '../py/dynamodb/schema';
-
+// PyGreengrassComponent Generator
+export { pyGreengrassComponentGenerator } from '../py/greengrass-component/generator';
+export type { PyGreengrassComponentGeneratorSchema } from '../py/greengrass-component/schema';
 export { pyLambdaFunctionGenerator } from '../py/lambda-function/generator.js';
 export type { PyLambdaFunctionGeneratorSchema } from '../py/lambda-function/schema';
-
 export { pyMcpServerGenerator } from '../py/mcp-server/generator.js';
 export type { PyMcpServerGeneratorSchema } from '../py/mcp-server/schema';
 export { pyProjectGenerator } from '../py/project/generator.js';
 export type { PyProjectGeneratorSchema } from '../py/project/schema';
-
 export { pyRdbGenerator } from '../py/rdb/generator.js';
 export type { PyRdbGeneratorSchema } from '../py/rdb/schema';

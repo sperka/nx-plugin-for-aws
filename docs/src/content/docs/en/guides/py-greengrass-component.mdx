@@ -1,0 +1,73 @@
+---
+title: py#greengrass-component
+description: Add an AWS IoT Greengrass component to a Python project
+generator: py#greengrass-component
+---
+
+import { FileTree } from '@astrojs/starlight/components';
+import RunGenerator from '@components/run-generator.astro';
+import GeneratorParameters from '@components/generator-parameters.astro';
+import Infrastructure from '@components/infrastructure.astro';
+import Snippet from '@components/snippet.astro';
+import OptionFilter from '@components/option-filter.astro';
+
+TODO: Add an overview of your generator here.
+
+## Usage
+
+### Generate a py#greengrass-component
+
+You can generate a py#greengrass-component in two ways:
+
+<RunGenerator generator="py#greengrass-component" />
+
+### Options
+
+<GeneratorParameters generator="py#greengrass-component" />
+
+## Generator Output
+
+The generator will create the following project files:
+
+<FileTree>
+ - todo.txt Update this section with what your generator generates!
+</FileTree>
+
+### Infrastructure
+
+<Snippet name="shared-constructs" />
+
+<Infrastructure>
+<Fragment slot="cdk">
+<FileTree>
+  - packages/common/constructs/src
+    - app
+      - todo.txt document app specific cdk constructs if any
+    - core
+      - todo.txt document core cdk constructs if any
+</FileTree>
+</Fragment>
+<Fragment slot="terraform">
+<FileTree>
+  - packages/common/terraform/src
+    - app
+      - todo.txt document app specific tf modules if any
+    - core
+      - todo.txt document core tf modules if any
+</FileTree>
+</Fragment>
+</Infrastructure>
+
+:::danger
+Delete this section if your generator does not create infrastructure
+:::
+
+## TODO: More Docs!
+
+Add more documentation detailing things like:
+
+- How to work with the project/code you've generated
+- What new project.json targets have been added and how to run them (using the NxCommands component)
+- Best practices when working with your generated project/code
+
+See the existing guides for concrete examples.
