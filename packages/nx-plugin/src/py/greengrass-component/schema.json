@@ -2,14 +2,53 @@
   "$schema": "https://json-schema.org/schema",
   "$id": "py#greengrass-component",
   "title": "py#greengrass-component",
+  "x-label": "Greengrass Component",
   "description": "Add an AWS IoT Greengrass component to a Python project",
   "type": "object",
   "properties": {
-    "exampleOption": {
+    "project": {
       "type": "string",
-      "description": "An example option. Refer to https://nx.dev/extending-nx/recipes/generator-options for more info",
+      "description": "The python project to add the Greengrass component to",
+      "x-prompt": "Select the project to add the Greengrass component to",
+      "x-dropdown": "projects"
+    },
+    "name": {
+      "type": "string",
+      "description": "The name of the component to add",
       "x-priority": "important",
-      "x-prompt": "This is an example option!"
+      "$default": {
+        "$source": "argv",
+        "index": 0
+      },
+      "x-prompt": "What name would you like your Greengrass component to have? i.e: MyComponent"
+    },
+    "componentName": {
+      "type": "string",
+      "description": "The recipe ComponentName. Defaults to a reversed-domain name derived from your workspace's npm scope and the component name, eg. com.myscope.MyComponent."
+    },
+    "componentVersion": {
+      "type": "string",
+      "description": "The initial recipe ComponentVersion. Written into recipe.yaml once; the recipe is user-owned from then on.",
+      "default": "1.0.0"
+    },
+    "publisher": {
+      "type": "string",
+      "description": "The recipe ComponentPublisher. Defaults to the greengrass.publisher set in aws-nx-plugin.config.mts, else your workspace's npm scope."
+    },
+    "ipc": {
+      "type": "boolean",
+      "description": "Whether to wire the Greengrass IPC client (awsiotsdk) and a least-privilege accessControl block scoped to the component's own topic.",
+      "default": true,
+      "x-priority": "important",
+      "x-prompt": "Would you like to use the Greengrass IPC client to publish/subscribe to local topics?"
+    },
+    "platform": {
+      "type": "string",
+      "description": "The core device platform to vendor Python dependencies for and to write into the recipe manifest.",
+      "enum": ["linux-amd64", "linux-arm64"],
+      "default": "linux-arm64",
+      "x-priority": "important",
+      "x-prompt": "Which core device platform would you like to target?"
     },
     "preferInstallDependencies": {
       "type": "boolean",
@@ -17,5 +56,5 @@
       "default": true
     }
   },
-  "required": ["exampleOption"]
+  "required": ["project", "name"]
 }

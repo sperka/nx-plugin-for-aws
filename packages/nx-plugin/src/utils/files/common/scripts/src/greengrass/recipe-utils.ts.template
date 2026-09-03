@@ -1,0 +1,209 @@
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import yaml from 'js-yaml';
+
+/**
+ * A narrow view of a Greengrass recipe: only the keys this vended toolchain
+ * reads. Every other key - including unknown lifecycle keys - is preserved
+ * untouched wherever a recipe is re-serialized, because the recipe is
+ * user-owned and this toolchain does not model the full recipe schema.
+ */
+export type GreengrassRecipe = Record<string, unknown>;
+
+export interface ResolvedComponent {
+  readonly componentName: string;
+  readonly componentVersion: string;
+  readonly recipe: GreengrassRecipe;
+}
+
+const COMPONENT_NAME_PATTERN = /^[a-zA-Z0-9-_.]+$/;
+const RESERVED_COMPONENT_NAME_PREFIX = 'aws.greengrass.';
+const MAX_COMPONENT_NAME_LENGTH = 128;
+// https://semver.org/#is-there-a-suggested-regular-expression-regex-to-check-a-semver-string
+const SEMVER_PATTERN =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
+const DECOMPRESSED_PATH_TOKEN = '{artifacts:decompressedPath}';
+
+/** Reads and parses a recipe.yaml. Throws with a clear message on failure. */
+export function loadRecipe(recipePath: string): GreengrassRecipe {
+  let raw: string;
+  try {
+    raw = readFileSync(recipePath, 'utf-8');
+  } catch {
+    throw new Error(`Cannot read recipe at "${recipePath}"`);
+  }
+  const parsed = yaml.load(raw);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`"${recipePath}" is not a Greengrass recipe document`);
+  }
+  return parsed as GreengrassRecipe;
+}
+
+/**
+ * Validates only the recipe fields this vended toolchain consumes:
+ * `ComponentName`, `ComponentVersion`, and the `{artifacts:decompressedPath}`
+ * reference the local-deploy lifecycle script must carry so that a deployed
+ * component can find its own artifact once Greengrass decompresses it.
+ *
+ * Throws a single `Error` listing every violation when the recipe is invalid.
+ */
+export function validateRecipe(
+  recipe: GreengrassRecipe,
+  componentDirName: string,
+): ResolvedComponent {
+  const errors: string[] = [];
+
+  const componentName = recipe.ComponentName;
+  if (typeof componentName !== 'string' || componentName.length === 0) {
+    errors.push('ComponentName is required and must be a non-empty string');
+  } else {
+    if (componentName.length > MAX_COMPONENT_NAME_LENGTH) {
+      errors.push(
+        `ComponentName must be at most ${MAX_COMPONENT_NAME_LENGTH} characters, got ${componentName.length}`,
+      );
+    }
+    if (!COMPONENT_NAME_PATTERN.test(componentName)) {
+      errors.push(
+        'ComponentName may only contain letters, numbers, "-", "_" and "."',
+      );
+    }
+    if (componentName.startsWith(RESERVED_COMPONENT_NAME_PREFIX)) {
+      errors.push(
+        `ComponentName must not start with the reserved prefix "${RESERVED_COMPONENT_NAME_PREFIX}"`,
+      );
+    }
+  }
+
+  const componentVersion = recipe.ComponentVersion;
+  if (
+    typeof componentVersion !== 'string' ||
+    !SEMVER_PATTERN.test(componentVersion)
+  ) {
+    errors.push(
+      'ComponentVersion is required and must be a valid semver version (e.g. "1.0.0")',
+    );
+  }
+
+  if (!referencesDecompressedComponentDir(recipe, componentDirName)) {
+    errors.push(
+      `No lifecycle script references "${DECOMPRESSED_PATH_TOKEN}/${componentDirName}/" - ` +
+        `the Run script path must match the artifact zip base name ("${componentDirName}.zip")`,
+    );
+  }
+
+  if (!declaresComponentZipArtifact(recipe, componentDirName)) {
+    errors.push(
+      `No manifest declares an artifact whose Uri ends in "/${componentDirName}.zip" - ` +
+        'Greengrass only unarchives a declared artifact, so ' +
+        `"${DECOMPRESSED_PATH_TOKEN}/${componentDirName}/" would never resolve on the device`,
+    );
+  }
+
+  if (errors.length > 0) {
+    throw new Error(
+      `Invalid recipe:\n${errors.map((e) => `  - ${e}`).join('\n')}`,
+    );
+  }
+
+  return {
+    componentName: componentName as string,
+    componentVersion: componentVersion as string,
+    recipe,
+  };
+}
+
+/**
+ * Recursively searches every string value for a decompressedPath reference to
+ * `componentDirName`, wherever the recipe places its Lifecycle block (top
+ * level or per-manifest).
+ */
+function referencesDecompressedComponentDir(
+  value: unknown,
+  componentDirName: string,
+): boolean {
+  const needle = `${DECOMPRESSED_PATH_TOKEN}/${componentDirName}/`;
+  if (typeof value === 'string') {
+    return value.includes(needle);
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) =>
+      referencesDecompressedComponentDir(entry, componentDirName),
+    );
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.values(value).some((entry) =>
+      referencesDecompressedComponentDir(entry, componentDirName),
+    );
+  }
+  return false;
+}
+
+/**
+ * Whether any manifest declares an artifact whose Uri basename is
+ * `<componentDirName>.zip`, which is the name the artifact this toolchain
+ * writes actually carries. Case-insensitive on the key so a recipe authored
+ * with `URI` (as some AWS samples spell it) still matches.
+ */
+function declaresComponentZipArtifact(
+  recipe: GreengrassRecipe,
+  componentDirName: string,
+): boolean {
+  const suffix = `/${componentDirName}.zip`;
+  const manifests = Array.isArray(recipe.Manifests) ? recipe.Manifests : [];
+  return manifests.some((manifest) => {
+    const artifacts = (manifest as { Artifacts?: unknown })?.Artifacts;
+    if (!Array.isArray(artifacts)) {
+      return false;
+    }
+    return artifacts.some((artifact) => {
+      if (artifact === null || typeof artifact !== 'object') {
+        return false;
+      }
+      return Object.entries(artifact as Record<string, unknown>).some(
+        ([key, value]) =>
+          key.toLowerCase() === 'uri' &&
+          typeof value === 'string' &&
+          value.endsWith(suffix),
+      );
+    });
+  });
+}
+
+/**
+ * Reads the single resolved recipe a prior `-artifact` run wrote under a
+ * `greengrass-build/recipes` directory, for scripts that only need to know
+ * which component and version were last built.
+ */
+export function readResolvedRecipe(recipesDir: string): ResolvedComponent {
+  let files: string[];
+  try {
+    files = readdirSync(recipesDir).filter(
+      (f) => f.endsWith('.yaml') || f.endsWith('.yml'),
+    );
+  } catch {
+    throw new Error(
+      `No resolved recipes found at "${recipesDir}" - run the component's "-artifact" target first`,
+    );
+  }
+  if (files.length !== 1) {
+    throw new Error(
+      `Expected exactly one resolved recipe in "${recipesDir}", found ${files.length}`,
+    );
+  }
+  const recipePath = join(recipesDir, files[0]);
+  const recipe = loadRecipe(recipePath);
+  const { ComponentName, ComponentVersion } = recipe;
+  if (
+    typeof ComponentName !== 'string' ||
+    typeof ComponentVersion !== 'string'
+  ) {
+    throw new Error(
+      `"${recipePath}" is missing ComponentName/ComponentVersion`,
+    );
+  }
+  return {
+    componentName: ComponentName,
+    componentVersion: ComponentVersion,
+    recipe,
+  };
+}

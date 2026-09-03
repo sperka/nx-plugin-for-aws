@@ -4,10 +4,12 @@
  */
 import type { LicenseConfig } from '../../license/config-types.js';
 import type { ContainersConfig } from '../containers.js';
+import type { GreengrassConfig } from '../greengrass/constants.js';
 import type { IacConfig } from '../iac.js';
 
 export * from '../../license/config-types.js';
 export type { Containers, ContainersConfig } from '../containers.js';
+export type { GreengrassConfig } from '../greengrass/constants.js';
 export type { Iac, IacConfig } from '../iac.js';
 
 /**
@@ -40,6 +42,11 @@ export interface AwsNxPluginConfig {
    * Configuration for container tooling (build/push/login)
    */
   containers?: ContainersConfig;
+
+  /**
+   * Configuration for the Greengrass component generator
+   */
+  greengrass?: GreengrassConfig;
 
   /**
    * Configuration for how generators manage dependencies via the package

@@ -17,6 +17,7 @@ import {
   pyAgentGenerator,
   pyApiGenerator,
   pyDynamoDBGenerator,
+  pyGreengrassComponentGenerator,
   pyLambdaFunctionGenerator,
   pyMcpServerGenerator,
   pyProjectGenerator,
@@ -223,6 +224,14 @@ export const internalTestMatrixGenerator = async (
     name: 'my-function',
     event: 'Any',
     iac: 'inherit',
+    ...defaults,
+  });
+
+  // Greengrass component — packaging and local deployment only; there is no
+  // `infra`/`iac` option yet, so this generator takes no `iac: 'inherit'`.
+  await pyGreengrassComponentGenerator(tree, {
+    project: py('py-project'),
+    name: 'my-greengrass-component',
     ...defaults,
   });
 

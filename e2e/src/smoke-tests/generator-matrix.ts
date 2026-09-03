@@ -128,6 +128,13 @@ export const runGeneratorMatrix = async (
     opts,
   );
 
+  // Greengrass component (packaging + local deployment; no infra in this
+  // generator yet — component-version publication is a later addition).
+  await runCLI(
+    `generate @aws/nx-plugin:py#greengrass-component --project=e2e_test.py_project --name=my-greengrass-component --no-interactive${deferFlag}`,
+    opts,
+  );
+
   // Python MCP + Strands agent (hosted on AgentCore).
   await runCLI(
     `generate @aws/nx-plugin:py#mcp-server --project=py_project --name=my-mcp-server --infra=agentcore --no-interactive${deferFlag}`,

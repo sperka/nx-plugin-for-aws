@@ -136,7 +136,7 @@ Add capabilities to existing projects:
 | `connection`              | Integrates a source project with a target project                                                                  |
 | `license`                 | Add LICENSE files and configure source code licence headers                                                        |
 | `py#api`                  | Create a Python API                                                                                                |
-| `py#greengrass-component` | Add an AWS IoT Greengrass component to a Python project                                                            |
+| `py#greengrass-component` | Add an AWS IoT Greengrass component to a Python project (experimental)                                             |
 | `py#lambda-function`      | Adds a lambda function to a python project                                                                         |
 | `py#mcp-server`           | Generate a Python Model Context Protocol (MCP) server for providing context to Large Language Models               |
 | `py#project`              | Generates a Python project                                                                                         |

@@ -1,0 +1,578 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`sharedGreengrassScriptsGenerator > should vend the greengrass scripts into packages/common/scripts > packages/common/scripts/src/greengrass/build-artifact.ts 1`] = `
+"import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import yaml from 'js-yaml';
+import { loadRecipe, validateRecipe } from './recipe-utils.js';
+import { writeZip, type ZipEntry } from './zip-writer.js';
+
+/*
+ * Usage: build-artifact.ts <project-root> <component-dir> <dist>
+ *
+ * <project-root>  path to the host project (e.g. a Python project root)
+ * <component-dir> the component's directory name under <project-root>/greengrass/,
+ *                  which also becomes the artifact zip's base name
+ * <dist>           the component's dist root: reads <dist>/vendor (produced by
+ *                  the "-vendor" target this target depends on) and writes
+ *                  <dist>/greengrass-build/{recipes,artifacts}
+ *
+ * Everything under <project-root>/greengrass/<component-dir>/ is packaged
+ * except recipe.yaml and gdk-config.json, which are framework metadata, not
+ * deployed code.
+ */
+
+const log = (msg: string): void => console.error(\`[build-artifact] \${msg}\`);
+
+function usage(): never {
+  log('Usage: build-artifact.ts <project-root> <component-dir> <dist>');
+  process.exit(1);
+}
+
+/** Every file under \`dir\`, recursively, excluding top-level names in \`exclude\`. */
+function collectFiles(dir: string, exclude: ReadonlySet<string>): string[] {
+  const results: string[] = [];
+  const walk = (current: string, isRoot: boolean): void => {
+    for (const entry of readdirSync(current)) {
+      if (isRoot && exclude.has(entry)) continue;
+      const fullPath = join(current, entry);
+      if (statSync(fullPath).isDirectory()) {
+        walk(fullPath, false);
+      } else {
+        results.push(fullPath);
+      }
+    }
+  };
+  walk(dir, true);
+  return results;
+}
+
+/** Zip entries for every file under \`dir\`, named relative to \`dir\` with forward slashes. */
+function entriesFrom(dir: string, exclude: ReadonlySet<string>): ZipEntry[] {
+  return collectFiles(dir, exclude).map((filePath) => ({
+    name: relative(dir, filePath).split('\\\\').join('/'),
+    data: readFileSync(filePath),
+  }));
+}
+
+function main(): void {
+  const [projectRoot, componentDirName, dist] = process.argv.slice(2);
+  if (!projectRoot || !componentDirName || !dist) {
+    usage();
+  }
+
+  const componentDir = join(projectRoot, 'greengrass', componentDirName);
+  const recipePath = join(componentDir, 'recipe.yaml');
+
+  let componentName: string;
+  let componentVersion: string;
+  let recipe: ReturnType<typeof loadRecipe>;
+  try {
+    recipe = loadRecipe(recipePath);
+    ({ componentName, componentVersion } = validateRecipe(
+      recipe,
+      componentDirName,
+    ));
+  } catch (e) {
+    log((e as Error).message);
+    process.exit(1);
+    return;
+  }
+
+  const vendorDir = join(dist, 'vendor');
+  const artifactDir = join(
+    dist,
+    'greengrass-build',
+    'artifacts',
+    componentName,
+    componentVersion,
+  );
+  const recipesDir = join(dist, 'greengrass-build', 'recipes');
+  mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(recipesDir, { recursive: true });
+
+  // Framework metadata that ships alongside the recipe but never inside the
+  // deployed artifact.
+  const entries = entriesFrom(
+    componentDir,
+    new Set(['recipe.yaml', 'gdk-config.json']),
+  );
+  if (existsSync(vendorDir)) {
+    // requirements.txt is the "-vendor" target's own intermediate, not
+    // something the device needs.
+    entries.push(...entriesFrom(vendorDir, new Set(['requirements.txt'])));
+  }
+  if (entries.length === 0) {
+    log(
+      \`Nothing to package: "\${componentDir}" has no deployable files and "\${vendorDir}" does not exist\`,
+    );
+    process.exit(1);
+    return;
+  }
+
+  const zipPath = join(artifactDir, \`\${componentDirName}.zip\`);
+  writeZip(entries, zipPath);
+  log(\`wrote \${zipPath}\`);
+
+  // The BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION artifact URI placeholders
+  // are left exactly as authored - a later IaC step substitutes them.
+  const recipeOutPath = join(
+    recipesDir,
+    \`\${componentName}-\${componentVersion}.yaml\`,
+  );
+  writeFileSync(recipeOutPath, yaml.dump(recipe, { lineWidth: -1 }));
+  log(\`wrote \${recipeOutPath}\`);
+}
+
+main();
+"
+`;
+
+exports[`sharedGreengrassScriptsGenerator > should vend the greengrass scripts into packages/common/scripts > packages/common/scripts/src/greengrass/component-logs.ts 1`] = `
+"import { spawn } from 'node:child_process';
+import { join } from 'node:path';
+
+/*
+ * Usage: component-logs.ts <component-name>
+ *
+ * <component-name> the recipe's ComponentName, e.g. "com.example.MyComponent"
+ *
+ * Tails <GREENGRASS_ROOT>/logs/<component-name>.log in follow mode. Ctrl-C
+ * (SIGINT) stops it - this target never exits on its own.
+ */
+
+const log = (msg: string): void => console.error(\`[component-logs] \${msg}\`);
+
+function usage(): never {
+  log('Usage: component-logs.ts <component-name>');
+  process.exit(1);
+}
+
+function main(): void {
+  const [componentName] = process.argv.slice(2);
+  if (!componentName) {
+    usage();
+  }
+
+  const greengrassRoot = process.env.GREENGRASS_ROOT || '/greengrass/v2';
+  const logPath = join(greengrassRoot, 'logs', \`\${componentName}.log\`);
+
+  log(\`Tailing \${logPath} - Ctrl-C to stop\`);
+  const tail = spawn('tail', ['-n', '200', '-f', logPath], {
+    stdio: 'inherit',
+  });
+
+  const stop = (): void => {
+    tail.kill();
+    process.exit(0);
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+
+  tail.on('exit', (code) => process.exit(code ?? 0));
+  tail.on('error', (err) => {
+    log(\`Failed to start tail: \${err.message}\`);
+    process.exit(1);
+  });
+}
+
+main();
+"
+`;
+
+exports[`sharedGreengrassScriptsGenerator > should vend the greengrass scripts into packages/common/scripts > packages/common/scripts/src/greengrass/deploy-local.ts 1`] = `
+"import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+import { readResolvedRecipe } from './recipe-utils.js';
+
+/*
+ * Usage: deploy-local.ts <dist>
+ *
+ * <dist> the component's dist root written by the "-artifact" target: reads
+ *        <dist>/greengrass-build/{recipes,artifacts}
+ *
+ * Creates one local deployment via greengrass-cli and exits - it does not
+ * tail or watch the deployment.
+ */
+
+const log = (msg: string): void => console.error(\`[deploy-local] \${msg}\`);
+
+function usage(): never {
+  log('Usage: deploy-local.ts <dist>');
+  process.exit(1);
+}
+
+function main(): void {
+  const [dist] = process.argv.slice(2);
+  if (!dist) {
+    usage();
+  }
+
+  const greengrassRoot = process.env.GREENGRASS_ROOT || '/greengrass/v2';
+  const recipeDir = join(dist, 'greengrass-build', 'recipes');
+  const artifactDir = join(dist, 'greengrass-build', 'artifacts');
+
+  let componentName: string;
+  let componentVersion: string;
+  try {
+    ({ componentName, componentVersion } = readResolvedRecipe(recipeDir));
+  } catch (e) {
+    log((e as Error).message);
+    process.exit(1);
+    return;
+  }
+
+  const cli = join(greengrassRoot, 'bin', 'greengrass-cli');
+  const args = [
+    'deployment',
+    'create',
+    '--recipeDir',
+    recipeDir,
+    '--artifactDir',
+    artifactDir,
+    '--merge',
+    \`\${componentName}=\${componentVersion}\`,
+  ];
+
+  log(\`Deploying \${componentName}=\${componentVersion} via \${cli}\`);
+  const result = spawnSync(cli, args, { stdio: 'inherit' });
+  if (result.error) {
+    log(
+      \`Cannot run "\${cli}": \${result.error.message}. Run this target on the \` +
+        'Greengrass core device, and set GREENGRASS_ROOT when the nucleus is ' +
+        'not installed at /greengrass/v2.',
+    );
+    process.exit(1);
+  }
+  process.exit(result.status ?? 1);
+}
+
+main();
+"
+`;
+
+exports[`sharedGreengrassScriptsGenerator > should vend the greengrass scripts into packages/common/scripts > packages/common/scripts/src/greengrass/recipe-utils.ts 1`] = `
+"import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import yaml from 'js-yaml';
+
+/**
+ * A narrow view of a Greengrass recipe: only the keys this vended toolchain
+ * reads. Every other key - including unknown lifecycle keys - is preserved
+ * untouched wherever a recipe is re-serialized, because the recipe is
+ * user-owned and this toolchain does not model the full recipe schema.
+ */
+export type GreengrassRecipe = Record<string, unknown>;
+
+export interface ResolvedComponent {
+  readonly componentName: string;
+  readonly componentVersion: string;
+  readonly recipe: GreengrassRecipe;
+}
+
+const COMPONENT_NAME_PATTERN = /^[a-zA-Z0-9-_.]+$/;
+const RESERVED_COMPONENT_NAME_PREFIX = 'aws.greengrass.';
+const MAX_COMPONENT_NAME_LENGTH = 128;
+// https://semver.org/#is-there-a-suggested-regular-expression-regex-to-check-a-semver-string
+const SEMVER_PATTERN =
+  /^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$/;
+const DECOMPRESSED_PATH_TOKEN = '{artifacts:decompressedPath}';
+
+/** Reads and parses a recipe.yaml. Throws with a clear message on failure. */
+export function loadRecipe(recipePath: string): GreengrassRecipe {
+  let raw: string;
+  try {
+    raw = readFileSync(recipePath, 'utf-8');
+  } catch {
+    throw new Error(\`Cannot read recipe at "\${recipePath}"\`);
+  }
+  const parsed = yaml.load(raw);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(\`"\${recipePath}" is not a Greengrass recipe document\`);
+  }
+  return parsed as GreengrassRecipe;
+}
+
+/**
+ * Validates only the recipe fields this vended toolchain consumes:
+ * \`ComponentName\`, \`ComponentVersion\`, and the \`{artifacts:decompressedPath}\`
+ * reference the local-deploy lifecycle script must carry so that a deployed
+ * component can find its own artifact once Greengrass decompresses it.
+ *
+ * Throws a single \`Error\` listing every violation when the recipe is invalid.
+ */
+export function validateRecipe(
+  recipe: GreengrassRecipe,
+  componentDirName: string,
+): ResolvedComponent {
+  const errors: string[] = [];
+
+  const componentName = recipe.ComponentName;
+  if (typeof componentName !== 'string' || componentName.length === 0) {
+    errors.push('ComponentName is required and must be a non-empty string');
+  } else {
+    if (componentName.length > MAX_COMPONENT_NAME_LENGTH) {
+      errors.push(
+        \`ComponentName must be at most \${MAX_COMPONENT_NAME_LENGTH} characters, got \${componentName.length}\`,
+      );
+    }
+    if (!COMPONENT_NAME_PATTERN.test(componentName)) {
+      errors.push(
+        'ComponentName may only contain letters, numbers, "-", "_" and "."',
+      );
+    }
+    if (componentName.startsWith(RESERVED_COMPONENT_NAME_PREFIX)) {
+      errors.push(
+        \`ComponentName must not start with the reserved prefix "\${RESERVED_COMPONENT_NAME_PREFIX}"\`,
+      );
+    }
+  }
+
+  const componentVersion = recipe.ComponentVersion;
+  if (
+    typeof componentVersion !== 'string' ||
+    !SEMVER_PATTERN.test(componentVersion)
+  ) {
+    errors.push(
+      'ComponentVersion is required and must be a valid semver version (e.g. "1.0.0")',
+    );
+  }
+
+  if (!referencesDecompressedComponentDir(recipe, componentDirName)) {
+    errors.push(
+      \`No lifecycle script references "\${DECOMPRESSED_PATH_TOKEN}/\${componentDirName}/" - \` +
+        \`the Run script path must match the artifact zip base name ("\${componentDirName}.zip")\`,
+    );
+  }
+
+  if (!declaresComponentZipArtifact(recipe, componentDirName)) {
+    errors.push(
+      \`No manifest declares an artifact whose Uri ends in "/\${componentDirName}.zip" - \` +
+        'Greengrass only unarchives a declared artifact, so ' +
+        \`"\${DECOMPRESSED_PATH_TOKEN}/\${componentDirName}/" would never resolve on the device\`,
+    );
+  }
+
+  if (errors.length > 0) {
+    throw new Error(
+      \`Invalid recipe:\\n\${errors.map((e) => \`  - \${e}\`).join('\\n')}\`,
+    );
+  }
+
+  return {
+    componentName: componentName as string,
+    componentVersion: componentVersion as string,
+    recipe,
+  };
+}
+
+/**
+ * Recursively searches every string value for a decompressedPath reference to
+ * \`componentDirName\`, wherever the recipe places its Lifecycle block (top
+ * level or per-manifest).
+ */
+function referencesDecompressedComponentDir(
+  value: unknown,
+  componentDirName: string,
+): boolean {
+  const needle = \`\${DECOMPRESSED_PATH_TOKEN}/\${componentDirName}/\`;
+  if (typeof value === 'string') {
+    return value.includes(needle);
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) =>
+      referencesDecompressedComponentDir(entry, componentDirName),
+    );
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.values(value).some((entry) =>
+      referencesDecompressedComponentDir(entry, componentDirName),
+    );
+  }
+  return false;
+}
+
+/**
+ * Whether any manifest declares an artifact whose Uri basename is
+ * \`<componentDirName>.zip\`, which is the name the artifact this toolchain
+ * writes actually carries. Case-insensitive on the key so a recipe authored
+ * with \`URI\` (as some AWS samples spell it) still matches.
+ */
+function declaresComponentZipArtifact(
+  recipe: GreengrassRecipe,
+  componentDirName: string,
+): boolean {
+  const suffix = \`/\${componentDirName}.zip\`;
+  const manifests = Array.isArray(recipe.Manifests) ? recipe.Manifests : [];
+  return manifests.some((manifest) => {
+    const artifacts = (manifest as { Artifacts?: unknown })?.Artifacts;
+    if (!Array.isArray(artifacts)) {
+      return false;
+    }
+    return artifacts.some((artifact) => {
+      if (artifact === null || typeof artifact !== 'object') {
+        return false;
+      }
+      return Object.entries(artifact as Record<string, unknown>).some(
+        ([key, value]) =>
+          key.toLowerCase() === 'uri' &&
+          typeof value === 'string' &&
+          value.endsWith(suffix),
+      );
+    });
+  });
+}
+
+/**
+ * Reads the single resolved recipe a prior \`-artifact\` run wrote under a
+ * \`greengrass-build/recipes\` directory, for scripts that only need to know
+ * which component and version were last built.
+ */
+export function readResolvedRecipe(recipesDir: string): ResolvedComponent {
+  let files: string[];
+  try {
+    files = readdirSync(recipesDir).filter(
+      (f) => f.endsWith('.yaml') || f.endsWith('.yml'),
+    );
+  } catch {
+    throw new Error(
+      \`No resolved recipes found at "\${recipesDir}" - run the component's "-artifact" target first\`,
+    );
+  }
+  if (files.length !== 1) {
+    throw new Error(
+      \`Expected exactly one resolved recipe in "\${recipesDir}", found \${files.length}\`,
+    );
+  }
+  const recipePath = join(recipesDir, files[0]);
+  const recipe = loadRecipe(recipePath);
+  const { ComponentName, ComponentVersion } = recipe;
+  if (
+    typeof ComponentName !== 'string' ||
+    typeof ComponentVersion !== 'string'
+  ) {
+    throw new Error(
+      \`"\${recipePath}" is missing ComponentName/ComponentVersion\`,
+    );
+  }
+  return {
+    componentName: ComponentName,
+    componentVersion: ComponentVersion,
+    recipe,
+  };
+}
+"
+`;
+
+exports[`sharedGreengrassScriptsGenerator > should vend the greengrass scripts into packages/common/scripts > packages/common/scripts/src/greengrass/zip-writer.ts 1`] = `
+"import { writeFileSync } from 'node:fs';
+// crc32 from node:zlib requires Node >= 20.15 / 22.2.
+import { crc32, deflateRawSync } from 'node:zlib';
+
+/** One file to place in the archive, at a forward-slash relative path. */
+export interface ZipEntry {
+  readonly name: string;
+  readonly data: Buffer;
+}
+
+const LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
+const CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
+const END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50;
+// 20 = version 2.0, the lowest version that documents DEFLATE support.
+const VERSION_NEEDED = 20;
+const DEFLATE_METHOD = 8;
+const STORED_METHOD = 0;
+
+/** MS-DOS date/time fields, as the ZIP local/central headers require. */
+function dosDateTime(date: Date): { time: number; date: number } {
+  const time =
+    ((date.getHours() & 0x1f) << 11) |
+    ((date.getMinutes() & 0x3f) << 5) |
+    ((Math.floor(date.getSeconds() / 2)) & 0x1f);
+  const dosDate =
+    (((date.getFullYear() - 1980) & 0x7f) << 9) |
+    (((date.getMonth() + 1) & 0xf) << 5) |
+    (date.getDate() & 0x1f);
+  return { time, date: dosDate };
+}
+
+/**
+ * Writes \`entries\` to a plain ZIP archive at \`outPath\` with no external
+ * dependency - only \`node:zlib\` for DEFLATE and CRC-32. Supports exactly what
+ * Greengrass artifact packaging needs: a flat set of files, no encryption, no
+ * zip64 (component artifacts are small). Cross-platform: no shell-out to a
+ * system \`zip\` binary.
+ */
+export function writeZip(entries: readonly ZipEntry[], outPath: string): void {
+  const fileChunks: Buffer[] = [];
+  const centralRecords: Buffer[] = [];
+  let offset = 0;
+  const { time, date } = dosDateTime(new Date());
+
+  for (const entry of entries) {
+    const nameBuf = Buffer.from(entry.name, 'utf-8');
+    const entryCrc32 = crc32(entry.data) >>> 0;
+    const compressed = deflateRawSync(entry.data);
+    const useDeflate = compressed.length < entry.data.length;
+    const method = useDeflate ? DEFLATE_METHOD : STORED_METHOD;
+    const payload = useDeflate ? compressed : entry.data;
+
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(LOCAL_FILE_HEADER_SIGNATURE, 0);
+    localHeader.writeUInt16LE(VERSION_NEEDED, 4);
+    localHeader.writeUInt16LE(0, 6); // general purpose flags
+    localHeader.writeUInt16LE(method, 8);
+    localHeader.writeUInt16LE(time, 10);
+    localHeader.writeUInt16LE(date, 12);
+    localHeader.writeUInt32LE(entryCrc32, 14);
+    localHeader.writeUInt32LE(payload.length, 18);
+    localHeader.writeUInt32LE(entry.data.length, 22);
+    localHeader.writeUInt16LE(nameBuf.length, 26);
+    localHeader.writeUInt16LE(0, 28); // extra field length
+
+    fileChunks.push(localHeader, nameBuf, payload);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(CENTRAL_DIRECTORY_SIGNATURE, 0);
+    centralHeader.writeUInt16LE(VERSION_NEEDED, 4); // version made by
+    centralHeader.writeUInt16LE(VERSION_NEEDED, 6); // version needed to extract
+    centralHeader.writeUInt16LE(0, 8); // general purpose flags
+    centralHeader.writeUInt16LE(method, 10);
+    centralHeader.writeUInt16LE(time, 12);
+    centralHeader.writeUInt16LE(date, 14);
+    centralHeader.writeUInt32LE(entryCrc32, 16);
+    centralHeader.writeUInt32LE(payload.length, 20);
+    centralHeader.writeUInt32LE(entry.data.length, 24);
+    centralHeader.writeUInt16LE(nameBuf.length, 28);
+    centralHeader.writeUInt16LE(0, 30); // extra field length
+    centralHeader.writeUInt16LE(0, 32); // file comment length
+    centralHeader.writeUInt16LE(0, 34); // disk number start
+    centralHeader.writeUInt16LE(0, 36); // internal file attributes
+    centralHeader.writeUInt32LE(0, 38); // external file attributes
+    centralHeader.writeUInt32LE(offset, 42); // relative offset of local header
+
+    centralRecords.push(centralHeader, nameBuf);
+
+    offset += localHeader.length + nameBuf.length + payload.length;
+  }
+
+  const centralDirectory = Buffer.concat(centralRecords);
+  const centralDirectoryOffset = offset;
+
+  const endRecord = Buffer.alloc(22);
+  endRecord.writeUInt32LE(END_OF_CENTRAL_DIRECTORY_SIGNATURE, 0);
+  endRecord.writeUInt16LE(0, 4); // disk number
+  endRecord.writeUInt16LE(0, 6); // disk with central directory start
+  endRecord.writeUInt16LE(entries.length, 8); // entries on this disk
+  endRecord.writeUInt16LE(entries.length, 10); // total entries
+  endRecord.writeUInt32LE(centralDirectory.length, 12);
+  endRecord.writeUInt32LE(centralDirectoryOffset, 16);
+  endRecord.writeUInt16LE(0, 20); // comment length
+
+  writeFileSync(
+    outPath,
+    Buffer.concat([...fileChunks, centralDirectory, endRecord]),
+  );
+}
+"
+`;

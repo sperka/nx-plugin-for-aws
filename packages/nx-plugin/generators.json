@@ -165,7 +165,9 @@
       "factory": "./src/py/greengrass-component/generator",
       "schema": "./src/py/greengrass-component/schema.json",
       "description": "Add an AWS IoT Greengrass component to a Python project",
-      "metric": "g73"
+      "metric": "g73",
+      "guidePages": ["py-greengrass-component"],
+      "experimental": true
     },
     "py#lambda-function": {
       "factory": "./src/py/lambda-function/generator",
