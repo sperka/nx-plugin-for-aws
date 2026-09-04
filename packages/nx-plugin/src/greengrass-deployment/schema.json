@@ -2,14 +2,92 @@
   "$schema": "https://json-schema.org/schema",
   "$id": "greengrass-deployment",
   "title": "greengrass-deployment",
+  "x-label": "Greengrass Deployment",
   "description": "Generate a Greengrass deployment project, vending component-version and deployment CDK infrastructure",
   "type": "object",
   "properties": {
-    "exampleOption": {
+    "name": {
       "type": "string",
-      "description": "An example option. Refer to https://nx.dev/extending-nx/recipes/generator-options for more info",
+      "description": "Name of the Greengrass deployment project to generate",
+      "$default": {
+        "$source": "argv",
+        "index": 0
+      },
       "x-priority": "important",
-      "x-prompt": "This is an example option!"
+      "x-prompt": "What name would you like your Greengrass deployment to have? i.e: MyDeployment"
+    },
+    "directory": {
+      "type": "string",
+      "description": "The directory to store the project in.",
+      "default": "packages",
+      "x-priority": "important",
+      "x-prompt": "Which directory do you want to create the project in?"
+    },
+    "subDirectory": {
+      "type": "string",
+      "description": "The sub directory the project is placed in. By default this is the project name.",
+      "x-prompt": "Which sub directory do you want to create the project in? (By default this is the project name)"
+    },
+    "target": {
+      "type": "string",
+      "enum": ["thing-group", "thing", "existing-arn"],
+      "default": "thing-group",
+      "description": "What this deployment targets. thing-group creates a new AWS::IoT::ThingGroup; thing and existing-arn import an existing thing or thing/thing-group by ARN.",
+      "x-priority": "important",
+      "x-prompt": "What would you like this deployment to target?"
+    },
+    "thingGroupName": {
+      "type": "string",
+      "description": "Name of the AWS IoT thing group to create and deploy to. Required (and only used) when target=thing-group."
+    },
+    "thingName": {
+      "type": "string",
+      "description": "Name of an existing AWS IoT thing to deploy to (imported, not created). Required (and only used) when target=thing."
+    },
+    "targetArn": {
+      "type": "string",
+      "description": "ARN of an existing AWS IoT thing or thing group to deploy to (imported, not created). Required (and only used) when target=existing-arn."
+    },
+    "parentTargetArn": {
+      "type": "string",
+      "description": "ARN of the parent deployment, for a subdeployment onto a nested thing group."
+    },
+    "tokenExchangeRoleArn": {
+      "type": "string",
+      "description": "ARN of the core device(s) token exchange role to grant prefix-scoped s3:GetObject on the artifact bucket. When omitted, the guide documents the policy to attach by hand."
+    },
+    "artifactBucket": {
+      "type": "string",
+      "default": "create",
+      "description": "\"create\" to create a new retained artifact bucket, or the name of an existing S3 bucket to import instead."
+    },
+    "deploymentPolicy": {
+      "type": "string",
+      "enum": ["default", "no-rollback", "rollback"],
+      "default": "default",
+      "description": "The deployment's failure handling policy. default leaves the service default (ROLLBACK); no-rollback sets DO_NOTHING explicitly; rollback sets ROLLBACK explicitly."
+    },
+    "nucleus": {
+      "type": "string",
+      "enum": ["classic", "lite", "none"],
+      "default": "classic",
+      "description": "The Greengrass nucleus your fleet runs. Documentation only today - nucleus lite supports a narrower set of recipe keys and IPC operations than classic, so the guide surfaces a capability warning when lite is selected; it does not change the generated infrastructure."
+    },
+    "infra": {
+      "type": "string",
+      "enum": ["deployment", "none"],
+      "default": "deployment",
+      "description": "Infrastructure to provision for this deployment.",
+      "x-priority": "important",
+      "x-prompt": "Which infrastructure would you like to provision?"
+    },
+    "iac": {
+      "type": "string",
+      "description": "The preferred IaC provider. By default this is inherited from your initial selection.",
+      "enum": ["inherit", "cdk", "terraform"],
+      "x-priority": "important",
+      "default": "inherit",
+      "x-prompt": "Which provider would you like to manage your infrastructure? (default: Inherit)"
     },
     "preferInstallDependencies": {
       "type": "boolean",
@@ -17,5 +95,5 @@
       "default": true
     }
   },
-  "required": ["exampleOption"]
+  "required": ["name"]
 }

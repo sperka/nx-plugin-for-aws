@@ -1,0 +1,222 @@
+import { createHash } from 'node:crypto';
+import { readFileSync, readdirSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { RemovalPolicy } from 'aws-cdk-lib';
+import { CfnComponentVersion } from 'aws-cdk-lib/aws-greengrassv2';
+import { BucketDeployment, Source } from 'aws-cdk-lib/aws-s3-deployment';
+import { Construct } from 'constructs';
+import yaml from 'js-yaml';
+import type { GreengrassArtifactBucket } from './artifact-bucket<% if (esm) { %>.js<% } %>';
+import {
+  readRecipeSummary,
+  substituteArtifactUris,
+} from './recipe<% if (esm) { %>.js<% } %>';
+
+export interface GreengrassComponentVersionProps {
+  /**
+   * Directory holding the one resolved recipe YAML the `<c>-artifact` target
+   * writes (`greengrass-build/recipes`). Read at synth time; a per-component
+   * subclass pins this via `import.meta.url` against its own file location.
+   */
+  readonly recipesDir: string;
+
+  /**
+   * Directory holding the `<c>-artifact` target's artifact tree
+   * (`greengrass-build/artifacts`), containing exactly one file at
+   * `<artifactsDir>/<ComponentName>/<ComponentVersion>/`.
+   */
+  readonly artifactsDir: string;
+
+  /** The shared artifact bucket this version's artifact is uploaded to. */
+  readonly bucket: GreengrassArtifactBucket;
+
+  /**
+   * Applied to both `DeletionPolicy` and `UpdateReplacePolicy` on the
+   * `AWS::GreengrassV2::ComponentVersion` resource. Component versions are
+   * immutable, so a stack replacement or deletion must never take an
+   * already-published version's CloudFormation-managed record with it -
+   * override to `DESTROY` only for short-lived e2e fixtures.
+   *
+   * @default RemovalPolicy.RETAIN
+   */
+  readonly removalPolicy?: RemovalPolicy;
+}
+
+/** Reads `dir`, returning the single file whose name passes `predicate`. */
+const findSingleFile = (
+  dir: string,
+  description: string,
+  predicate: (name: string) => boolean = () => true,
+): string => {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir).filter(predicate);
+  } catch {
+    throw new Error(
+      `No ${description} found at "${dir}" - run the component's "-artifact" target first.`,
+    );
+  }
+  if (entries.length !== 1) {
+    throw new Error(
+      `Expected exactly one ${description} in "${dir}", found ${entries.length}.`,
+    );
+  }
+  return join(dir, entries[0]);
+};
+
+/**
+ * Synth-time guard against two `GreengrassComponentVersion` constructs in the
+ * same synth claiming the same (`ComponentName`, `ComponentVersion`) pair
+ * with different content. Module-scoped, so it resets between separate `cdk
+ * synth` processes - it is not, and cannot be, a check against what's already
+ * published in the target AWS account (synth has no AWS credentials or
+ * network access). That check happens at deploy time instead, for free:
+ * `AWS::GreengrassV2::ComponentVersion` replaces on any `InlineRecipe` change
+ * (versions are immutable), and `CreateComponentVersion` itself rejects a
+ * resubmission of an existing version with different content - so
+ * CloudFormation fails the deployment rather than silently corrupting an
+ * already-published version. The hashed `destinationKeyPrefix` below is what
+ * protects the S3 *bytes* specifically: a content change always produces a
+ * different key, so a rebuild can never overwrite an object an
+ * already-published version's artifact URI still points at.
+ */
+const publishedHashesByVersion = new Map<string, string>();
+
+const assertNoSynthTimeVersionDrift = (
+  componentName: string,
+  componentVersion: string,
+  sha256: string,
+  recipePath: string,
+): void => {
+  const key = `${componentName}@${componentVersion}`;
+  const previousHash = publishedHashesByVersion.get(key);
+  if (previousHash !== undefined && previousHash !== sha256) {
+    throw new Error(
+      `Two different artifacts both claim to be ${key} in this synth ` +
+        `("${recipePath}" hashes to ${sha256}, a previous construct hashed to ${previousHash}). ` +
+        `Component versions are immutable - bump ComponentVersion in recipe.yaml before rebuilding.`,
+    );
+  }
+  publishedHashesByVersion.set(key, sha256);
+};
+
+/**
+ * Publishes one Greengrass component version: reads the resolved recipe and
+ * artifact a component's `<c>-artifact` target wrote, uploads the artifact to
+ * the shared {@link GreengrassArtifactBucket}, and emits an
+ * `AWS::GreengrassV2::ComponentVersion` with the recipe's artifact URI
+ * placeholders substituted for the real (deploy-time-resolvable) location.
+ */
+export class GreengrassComponentVersion extends Construct {
+  public readonly componentName: string;
+  public readonly componentVersion: string;
+  public readonly cfnComponentVersion: CfnComponentVersion;
+
+  constructor(
+    scope: Construct,
+    id: string,
+    props: GreengrassComponentVersionProps,
+  ) {
+    super(scope, id);
+
+    const removalPolicy = props.removalPolicy ?? RemovalPolicy.RETAIN;
+
+    const recipePath = findSingleFile(
+      props.recipesDir,
+      'resolved recipe',
+      (name) => name.endsWith('.yaml') || name.endsWith('.yml'),
+    );
+    const { componentName, componentVersion, raw } = readRecipeSummary(
+      readFileSync(recipePath, 'utf-8'),
+      recipePath,
+    );
+
+    const artifactDir = join(
+      props.artifactsDir,
+      componentName,
+      componentVersion,
+    );
+    const artifactPath = findSingleFile(
+      artifactDir,
+      `artifact for ${componentName}@${componentVersion}`,
+    );
+    const sha256 = createHash('sha256')
+      .update(readFileSync(artifactPath))
+      .digest('hex');
+
+    assertNoSynthTimeVersionDrift(
+      componentName,
+      componentVersion,
+      sha256,
+      recipePath,
+    );
+
+    const destinationKeyPrefix = `${componentName}/${componentVersion}/${sha256}/`;
+
+    // The source is the DIRECTORY holding the artifact, not the artifact
+    // itself. `BucketDeployment` unpacks its source asset and syncs the
+    // result, so every file lands at `destinationKeyPrefix + <its own name>`
+    // and the archive keeps the basename `<c>-artifact` gave it - which the
+    // recipe's Run lifecycle script depends on, since the nucleus derives
+    // `{artifacts:decompressedPath}/<name>` from the artifact URI's basename.
+    // Passing the archive itself with `extract: false` would instead publish
+    // it under the CDK asset's own hashed file name, which no recipe can
+    // reference.
+    //
+    // `prune: false`: the hashed prefix is unique to this content, so nothing
+    // else could ever share it, and there is nothing to prune.
+    // `retainOnDelete` mirrors `removalPolicy` so a stack deletion can't take
+    // a retained component version's artifact with it.
+    const artifactUpload = new BucketDeployment(this, 'ArtifactUpload', {
+      sources: [Source.asset(artifactDir)],
+      destinationBucket: props.bucket.bucket,
+      destinationKeyPrefix,
+      prune: false,
+      retainOnDelete: removalPolicy === RemovalPolicy.RETAIN,
+    });
+
+    // `bucket.bucketName` is typically an unresolved token; see the doc
+    // comment on `substituteArtifactUris` for why embedding it in the YAML
+    // string here is safe.
+    const substitutedBasenames = substituteArtifactUris(raw, {
+      bucketName: props.bucket.bucket.bucketName,
+      componentName,
+      componentVersion,
+      sha256,
+    });
+
+    // The recipe names its artifact; the build names the file. A mismatch
+    // would otherwise only surface on a device, as a failed artifact fetch.
+    const artifactBasename = basename(artifactPath);
+    const mismatched = substitutedBasenames.filter(
+      (name) => name !== artifactBasename,
+    );
+    if (mismatched.length > 0) {
+      throw new Error(
+        `"${recipePath}" references artifact ${mismatched
+          .map((name) => `"${name}"`)
+          .join(', ')}, but the only file built for ${componentName}@${componentVersion} is "${artifactBasename}". Make the recipe's artifact URI end in "${artifactBasename}".`,
+      );
+    }
+
+    this.cfnComponentVersion = new CfnComponentVersion(this, 'Resource', {
+      inlineRecipe: yaml.dump(raw, { lineWidth: -1 }),
+    });
+
+    // CloudFormation does not infer this dependency from the token embedded
+    // in `InlineRecipe` - referencing the bucket's name is not the same as
+    // waiting on the custom resource that populates it. Without this, a
+    // fresh deployment can create the component version before the artifact
+    // exists at the key it points to.
+    this.cfnComponentVersion.node.addDependency(artifactUpload);
+
+    // Applies to both `DeletionPolicy` and `UpdateReplacePolicy` (the default
+    // for `applyToUpdateReplacePolicy`) - `InlineRecipe` is a replacement
+    // property, so an update-triggered replacement must retain the outgoing
+    // resource just as a deletion would.
+    this.cfnComponentVersion.applyRemovalPolicy(removalPolicy);
+
+    this.componentName = componentName;
+    this.componentVersion = componentVersion;
+  }
+}

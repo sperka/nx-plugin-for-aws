@@ -128,18 +128,22 @@ export const runGeneratorMatrix = async (
     opts,
   );
 
-  // Greengrass component (packaging + local deployment; no infra in this
-  // generator yet — component-version publication is a later addition).
-  // A dedicated host project: vendoring uses `--only-binary :all:`, which
-  // refuses the source-built workspace members other matrix entries add to
-  // the shared py_project — and one component per project is the documented
-  // production default.
+  // Greengrass component, escalated to a published component version, plus
+  // the deployment project that publishes and deploys it. A dedicated host
+  // project: vendoring uses `--only-binary :all:`, which refuses the
+  // source-built workspace members other matrix entries add to the shared
+  // py_project — and one component per project is the documented production
+  // default.
   await runCLI(
     `generate @aws/nx-plugin:py#project --name=py-greengrass-project --projectType=application --no-interactive${deferFlag}`,
     opts,
   );
   await runCLI(
     `generate @aws/nx-plugin:py#greengrass-component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --no-interactive${deferFlag}`,
+    opts,
+  );
+  await runCLI(
+    `generate @aws/nx-plugin:greengrass-deployment --name=my-greengrass-deployment --target=thing-group --thingGroupName=my-greengrass-things --no-interactive${deferFlag}`,
     opts,
   );
 

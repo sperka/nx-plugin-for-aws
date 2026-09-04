@@ -50,6 +50,22 @@
       "x-priority": "important",
       "x-prompt": "Which core device platform would you like to target?"
     },
+    "infra": {
+      "type": "string",
+      "enum": ["component-version", "none"],
+      "default": "component-version",
+      "description": "Infrastructure to provision for this component. component-version vends a GreengrassComponentVersion CDK construct that publishes this component's built artifact.",
+      "x-priority": "important",
+      "x-prompt": "Which infrastructure would you like to provision?"
+    },
+    "iac": {
+      "type": "string",
+      "description": "The preferred IaC provider. By default this is inherited from your initial selection.",
+      "enum": ["inherit", "cdk", "terraform"],
+      "x-priority": "important",
+      "default": "inherit",
+      "x-prompt": "Which provider would you like to manage your infrastructure? (default: Inherit)"
+    },
     "preferInstallDependencies": {
       "type": "boolean",
       "description": "Whether to prefer installing dependencies after the generator runs. Set to false to defer installing when batching multiple generators (an install still runs if needed so subsequent generators can compute the Nx project graph); install once at the end.",

@@ -5,14 +5,16 @@ generator: py#greengrass-component
 ---
 
 import { FileTree } from '@astrojs/starlight/components';
+import Link from '@components/link.astro';
 import RunGenerator from '@components/run-generator.astro';
 import GeneratorParameters from '@components/generator-parameters.astro';
 import NxCommands from '@components/nx-commands.astro';
+import Infrastructure from '@components/infrastructure.astro';
 import OptionFilter from '@components/option-filter.astro';
 
 The `py#greengrass-component` generator adds an [AWS IoT Greengrass v2](https://docs.aws.amazon.com/greengrass/v2/developerguide/what-is-iot-greengrass.html) component to an existing Python project: a recipe, a sample entrypoint, and the Nx targets to package the component and deploy it locally to a core device.
 
-This is a packaging-and-local-deployment slice only: there is no `infra`/`iac` option yet, so the generator never touches `packages/common/constructs` or `packages/common/terraform`, and it never publishes a component version to AWS IoT Greengrass. Publishing a `ComponentVersion` and deploying it to a thing or thing group is planned for a follow-up generator.
+With the default `infra: component-version` (unless `--infra none`), it also vends a `GreengrassComponentVersion` CDK construct that publishes the component's built artifact to AWS IoT Greengrass - pair it with a <Link path="guides/greengrass-deployment">`greengrass-deployment`</Link> project's artifact bucket to actually deploy it to a thing or thing group.
 
 ## Usage
 
@@ -93,6 +95,31 @@ This packages `greengrass/<component-name>/` (excluding `recipe.yaml` and `gdk-c
 
 This layout is **GDK-shaped, not GDK-compatible**: it matches the directory structure the [Greengrass Development Kit CLI](https://github.com/aws-greengrass/aws-greengrass-gdk-cli) produces, but it is written under Nx's own `dist/`, not the component folder GDK expects. The vended `gdk-config.json` (`build_system: custom`, `custom_build_command` pointing back at this same target) is there as an escape hatch if you also want to run `gdk component build`/`publish` directly — it is not a dependency of anything this generator wires.
 
+## Infrastructure
+
+<Infrastructure>
+<Fragment slot="cdk">
+
+With the default `infra: component-version` (`--infra none` skips this entirely), the generator vends `packages/common/constructs/src/app/greengrass/<component-name>.ts`: a `GreengrassComponentVersion` subclass pinning this component's `greengrass-build/recipes` and `greengrass-build/artifacts` paths. Wire it into your infra stack alongside a <Link path="guides/greengrass-deployment">`greengrass-deployment`</Link> project's artifact bucket:
+
+```ts title="packages/infra/src/stacks/application-stack.ts"
+import { MyComponent, MyDeployment } from '@my-scope/common-constructs';
+import { components } from '@my-scope/my-deployment';
+
+const deployment = new MyDeployment(this, 'MyDeployment', { components });
+new MyComponent(this, 'MyComponent', { bucket: deployment.artifactBucket });
+```
+
+`nx run <infra>:deploy` publishes the component version - `common/constructs`'s `build`/`assemble` targets depend on this component's host project, so the artifact is always freshly built before it deploys.
+
+</Fragment>
+<Fragment slot="terraform">
+
+`--iac terraform` throws an actionable error rather than generating anything. Neither `AWS::GreengrassV2::ComponentVersion` nor `AWS::GreengrassV2::Deployment` exists in the `hashicorp/aws` Terraform provider this workspace pins. Use `--iac cdk` until that changes.
+
+</Fragment>
+</Infrastructure>
+
 ## Deploying and observing locally
 
 :::caution[Run these on the core device]
@@ -133,7 +160,7 @@ Manifests:
 
 ### Component version immutability
 
-`ComponentVersion` in `recipe.yaml` is user-owned from the start. Once a version of a component is published to AWS IoT Greengrass, that version's content can never change — publishing again under the same version with different content is rejected. **Bump `ComponentVersion` in `recipe.yaml` whenever you change the component**, before building a new artifact. This generator does not publish anything to AWS yet, but the recipe you author now is the one a later publishing step will read as-is.
+`ComponentVersion` in `recipe.yaml` is user-owned from the start. Once a version of a component is published to AWS IoT Greengrass, that version's content can never change — publishing again under the same version with different content is rejected. **Bump `ComponentVersion` in `recipe.yaml` whenever you change the component**, before building a new artifact and redeploying via the `GreengrassComponentVersion` construct described in [Infrastructure](#infrastructure) above.
 
 <OptionFilter when={{ ipc: true }} description="ipc=true wires a least-privilege accessControl block">
 

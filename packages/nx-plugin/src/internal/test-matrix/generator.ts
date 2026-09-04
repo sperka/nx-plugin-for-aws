@@ -9,6 +9,7 @@ import {
   type ConnectionGeneratorSchema,
   connectionGenerator,
 } from '../../sdk/connection.js';
+import { greengrassDeploymentGenerator } from '../../sdk/greengrass-deployment.js';
 import { licenseGenerator } from '../../sdk/license.js';
 import {
   type PyAgentGeneratorSchema,
@@ -227,11 +228,11 @@ export const internalTestMatrixGenerator = async (
     ...defaults,
   });
 
-  // Greengrass component — packaging and local deployment only; there is no
-  // `infra`/`iac` option yet, so this generator takes no `iac: 'inherit'`.
-  // Hosted on a dedicated project: vendoring's `--only-binary :all:` refuses
-  // the source-built workspace members other entries add to py-project, and
-  // one component per project is the documented production default.
+  // Greengrass component, escalated to a published component version, plus
+  // the deployment project that publishes and deploys it. Hosted on a
+  // dedicated project: vendoring's `--only-binary :all:` refuses the
+  // source-built workspace members other entries add to py-project, and one
+  // component per project is the documented production default.
   await pyProjectGenerator(tree, {
     name: 'py-greengrass-project',
     type: 'application',
@@ -240,7 +241,19 @@ export const internalTestMatrixGenerator = async (
   await pyGreengrassComponentGenerator(tree, {
     project: py('py-greengrass-project'),
     name: 'my-greengrass-component',
+    iac: 'inherit',
     ...defaults,
+  });
+  await greengrassDeploymentGenerator(tree, {
+    name: 'my-greengrass-deployment',
+    target: 'thing-group',
+    thingGroupName: 'my-greengrass-things',
+    artifactBucket: 'create',
+    deploymentPolicy: 'default',
+    nucleus: 'classic',
+    infra: 'deployment',
+    iac: 'inherit',
+    ...projectDefaults,
   });
 
   // MCP servers — uninfra'd and hosted on AgentCore.

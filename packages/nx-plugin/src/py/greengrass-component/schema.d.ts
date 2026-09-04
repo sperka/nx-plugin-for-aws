@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import type { GreengrassPlatform } from '../../utils/greengrass/constants.js';
+import type { IacOption } from '../../utils/iac.js';
 
 export interface PyGreengrassComponentGeneratorSchema {
   readonly project: string;
@@ -12,5 +13,7 @@ export interface PyGreengrassComponentGeneratorSchema {
   readonly publisher?: string;
   readonly ipc?: boolean;
   readonly platform?: GreengrassPlatform;
+  readonly infra?: 'component-version' | 'none';
+  readonly iac?: IacOption;
   readonly preferInstallDependencies?: boolean;
 }

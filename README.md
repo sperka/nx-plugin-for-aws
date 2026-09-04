@@ -114,6 +114,7 @@ pnpm nx g @aws/nx-plugin:ts#infra
 | `py#agent`           | [Strands Agent](https://strandsagents.com/) (Python)                                                                                     |
 | `agentcore-gateway`  | [AgentCore Gateway](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway.html) project                                  |
 | `py#greengrass-component` | [AWS IoT Greengrass](https://docs.aws.amazon.com/greengrass/v2/developerguide/) v2 component (experimental)                        |
+| `greengrass-deployment` | Greengrass component-version and deployment CDK infrastructure (experimental)                                                        |
 | `agentcore-harness`  | [AgentCore Harness](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/harness.html) agent loop (experimental)                |
 | `connection`         | Connect projects together (e.g. frontend to API)                                                                                         |
 | `terraform#project`  | Terraform project                                                                                                                        |

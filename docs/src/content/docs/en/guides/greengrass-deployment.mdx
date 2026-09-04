@@ -1,17 +1,20 @@
 ---
-title: greengrass-deployment
+title: Greengrass Deployment
 description: Generate a Greengrass deployment project, vending component-version and deployment CDK infrastructure
 generator: greengrass-deployment
 ---
 
 import { FileTree } from '@astrojs/starlight/components';
+import Link from '@components/link.astro';
 import RunGenerator from '@components/run-generator.astro';
 import GeneratorParameters from '@components/generator-parameters.astro';
 import Infrastructure from '@components/infrastructure.astro';
 import Snippet from '@components/snippet.astro';
 import OptionFilter from '@components/option-filter.astro';
 
-TODO: Add an overview of your generator here.
+The `greengrass-deployment` generator creates a small TypeScript library for typed [AWS IoT Greengrass v2](https://docs.aws.amazon.com/greengrass/v2/developerguide/what-is-iot-greengrass.html) component wiring, plus (unless `--infra none`) the CDK constructs an `AWS::GreengrassV2::Deployment` and its artifact bucket need: a retained `GreengrassArtifactBucket`, and an app construct wiring a `GreengrassDeployment` to the thing, thing group, or ARN you target.
+
+Publishing a component's version is handled separately, by escalating a <Link path="guides/py-greengrass-component">`py#greengrass-component`</Link> with `--infra component-version` - this generator only owns the deployment side (the target, the artifact bucket, and the `AWS::GreengrassV2::Deployment` resource itself).
 
 ## Usage
 
@@ -25,13 +28,49 @@ You can generate a greengrass-deployment in two ways:
 
 <GeneratorParameters generator="greengrass-deployment" />
 
+Exactly one of `thingGroupName`, `thingName` or `targetArn` must be set, matching the `target` option:
+
+| `target`       | Option required   | Behaviour                                          |
+| -------------- | ------------------ | --------------------------------------------------- |
+| `thing-group`  | `thingGroupName`   | Creates a new `AWS::IoT::ThingGroup`               |
+| `thing`        | `thingName`        | Imports an existing thing by name                  |
+| `existing-arn` | `targetArn`        | Imports an existing thing or thing group by ARN    |
+
+A literal (non-token) `targetArn` is validated at synth time against the deploying stack's own account and region, so a copy-pasted ARN from the wrong environment fails synth rather than deploying somewhere unexpected.
+
 ## Generator Output
 
-The generator will create the following project files:
+The generator creates the following project structure in the `<directory>/<name>` directory:
 
 <FileTree>
- - todo.txt Update this section with what your generator generates!
+  - src
+    - components.ts Typed component wiring for this deployment - user-owned from first generation onward
+    - index.ts Barrel export
+  - package.json
+  - project.json
 </FileTree>
+
+`components.ts` starts empty. Add an entry per component you deploy:
+
+```ts title="packages/my-deployment/src/components.ts"
+export const components: Record<string, DeploymentComponent> = {
+  'com.myscope.MyComponent': { componentVersion: '1.0.0' },
+};
+```
+
+`configurationUpdate.merge` is a plain object here, not the JSON string `AWS::GreengrassV2::Deployment` expects. Write the configuration as ordinary TypeScript and the vended `GreengrassDeployment` construct serialises it for you:
+
+```ts title="packages/my-deployment/src/components.ts"
+export const components: Record<string, DeploymentComponent> = {
+  'com.myscope.MyComponent': {
+    componentVersion: '1.0.0',
+    configurationUpdate: {
+      merge: { logLevel: 'DEBUG', sampleIntervalSeconds: 30 },
+      reset: ['/legacySetting'],
+    },
+  },
+};
+```
 
 ### Infrastructure
 
@@ -41,33 +80,78 @@ The generator will create the following project files:
 <Fragment slot="cdk">
 <FileTree>
   - packages/common/constructs/src
-    - app
-      - todo.txt document app specific cdk constructs if any
-    - core
-      - todo.txt document core cdk constructs if any
+    - core/greengrass
+      - artifact-bucket.ts `GreengrassArtifactBucket` - one retained, versioned, TLS-only S3 bucket per account/region
+      - component-version.ts `GreengrassComponentVersion` - publishes a component's built artifact (used by `py#greengrass-component --infra component-version`)
+      - deployment.ts `GreengrassDeployment` - the `AWS::GreengrassV2::Deployment` plus an optional `AWS::IoT::ThingGroup`
+      - recipe.ts A narrow recipe reader used at synth time only
+    - app/greengrass
+      - \<name>.ts This deployment's app construct, wiring the artifact bucket and `GreengrassDeployment` from your options
 </FileTree>
+
+The generated app construct accepts a `components` prop, so your infra stack wires the deployment's typed component library straight through:
+
+```ts title="packages/infra/src/stacks/application-stack.ts"
+import { MyDeployment } from '@my-scope/common-constructs';
+import { components } from '@my-scope/my-deployment';
+
+new MyDeployment(this, 'MyDeployment', { components });
+```
+
+`common/constructs` stays independent of any specific deployment's own library - the wiring happens once, in your infra stack, not inside the vended construct.
+
 </Fragment>
 <Fragment slot="terraform">
-<FileTree>
-  - packages/common/terraform/src
-    - app
-      - todo.txt document app specific tf modules if any
-    - core
-      - todo.txt document core tf modules if any
-</FileTree>
+
+`--iac terraform` throws an actionable error rather than generating anything. Neither `AWS::GreengrassV2::ComponentVersion` nor `AWS::GreengrassV2::Deployment` exists in the `hashicorp/aws` Terraform provider this workspace pins - both resources exist only in `hashicorp/awscc`, which is not currently pinned. Use `--iac cdk` until that changes.
+
 </Fragment>
 </Infrastructure>
 
-:::danger
-Delete this section if your generator does not create infrastructure
-:::
+## The Token Exchange Role Grant
 
-## TODO: More Docs!
+Every Greengrass core device assumes a *token exchange role* to reach AWS services, including fetching component artifacts from S3. Pass that role's ARN as `tokenExchangeRoleArn` and the generated construct grants it `s3:GetObject` - and only `s3:GetObject` - on the artifact bucket's objects:
 
-Add more documentation detailing things like:
+```ts
+this.artifactBucket.grantReadTo(
+  Role.fromRoleArn(this, 'TokenExchangeRole', tokenExchangeRoleArn, { mutable: true }),
+);
+```
 
-- How to work with the project/code you've generated
-- What new project.json targets have been added and how to run them (using the NxCommands component)
-- Best practices when working with your generated project/code
+The default key scope is every object in the bucket, because a core device reads whichever component versions get deployed to it and those are not known when the grant is written. `grantReadTo` takes a second argument if you do know a narrower prefix ahead of time - `grantReadTo(role, 'com.myscope.MyComponent/*')` limits the grant to one component's versions.
 
-See the existing guides for concrete examples.
+If you omit `tokenExchangeRoleArn`, attach the equivalent policy to your token exchange role by hand:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": "s3:GetObject",
+  "Resource": "arn:aws:s3:::<artifact-bucket-name>/*"
+}
+```
+
+## CloudFormation Semantics Worth Understanding
+
+<OptionFilter when={{ infra: 'deployment' }} description="Only applies when this generator provisions infrastructure">
+
+**Component versions are immutable.** `AWS::GreengrassV2::ComponentVersion`'s `InlineRecipe` is a replacement property - changing it replaces the resource rather than updating it in place. `CreateComponentVersion` itself rejects a resubmission of an already-published version under different content, so a rebuild that forgot to bump `ComponentVersion` fails the deployment rather than corrupting an already-deployed version. The vended construct also uploads each artifact under a content-hashed S3 key (`<ComponentName>/<Version>/<sha256>/<file>`), so a rebuild's upload can never physically overwrite the bytes an already-published version's artifact URI points at.
+
+**Both `DeletionPolicy` and `UpdateReplacePolicy` default to `Retain`** on the component version, the artifact bucket, and the deployment resource. Retained component versions accumulate over time - AWS IoT Greengrass has no automatic cleanup, so plan a periodic inventory (`ListComponentVersions`) and manual deletion of versions you no longer deploy.
+
+The same applies to the artifact bucket: no S3 lifecycle rule is applied by default, because a published component version's artifact must stay retrievable for as long as any deployment can reference it - a lifecycle rule that expires objects would break existing versions when a new core device joins and fetches them. The bucket is tagged `greengrass-artifact-repository=true` so an inventory pass can find it. When you retire component versions (delete the version, confirm no deployment references it), delete their `<ComponentName>/<version>/` prefixes in the same pass - that is the deliberate, documented cleanup policy this construct expects instead of an automatic rule.
+
+**Deleting a deployment resource removes management state, not running components.** `AWS::GreengrassV2::Deployment` tracks what CloudFormation *intends* to have deployed; deleting it does not uninstall anything already running on target devices. To remove components from devices, deploy an explicit revision that drops them - deleting the CloudFormation resource is not that revision.
+
+**CloudFormation allows at most 10 deployment resources added or deleted per operation.** Batch deployment changes across stacks if you approach that limit.
+
+</OptionFilter>
+
+## Nucleus Compatibility
+
+<OptionFilter when={{ nucleus: 'lite' }} description="Only shown when nucleus=lite is selected">
+
+You've selected `nucleus: lite`. [Nucleus lite](https://docs.aws.amazon.com/greengrass/v2/developerguide/greengrass-nucleus-lite-component.html) supports generic components only, implements a subset of IPC operations, and gained container support only in v2.15 (July 2025). Verify your components' recipes work against the nucleus your fleet actually runs - this generator does not detect nucleus capabilities at runtime.
+
+</OptionFilter>
+
+The `nucleus` option is documentation-only today: it drives the capability guidance above and does not change the generated infrastructure, since `AWS::GreengrassV2::Deployment` has no nucleus-specific configuration.

@@ -58,6 +58,7 @@ describe('py#greengrass-component generator', () => {
     await pyGreengrassComponentGenerator(tree, {
       project: 'test-project',
       name: 'my-component',
+      infra: 'none',
     });
 
     expect(
@@ -117,6 +118,7 @@ describe('py#greengrass-component generator', () => {
       project: 'test-project',
       name: 'my-component',
       platform: 'linux-amd64',
+      infra: 'none',
     });
 
     const projectConfig = JSON.parse(
@@ -143,6 +145,7 @@ describe('py#greengrass-component generator', () => {
     await pyGreengrassComponentGenerator(tree, {
       project: 'test-project',
       name: 'my-component',
+      infra: 'none',
     });
 
     const projectConfig = JSON.parse(
@@ -198,6 +201,7 @@ describe('py#greengrass-component generator', () => {
       project: 'test-project',
       name: 'my-component',
       ipc: false,
+      infra: 'none',
     });
 
     const recipe = tree.read(
@@ -225,7 +229,11 @@ describe('py#greengrass-component generator', () => {
   it('should not duplicate component targets when re-run with the same options', async () => {
     seedPythonProject(tree);
 
-    const options = { project: 'test-project', name: 'my-component' };
+    const options = {
+      project: 'test-project',
+      name: 'my-component',
+      infra: 'none' as const,
+    };
     await pyGreengrassComponentGenerator(tree, options);
 
     const recipePath = 'apps/test_project/greengrass/my-component/recipe.yaml';
@@ -268,7 +276,11 @@ describe('py#greengrass-component generator', () => {
   it('should converge component targets while preserving user-owned files', async () => {
     seedPythonProject(tree);
 
-    const options = { project: 'test-project', name: 'my-component' };
+    const options = {
+      project: 'test-project',
+      name: 'my-component',
+      infra: 'none' as const,
+    };
     await pyGreengrassComponentGenerator(tree, options);
 
     // A target left behind by an older version of this generator.
@@ -314,6 +326,7 @@ describe('py#greengrass-component generator', () => {
     await pyGreengrassComponentGenerator(tree, {
       project: 'test-project',
       name: 'first-component',
+      infra: 'none',
     });
 
     const firstRecipePath =
@@ -323,6 +336,7 @@ describe('py#greengrass-component generator', () => {
     await pyGreengrassComponentGenerator(tree, {
       project: 'test-project',
       name: 'second-component',
+      infra: 'none',
     });
 
     expect(tree.read(firstRecipePath, 'utf-8')).toBe(firstRecipeBefore);
@@ -352,7 +366,11 @@ describe('py#greengrass-component generator', () => {
   it('should converge the framework-owned gdk-config.json while preserving the user-owned recipe', async () => {
     seedPythonProject(tree);
 
-    const options = { project: 'test-project', name: 'my-component' };
+    const options = {
+      project: 'test-project',
+      name: 'my-component',
+      infra: 'none' as const,
+    };
     await pyGreengrassComponentGenerator(tree, options);
 
     const gdkPath = 'apps/test_project/greengrass/my-component/gdk-config.json';
@@ -379,6 +397,7 @@ describe('py#greengrass-component generator', () => {
       componentVersion: '2.3.4',
       platform: 'linux-amd64',
       ipc: false,
+      infra: 'none',
     });
 
     const projectConfig = JSON.parse(
@@ -442,6 +461,7 @@ describe('py#greengrass-component generator', () => {
     await pyGreengrassComponentGenerator(tree, {
       project: 'test-project',
       name: 'my-component',
+      infra: 'none',
     });
 
     const recipe = tree.read(
@@ -461,6 +481,7 @@ describe('py#greengrass-component generator', () => {
     await pyGreengrassComponentGenerator(tree, {
       project: 'test-project',
       name: 'my-component',
+      infra: 'none',
     });
 
     const recipe = tree.read(
@@ -501,6 +522,7 @@ describe('py#greengrass-component generator', () => {
     await pyGreengrassComponentGenerator(tree, {
       project: 'test-project',
       name: 'my-component',
+      infra: 'none',
     });
 
     expectHasMetricTags(tree, PY_GREENGRASS_COMPONENT_GENERATOR_INFO.metric);
@@ -512,6 +534,7 @@ describe('py#greengrass-component generator', () => {
     await pyGreengrassComponentGenerator(tree, {
       project: 'test-project',
       name: 'my-component',
+      infra: 'none',
     });
 
     const changes = sortObjectKeys(
@@ -530,5 +553,166 @@ describe('py#greengrass-component generator', () => {
         }, {}),
     );
     expect(changes).toMatchSnapshot('main-snapshot');
+  });
+
+  describe('infra escalation (--infra component-version)', () => {
+    it('vends the per-component construct and registers the artifact dependency', async () => {
+      seedPythonProject(tree);
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        iac: 'cdk',
+      });
+
+      const constructPath =
+        'packages/common/constructs/src/app/greengrass/my-component.ts';
+      expect(tree.exists(constructPath)).toBe(true);
+      const construct = tree.read(constructPath, 'utf-8');
+      expect(construct).toContain('extends GreengrassComponentVersion');
+      expect(construct).toContain(
+        'apps/test_project/greengrass/my-component/greengrass-build/recipes',
+      );
+      expect(construct).toContain(
+        'apps/test_project/greengrass/my-component/greengrass-build/artifacts',
+      );
+
+      for (const file of [
+        'artifact-bucket.ts',
+        'component-version.ts',
+        'deployment.ts',
+        'recipe.ts',
+      ]) {
+        expect(
+          tree.exists(`packages/common/constructs/src/core/greengrass/${file}`),
+        ).toBe(true);
+      }
+
+      const sharedConstructsConfig = JSON.parse(
+        tree.read('packages/common/constructs/project.json', 'utf-8') ?? '{}',
+      );
+      expect(sharedConstructsConfig.targets.build.dependsOn).toContain(
+        'test-project:build',
+      );
+      expect(sharedConstructsConfig.targets.assemble.dependsOn).toContain(
+        'test-project:assemble',
+      );
+    });
+
+    it('escalates cleanly from --infra none to --infra component-version, adding the construct exactly once', async () => {
+      seedPythonProject(tree);
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        infra: 'none',
+      });
+      expect(tree.exists('packages/common/constructs')).toBe(false);
+
+      const recipePath =
+        'apps/test_project/greengrass/my-component/recipe.yaml';
+      const recipeBefore = tree.read(recipePath, 'utf-8');
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        infra: 'component-version',
+        iac: 'cdk',
+      });
+
+      const constructPath =
+        'packages/common/constructs/src/app/greengrass/my-component.ts';
+      expect(tree.exists(constructPath)).toBe(true);
+      expect(tree.read(recipePath, 'utf-8')).toBe(recipeBefore);
+
+      // Re-running again must not duplicate the star export or the artifact
+      // dependency.
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        infra: 'component-version',
+        iac: 'cdk',
+      });
+
+      const appIndex = tree.read(
+        'packages/common/constructs/src/app/greengrass/index.ts',
+        'utf-8',
+      );
+      expect(appIndex?.match(/my-component\.js/g)).toHaveLength(1);
+
+      const sharedConstructsConfig = JSON.parse(
+        tree.read('packages/common/constructs/project.json', 'utf-8') ?? '{}',
+      );
+      expect(
+        sharedConstructsConfig.targets.build.dependsOn.filter(
+          (d: string) => d === 'test-project:build',
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('is a stable no-op when re-run with --infra none both times', async () => {
+      seedPythonProject(tree);
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        infra: 'none',
+      });
+
+      // Re-running with the same `--infra none` it already had must not throw
+      // - this is the ordinary idempotency contract, not a downgrade attempt.
+      await expect(
+        pyGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          infra: 'none',
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it('throws when re-run with --infra none after infrastructure was already provisioned', async () => {
+      seedPythonProject(tree);
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        iac: 'cdk',
+      });
+
+      await expect(
+        pyGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          infra: 'none',
+        }),
+      ).rejects.toThrow(/would leave that infrastructure orphaned/);
+    });
+
+    it('throws an actionable error for --iac terraform', async () => {
+      seedPythonProject(tree);
+
+      await expect(
+        pyGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          iac: 'terraform',
+        }),
+      ).rejects.toThrow(/hashicorp\/awscc/);
+    });
+
+    it('records iac in component metadata', async () => {
+      seedPythonProject(tree);
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        iac: 'cdk',
+      });
+
+      const projectConfig = JSON.parse(
+        tree.read('apps/test_project/project.json', 'utf-8'),
+      );
+      expect(projectConfig.metadata.components[0].iac).toBe('cdk');
+    });
   });
 });

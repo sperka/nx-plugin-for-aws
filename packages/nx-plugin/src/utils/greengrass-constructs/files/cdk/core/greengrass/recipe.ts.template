@@ -1,0 +1,124 @@
+import yaml from 'js-yaml';
+
+/**
+ * A deliberately narrow view of a Greengrass v2 recipe: only the fields this
+ * construct reads or rewrites. There is no full model here and no drift
+ * surface against the recipe zod schema `py#greengrass-component` validates
+ * with (`src/utils/greengrass/recipe.ts` in the plugin) - this file only ever
+ * runs at synth time, on a recipe that generator has already validated.
+ */
+export interface GreengrassRecipeArtifact {
+  readonly Uri: string;
+  readonly [key: string]: unknown;
+}
+
+export interface GreengrassRecipeManifest {
+  readonly Artifacts?: readonly GreengrassRecipeArtifact[];
+  readonly [key: string]: unknown;
+}
+
+export interface GreengrassRecipeSummary {
+  readonly componentName: string;
+  readonly componentVersion: string;
+  /**
+   * The parsed recipe document, unvalidated beyond what {@link readRecipeSummary}
+   * itself checks. Callers rewrite `Manifests[].Artifacts[].Uri` in place via
+   * {@link substituteArtifactUris} and re-serialize with `yaml.dump` - every
+   * other field passes through untouched.
+   */
+  readonly raw: { Manifests?: GreengrassRecipeManifest[]; [key: string]: unknown };
+}
+
+/**
+ * Parse a resolved recipe YAML document, extracting only `ComponentName` and
+ * `ComponentVersion`. Throws an actionable error if the document isn't an
+ * object or is missing either field - both are written by `<c>-artifact`
+ * before this construct ever reads the file, so a failure here means the
+ * recipes directory doesn't hold what this construct expects.
+ */
+export const readRecipeSummary = (
+  yamlSource: string,
+  recipePath: string,
+): GreengrassRecipeSummary => {
+  const raw = yaml.load(yamlSource);
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`"${recipePath}" is not a Greengrass recipe document`);
+  }
+  const { ComponentName, ComponentVersion } = raw as {
+    ComponentName?: unknown;
+    ComponentVersion?: unknown;
+  };
+  if (typeof ComponentName !== 'string' || ComponentName.length === 0) {
+    throw new Error(`"${recipePath}" is missing ComponentName`);
+  }
+  if (typeof ComponentVersion !== 'string' || ComponentVersion.length === 0) {
+    throw new Error(`"${recipePath}" is missing ComponentVersion`);
+  }
+  return {
+    componentName: ComponentName,
+    componentVersion: ComponentVersion,
+    raw: raw as GreengrassRecipeSummary['raw'],
+  };
+};
+
+/**
+ * The GDK-spelled artifact URI placeholder this construct substitutes:
+ * `s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<basename>`, brace-free
+ * (verified against `aws-greengrass-gdk-cli`'s `BuildRecipeTransformer`).
+ */
+const PLACEHOLDER_PREFIX = 's3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/';
+
+export interface ArtifactUriSubstitution {
+  readonly bucketName: string;
+  readonly componentName: string;
+  readonly componentVersion: string;
+  /**
+   * The uploaded artifact's sha256, inserted as its own path segment so the
+   * basename (the part after the placeholder) survives untouched - it is what
+   * the recipe's `Run` lifecycle script references via
+   * `{artifacts:decompressedPath}/<name>/...`.
+   */
+  readonly sha256: string;
+}
+
+/**
+ * Rewrite every `Manifests[].Artifacts[].Uri` that carries the GDK placeholder
+ * prefix, in place, to the real (deploy-time-resolvable) S3 location -
+ * `s3://<bucketName>/<componentName>/<componentVersion>/<sha256>/<basename>`.
+ * Returns the basename of every URI rewritten, so the caller can check each
+ * one against the artifact that was actually built.
+ *
+ * Applied only to this one field, after a YAML parse, never as a
+ * whole-document string replace: a recipe may contain artifacts this
+ * construct doesn't manage (a `docker:` URI, or an already-published `s3://`
+ * one), and those are left exactly as authored.
+ *
+ * `bucketName` is typically an unresolved CDK token (the bucket's physical
+ * name usually isn't known until deploy time). That's safe here: CDK resolves
+ * a token embedded anywhere inside a larger string property value - including
+ * one this deep inside a YAML document - into an `Fn::Join` when the whole
+ * document is later passed as `inlineRecipe`. This is the same mechanism that
+ * makes `` `arn:aws:s3:::${bucket.bucketName}/*` `` work as a plain CDK
+ * template literal; nothing token-specific happens in this function itself.
+ */
+export const substituteArtifactUris = (
+  raw: GreengrassRecipeSummary['raw'],
+  substitution: ArtifactUriSubstitution,
+): string[] => {
+  const { bucketName, componentName, componentVersion, sha256 } = substitution;
+  const replacementPrefix = `s3://${bucketName}/${componentName}/${componentVersion}/${sha256}/`;
+  const substitutedBasenames: string[] = [];
+
+  for (const manifest of raw.Manifests ?? []) {
+    for (const artifact of manifest.Artifacts ?? []) {
+      const mutableArtifact = artifact as { Uri: string };
+      if (mutableArtifact.Uri.startsWith(PLACEHOLDER_PREFIX)) {
+        const basename = mutableArtifact.Uri.slice(PLACEHOLDER_PREFIX.length);
+        substitutedBasenames.push(basename);
+        mutableArtifact.Uri = `${replacementPrefix}${basename}`;
+      }
+    }
+  }
+
+  return substitutedBasenames;
+};

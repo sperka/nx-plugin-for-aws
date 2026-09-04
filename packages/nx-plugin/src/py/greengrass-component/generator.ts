@@ -27,9 +27,14 @@ import {
   assertValidComponentName,
   buildDefaultComponentName,
 } from '../../utils/greengrass/naming.js';
+import {
+  addGreengrassComponentAppConstruct,
+  GREENGRASS_CONSTRUCTS_DEPENDENCIES,
+} from '../../utils/greengrass-constructs/greengrass-constructs.js';
+import { resolveIac } from '../../utils/iac.js';
 import { installDependencies } from '../../utils/install.js';
 import { addGeneratorMetricsIfApplicable } from '../../utils/metrics.js';
-import { toKebabCase, toSnakeCase } from '../../utils/names.js';
+import { toClassName, toKebabCase, toSnakeCase } from '../../utils/names.js';
 import { getNpmScope } from '../../utils/npm-scope.js';
 import {
   addArtifactDependencyToTargets,
@@ -40,6 +45,10 @@ import {
   readProjectConfigurationUnqualified,
 } from '../../utils/nx.js';
 import { toProjectRelativePath } from '../../utils/paths.js';
+import {
+  SHARED_CONSTRUCTS_DEPENDENCIES,
+  sharedConstructsGenerator,
+} from '../../utils/shared-constructs.js';
 import {
   PACKAGES_DIR,
   SHARED_SCRIPTS_DIR,
@@ -58,10 +67,15 @@ export interface GreengrassComponentMetadata {
   readonly componentVersion: string;
   readonly platform: GreengrassPlatform;
   readonly ipc: boolean;
+  readonly iac?: string;
 }
 
 export const DEPENDENCIES = declareDependencies<GreengrassComponentMetadata>()({
-  ts: [...ownedElsewhere(SHARED_GREENGRASS_SCRIPTS_DEPENDENCIES)],
+  ts: [
+    ...ownedElsewhere(SHARED_GREENGRASS_SCRIPTS_DEPENDENCIES),
+    ...ownedElsewhere(SHARED_CONSTRUCTS_DEPENDENCIES),
+    ...ownedElsewhere(GREENGRASS_CONSTRUCTS_DEPENDENCIES),
+  ],
   py: [{ name: 'awsiotsdk', when: (m) => m.ipc }],
 });
 
@@ -112,11 +126,12 @@ const resolveGreengrassPublisher = (tree: Tree): string =>
   'monorepo';
 
 /**
- * Generates an AWS IoT Greengrass v2 component on an existing Python project.
- *
- * PR 1 slice: packaging and local deployment only (`<c>-vendor`, `<c>-artifact`,
- * `<c>-deploy-local`, `<c>-logs`). No CDK/Terraform construct, no `infra`/`iac`
- * option — component-version publication arrives in a later PR.
+ * Generates an AWS IoT Greengrass v2 component on an existing Python project:
+ * packaging and local-deployment targets (`<c>-vendor`, `<c>-artifact`,
+ * `<c>-deploy-local`, `<c>-logs`), plus, unless `--infra none`, a
+ * `GreengrassComponentVersion` CDK construct that publishes the built
+ * artifact. `--iac terraform` throws: neither `AWS::GreengrassV2` resource
+ * exists in the pinned `hashicorp/aws` Terraform provider.
  */
 export const pyGreengrassComponentGenerator = async (
   tree: Tree,
@@ -154,6 +169,12 @@ export const pyGreengrassComponentGenerator = async (
   const { uvPlatform, manifestPlatform } =
     GREENGRASS_PLATFORM_MAPPINGS[platform];
 
+  const infra = options.infra ?? 'component-version';
+  const iac =
+    infra !== 'none'
+      ? await resolveIac(tree, options.iac ?? 'inherit')
+      : undefined;
+
   const pyproject = tryReadToml(tree, pyProjectPath) as unknown as
     | { project?: { 'requires-python'?: unknown } }
     | undefined;
@@ -171,6 +192,25 @@ export const pyGreengrassComponentGenerator = async (
   // module by basename, so two components sharing a `test_main.py` basename in
   // sibling directories would collide.
   const testDir = joinPathFragments(projectConfig.root, 'tests', 'greengrass');
+
+  // A re-run with the same `--infra none` it already had is a stable no-op
+  // (the idempotency contract every generator owes); only a run that would
+  // *remove* previously-generated infrastructure is ambiguous enough to
+  // refuse outright.
+  const existingComponentMetadata = (
+    projectConfig.metadata as {
+      components?: { generator?: string; name?: string; iac?: string }[];
+    }
+  )?.components?.find(
+    (c) =>
+      c.generator === PY_GREENGRASS_COMPONENT_GENERATOR_INFO.id &&
+      c.name === componentDirName,
+  );
+  if (existingComponentMetadata?.iac && infra === 'none') {
+    throw new Error(
+      `This project already has a Greengrass component named "${componentDirName}" with infrastructure provisioned (iac=${existingComponentMetadata.iac}). Re-running with --infra=none would leave that infrastructure orphaned - remove it manually first, or keep --infra=component-version.`,
+    );
+  }
 
   const templateOptions = {
     componentName,
@@ -290,6 +330,7 @@ export const pyGreengrassComponentGenerator = async (
     componentVersion,
     platform,
     ipc,
+    ...(iac ? { iac } : {}),
   };
 
   addComponentGeneratorMetadata(
@@ -300,6 +341,24 @@ export const pyGreengrassComponentGenerator = async (
     componentDirName,
     metadata,
   );
+
+  if (infra !== 'none') {
+    await sharedConstructsGenerator(tree, { iac: iac! }, DEPENDENCIES);
+    await addGreengrassComponentAppConstruct(
+      tree,
+      {
+        iac: iac!,
+        componentNameClassName: toClassName(options.name),
+        componentDisplayName: componentName,
+        componentDirName,
+        project: projectConfig.name,
+        hostProjectName: projectConfig.name,
+        recipesDirFromRoot: `dist/${projectConfig.root}/greengrass/${componentDirName}/greengrass-build/recipes`,
+        artifactsDirFromRoot: `dist/${projectConfig.root}/greengrass/${componentDirName}/greengrass-build/artifacts`,
+      },
+      DEPENDENCIES,
+    );
+  }
 
   addPyDependencies(tree, DEPENDENCIES, {
     metadata,

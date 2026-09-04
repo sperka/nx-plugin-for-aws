@@ -91,6 +91,16 @@ describe('smoke test - infra-none', () => {
       opts,
     );
 
+    // Greengrass component with infra=none
+    await runCLI(
+      `generate @aws/nx-plugin:py#project --name=py-greengrass-project --projectType=application --no-interactive`,
+      opts,
+    );
+    await runCLI(
+      `generate @aws/nx-plugin:py#greengrass-component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --infra=none --no-interactive`,
+      opts,
+    );
+
     await runCLI(`sync --verbose`, opts);
     await runCLI(
       `run-many --target build --all --output-style=stream --verbose`,
@@ -151,6 +161,12 @@ describe('smoke test - infra-none', () => {
       opts,
     );
 
+    // Re-run the Greengrass component with infra=component-version
+    await runCLI(
+      `generate @aws/nx-plugin:py#greengrass-component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --infra=component-version --no-interactive`,
+      opts,
+    );
+
     await runCLI(`sync --verbose`, opts);
     await runCLI(
       `run-many --target build --all --output-style=stream --verbose`,
@@ -163,6 +179,11 @@ describe('smoke test - infra-none', () => {
     expect(
       existsSync(
         `${projectRoot}/packages/common/constructs/src/app/harnesses/my-harness/my-harness.ts`,
+      ),
+    ).toBe(true);
+    expect(
+      existsSync(
+        `${projectRoot}/packages/common/constructs/src/app/greengrass/my-greengrass-component.ts`,
       ),
     ).toBe(true);
   });
