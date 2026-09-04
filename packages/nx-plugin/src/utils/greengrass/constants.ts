@@ -20,10 +20,15 @@ export const GREENGRASS_PLATFORMS = ['linux-amd64', 'linux-arm64'] as const;
 
 export type GreengrassPlatform = (typeof GREENGRASS_PLATFORMS)[number];
 
-/** `Platform.os` / `Platform.architecture` values written into a recipe manifest. */
+/**
+ * `Platform.os` / `Platform.architecture` values written into a recipe manifest.
+ * The nucleus matches `aarch64` (not the Docker-style `arm64`) on 64-bit ARM
+ * devices - verified against a real core device reporting
+ * `{os=linux, architecture=aarch64}`.
+ */
 export interface GreengrassManifestPlatform {
   readonly os: 'linux';
-  readonly architecture: 'amd64' | 'arm64';
+  readonly architecture: 'amd64' | 'aarch64';
 }
 
 /** How a {@link GreengrassPlatform} maps onto a `uv` target platform and a manifest `Platform` block. */
@@ -47,7 +52,7 @@ export const GREENGRASS_PLATFORM_MAPPINGS: Readonly<
   },
   'linux-arm64': {
     uvPlatform: 'aarch64-manylinux_2_28',
-    manifestPlatform: { os: 'linux', architecture: 'arm64' },
+    manifestPlatform: { os: 'linux', architecture: 'aarch64' },
   },
 } as const;
 

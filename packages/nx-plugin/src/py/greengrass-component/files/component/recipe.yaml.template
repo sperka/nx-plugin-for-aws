@@ -25,4 +25,4 @@ Manifests:
       - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<%- componentDirName %>.zip
         Unarchive: ZIP
     Lifecycle:
-      Run: python3 {artifacts:decompressedPath}/<%- componentDirName %>/main.py
+      Run: python<%- pythonFloor %> {artifacts:decompressedPath}/<%- componentDirName %>/main.py

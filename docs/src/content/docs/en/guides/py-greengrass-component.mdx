@@ -63,7 +63,9 @@ The generator wires four targets onto the host project, prefixed with the compon
 This target uses [`uv export`](https://docs.astral.sh/uv/reference/cli/#uv-export) followed by [`uv pip install --only-binary :all:`](https://docs.astral.sh/uv/reference/cli/#uv-pip-install) to download platform-specific wheels for your dependencies, targeting:
 
 - `--python-version`, the lowest `major.minor` in your project's `[project].requires-python` (not the Lambda runtime version — a core device is not a Lambda function)
-- `--python-platform`, derived from the `platform` option (`x86_64-manylinux_2_28` for `linux-amd64`, `aarch64-manylinux_2_28` for `linux-arm64`)
+- `--python-platform`, derived from the `platform` option (`x86_64-manylinux_2_28` for `linux-amd64`, `aarch64-manylinux_2_28` for `linux-arm64`; the recipe manifest gets the matching Greengrass values `amd64` / `aarch64` — the nucleus matches `aarch64`, not the Docker-style `arm64`)
+
+The recipe's `Run` command pins the same interpreter version (`python3.14 main.py` for a `>=3.14` floor), so the vendored wheels and the runtime interpreter always move together. **Your core device must provide that `python3.x` binary on `PATH`.** If you see the component go `BROKEN` with `ImportError: ... undefined symbol: Py_...`, the device ran the artifact with an older interpreter than the wheels were vendored for — align your project's `requires-python` floor with what the device actually has, and regenerate or update the recipe's `Run` line to match.
 
 `--only-binary :all:` matters: without it, `uv` can fall back to building an sdist for the *host* architecture, silently producing a binary that will not load on the target device.
 
@@ -121,7 +123,7 @@ Manifests:
       - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<component-name>.zip
         Unarchive: ZIP
     Lifecycle:
-      Run: python3 {artifacts:decompressedPath}/<component-name>/main.py
+      Run: python3.14 {artifacts:decompressedPath}/<component-name>/main.py
 ```
 
 - The `BUCKET_NAME` / `COMPONENT_NAME` / `COMPONENT_VERSION` placeholders are the same ones GDK uses. `<c>-artifact` copies them through to the resolved recipe untouched; a later publishing step substitutes them with the real bucket and key.

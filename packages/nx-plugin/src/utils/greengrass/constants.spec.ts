@@ -30,7 +30,7 @@ describe('greengrass constants', () => {
   it('should map linux-arm64 to the aarch64 manylinux uv platform and manifest platform', () => {
     expect(GREENGRASS_PLATFORM_MAPPINGS['linux-arm64']).toEqual({
       uvPlatform: 'aarch64-manylinux_2_28',
-      manifestPlatform: { os: 'linux', architecture: 'arm64' },
+      manifestPlatform: { os: 'linux', architecture: 'aarch64' },
     });
   });
 
