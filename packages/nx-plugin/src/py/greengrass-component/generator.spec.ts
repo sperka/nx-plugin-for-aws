@@ -217,7 +217,7 @@ describe('py#greengrass-component generator', () => {
     ).toBe(false);
   });
 
-  it('should be a clean no-op when re-run with the same options', async () => {
+  it('should not duplicate component targets when re-run with the same options', async () => {
     seedPythonProject(tree);
 
     const options = { project: 'test-project', name: 'my-component' };
@@ -246,6 +246,61 @@ describe('py#greengrass-component generator', () => {
         t.startsWith('my-component-'),
       ),
     ).toHaveLength(4);
+    // The targets are re-assigned on every run, so the dedupe helper is the only
+    // thing keeping build/assemble from growing a second artifact dependency.
+    expect(
+      projectConfig.targets.build.dependsOn.filter(
+        (d) => d === 'my-component-artifact',
+      ),
+    ).toHaveLength(1);
+    expect(
+      projectConfig.targets.assemble.dependsOn.filter(
+        (d) => d === 'my-component-artifact',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('should converge component targets while preserving user-owned files', async () => {
+    seedPythonProject(tree);
+
+    const options = { project: 'test-project', name: 'my-component' };
+    await pyGreengrassComponentGenerator(tree, options);
+
+    // A target left behind by an older version of this generator.
+    updateJson(tree, 'apps/test_project/project.json', (projectConfig) => ({
+      ...projectConfig,
+      targets: {
+        ...projectConfig.targets,
+        'my-component-vendor': {
+          ...projectConfig.targets['my-component-vendor'],
+          options: {
+            ...projectConfig.targets['my-component-vendor'].options,
+            commands: ['echo stale vendor command'],
+          },
+        },
+      },
+    }));
+
+    const recipePath = 'apps/test_project/greengrass/my-component/recipe.yaml';
+    const mainPath = 'apps/test_project/greengrass/my-component/main.py';
+    const customRecipe = '# hand-edited recipe\n';
+    const customMain = '# hand-edited handler\n';
+    tree.write(recipePath, customRecipe);
+    tree.write(mainPath, customMain);
+
+    await pyGreengrassComponentGenerator(tree, options);
+
+    const projectConfig = JSON.parse(
+      tree.read('apps/test_project/project.json', 'utf-8'),
+    );
+    // The stale target is replaced by the current definition.
+    const vendorCommand =
+      projectConfig.targets['my-component-vendor'].options.commands[0];
+    expect(vendorCommand).toContain('uv export');
+    expect(vendorCommand).toContain('--no-emit-project');
+    expect(vendorCommand).not.toContain('stale vendor command');
+    expect(tree.read(recipePath, 'utf-8')).toBe(customRecipe);
+    expect(tree.read(mainPath, 'utf-8')).toBe(customMain);
   });
 
   it('should leave an existing component untouched when a second, differently-named component is added', async () => {
