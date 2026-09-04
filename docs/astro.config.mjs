@@ -644,6 +644,10 @@ export default defineConfig({
                   label: 'py#greengrass-component',
                   link: '/guides/py-greengrass-component',
                 },
+                {
+                  label: 'greengrass-deployment',
+                  link: '/guides/greengrass-deployment',
+                },
               ],
             },
           ],
