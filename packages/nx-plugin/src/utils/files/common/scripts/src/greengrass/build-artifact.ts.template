@@ -16,7 +16,7 @@ import { writeZip, type ZipEntry } from './zip-writer<% if (esm) { %>.js<% } %>'
  *
  * Everything under <project-root>/greengrass/<component-dir>/ is packaged
  * except recipe.yaml and gdk-config.json, which are framework metadata, not
- * deployed code.
+ * deployed code, and __pycache__ and .lock, which are tool staging output.
  */
 
 const log = (msg: string): void => console.error(`[build-artifact] ${msg}`);
@@ -26,12 +26,15 @@ function usage(): never {
   process.exit(1);
 }
 
-/** Every file under `dir`, recursively, excluding top-level names in `exclude`. */
+/**
+ * Every file under `dir`, recursively, excluding top-level names in `exclude`
+ * and `__pycache__` directories at any depth.
+ */
 function collectFiles(dir: string, exclude: ReadonlySet<string>): string[] {
   const results: string[] = [];
   const walk = (current: string, isRoot: boolean): void => {
     for (const entry of readdirSync(current)) {
-      if (isRoot && exclude.has(entry)) continue;
+      if (entry === '__pycache__' || (isRoot && exclude.has(entry))) continue;
       const fullPath = join(current, entry);
       if (statSync(fullPath).isDirectory()) {
         walk(fullPath, false);
@@ -92,12 +95,14 @@ function main(): void {
   // deployed artifact.
   const entries = entriesFrom(
     componentDir,
-    new Set(['recipe.yaml', 'gdk-config.json']),
+    new Set(['recipe.yaml', 'gdk-config.json', '.lock']),
   );
   if (existsSync(vendorDir)) {
     // requirements.txt is the "-vendor" target's own intermediate, not
     // something the device needs.
-    entries.push(...entriesFrom(vendorDir, new Set(['requirements.txt'])));
+    entries.push(
+      ...entriesFrom(vendorDir, new Set(['requirements.txt', '.lock'])),
+    );
   }
   if (entries.length === 0) {
     log(

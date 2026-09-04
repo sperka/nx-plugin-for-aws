@@ -110,7 +110,7 @@ Manifests:
       ],
       "options": {
         "commands": [
-          "uv export --frozen --no-dev --no-editable --project {projectRoot} --package test-project -o dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt",
+          "uv export --frozen --no-dev --no-editable --no-emit-project --project {projectRoot} --package test-project -o dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt",
           "uv pip install -n --no-deps --no-installer-metadata --no-compile-bytecode --only-binary :all: --python-platform aarch64-manylinux_2_28 --python-version 3.14 --target dist/{projectRoot}/greengrass/my-component/vendor -r dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt"
         ],
         "parallel": false
@@ -161,6 +161,7 @@ MAIN_PATH = PROJECT_ROOT / "greengrass" / "my-component" / "main.py"
 
 def _load_main():
     spec = importlib.util.spec_from_file_location("my_component_main", MAIN_PATH)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
