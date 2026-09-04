@@ -81,7 +81,7 @@ describe('py#greengrass-component generator', () => {
     expect(recipe).toContain('ComponentName: com.proj.MyComponent');
     expect(recipe).toContain('ComponentVersion: 1.0.0');
     expect(recipe).toContain(
-      'Run: python3 {artifacts:decompressedPath}/my-component/main.py',
+      'Run: python3.14 {artifacts:decompressedPath}/my-component/main.py',
     );
     // The load-bearing invariant: the artifact Greengrass unarchives is named
     // after the zip `<c>-artifact` writes, which is what makes the

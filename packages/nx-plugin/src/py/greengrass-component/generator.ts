@@ -185,6 +185,10 @@ export const pyGreengrassComponentGenerator = async (
     ipc,
     manifestOs: manifestPlatform.os,
     manifestArchitecture: manifestPlatform.architecture,
+    // The recipe Run command pins the same interpreter the wheels were
+    // vendored for; a bare `python3` can resolve to an older device default
+    // whose ABI the vendored native wheels do not support.
+    pythonFloor,
     componentDirName,
     componentSnakeCase,
     project: projectConfig.name,

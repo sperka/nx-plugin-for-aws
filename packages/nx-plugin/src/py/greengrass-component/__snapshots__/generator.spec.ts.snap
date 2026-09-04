@@ -73,14 +73,14 @@ ComponentConfiguration:
 Manifests:
   - Platform:
       os: linux
-      architecture: arm64
+      architecture: aarch64
     Artifacts:
       # Placeholders are substituted at publish time. The basename must stay
       # my-component.zip, which is what the Run script below unarchives to.
       - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component.zip
         Unarchive: ZIP
     Lifecycle:
-      Run: python3 {artifacts:decompressedPath}/my-component/main.py
+      Run: python3.14 {artifacts:decompressedPath}/my-component/main.py
 ",
   "apps/test_project/project.json": "{
   "name": "test-project",
