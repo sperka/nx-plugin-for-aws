@@ -105,9 +105,13 @@ Tails the component's log file (`<GREENGRASS_ROOT>/logs/<ComponentName>.log`) in
 
 Both targets read `GREENGRASS_ROOT` from the environment, defaulting to `/greengrass/v2`.
 
+## File ownership
+
+The component targets in `project.json` and `gdk-config.json` are framework-owned and re-synced to the current definition on every generator run, so manual edits to them do not survive a re-run. The vended scripts under `packages/common/scripts/src/greengrass/` are created once and never overwritten, so your patches survive. Delete those files and re-run the generator to pick up their current versions.
+
 ## Recipe ownership
 
-`recipe.yaml` is written once, with the options you chose at generation time, and never rewritten by a later run of this generator — re-running it with the same component name is a clean no-op that leaves your edits alone. Add configuration, lifecycle steps or dependencies directly in the recipe as your component grows.
+`recipe.yaml` is written once, with the options you chose at generation time, and never rewritten by a later run of this generator, so re-running it with the same component name leaves your edits alone. Add configuration, lifecycle steps or dependencies directly in the recipe as your component grows.
 
 Two things in the generated recipe are load-bearing and worth understanding before you edit them:
 

@@ -227,58 +227,50 @@ export const pyGreengrassComponentGenerator = async (
 
   projectConfig.targets ??= {};
 
-  if (!projectConfig.targets[vendorTarget]) {
-    projectConfig.targets[vendorTarget] = normalizeTargetKeyOrder({
-      cache: true,
-      // The vendor dir holds only exported dependencies, never test files.
-      inputs: ['production', '^production'],
-      outputs: [`{workspaceRoot}/${distDir}/vendor`],
-      executor: 'nx:run-commands',
-      dependsOn: ['compile'],
-      options: {
-        commands: [
-          `uv export --frozen --no-dev --no-editable --no-emit-project --project {projectRoot} --package ${projectConfig.name} -o ${distDir}/vendor/requirements.txt`,
-          // `--only-binary :all:` is required: without it an sdist can build a
-          // host-architecture binary into a cross-architecture artifact.
-          `uv pip install -n --no-deps --no-installer-metadata --no-compile-bytecode --only-binary :all: --python-platform ${uvPlatform} --python-version ${pythonFloor} --target ${distDir}/vendor -r ${distDir}/vendor/requirements.txt`,
-        ],
-        parallel: false,
-      },
-    });
-  }
+  projectConfig.targets[vendorTarget] = normalizeTargetKeyOrder({
+    cache: true,
+    // The vendor dir holds only exported dependencies, never test files.
+    inputs: ['production', '^production'],
+    outputs: [`{workspaceRoot}/${distDir}/vendor`],
+    executor: 'nx:run-commands',
+    dependsOn: ['compile'],
+    options: {
+      commands: [
+        `uv export --frozen --no-dev --no-editable --no-emit-project --project {projectRoot} --package ${projectConfig.name} -o ${distDir}/vendor/requirements.txt`,
+        // `--only-binary :all:` is required: without it an sdist can build a
+        // host-architecture binary into a cross-architecture artifact.
+        `uv pip install -n --no-deps --no-installer-metadata --no-compile-bytecode --only-binary :all: --python-platform ${uvPlatform} --python-version ${pythonFloor} --target ${distDir}/vendor -r ${distDir}/vendor/requirements.txt`,
+      ],
+      parallel: false,
+    },
+  });
 
-  if (!projectConfig.targets[artifactTarget]) {
-    projectConfig.targets[artifactTarget] = normalizeTargetKeyOrder({
-      cache: true,
-      outputs: [`{workspaceRoot}/${distDir}/greengrass-build`],
-      executor: 'nx:run-commands',
-      dependsOn: [vendorTarget],
-      options: {
-        command: `tsx ${GREENGRASS_SCRIPTS_DIR}/build-artifact.ts {projectRoot} ${componentDirName} ${distDir}`,
-      },
-    });
-  }
+  projectConfig.targets[artifactTarget] = normalizeTargetKeyOrder({
+    cache: true,
+    outputs: [`{workspaceRoot}/${distDir}/greengrass-build`],
+    executor: 'nx:run-commands',
+    dependsOn: [vendorTarget],
+    options: {
+      command: `tsx ${GREENGRASS_SCRIPTS_DIR}/build-artifact.ts {projectRoot} ${componentDirName} ${distDir}`,
+    },
+  });
   addArtifactDependencyToTargets(projectConfig, artifactTarget);
 
-  if (!projectConfig.targets[deployLocalTarget]) {
-    projectConfig.targets[deployLocalTarget] = normalizeTargetKeyOrder({
-      executor: 'nx:run-commands',
-      dependsOn: [artifactTarget],
-      options: {
-        command: `tsx ${GREENGRASS_SCRIPTS_DIR}/deploy-local.ts ${distDir}`,
-      },
-    });
-  }
+  projectConfig.targets[deployLocalTarget] = normalizeTargetKeyOrder({
+    executor: 'nx:run-commands',
+    dependsOn: [artifactTarget],
+    options: {
+      command: `tsx ${GREENGRASS_SCRIPTS_DIR}/deploy-local.ts ${distDir}`,
+    },
+  });
 
-  if (!projectConfig.targets[logsTarget]) {
-    projectConfig.targets[logsTarget] = normalizeTargetKeyOrder({
-      executor: 'nx:run-commands',
-      continuous: true,
-      options: {
-        command: `tsx ${GREENGRASS_SCRIPTS_DIR}/component-logs.ts ${componentName}`,
-      },
-    });
-  }
+  projectConfig.targets[logsTarget] = normalizeTargetKeyOrder({
+    executor: 'nx:run-commands',
+    continuous: true,
+    options: {
+      command: `tsx ${GREENGRASS_SCRIPTS_DIR}/component-logs.ts ${componentName}`,
+    },
+  });
 
   updateProjectConfiguration(tree, projectConfig.name, projectConfig);
 
