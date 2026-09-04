@@ -15,7 +15,10 @@ import {
   runInstall,
   tmpProjPath,
 } from '../utils';
-import { runGeneratorMatrix } from './generator-matrix';
+import {
+  runCdkOnlyGeneratorMatrix,
+  runGeneratorMatrix,
+} from './generator-matrix';
 
 export const runSmokeTest = async (
   dir: string,
@@ -58,6 +61,10 @@ export const runSmokeTest = async (
   );
 
   await runGeneratorMatrix(opts);
+
+  // Generators with CDK-only infrastructure, which the shared matrix cannot
+  // hold because the Terraform pipeline runs it too.
+  await runCdkOnlyGeneratorMatrix(opts);
 
   // Extra: generate a terraform project alongside CDK to verify both coexist.
   await runCLI(

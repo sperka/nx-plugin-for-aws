@@ -1,9 +1,19 @@
 /**
- * TypeScript types for options defined in schema.json
- * Update this to match schema.json if you make changes.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
+import type { GreengrassPlatform } from '../../utils/greengrass/constants.js';
+import type { IacOption } from '../../utils/iac.js';
+
 export interface TsGreengrassComponentGeneratorSchema {
-  // Replace with your options
-  exampleOption: string;
-  preferInstallDependencies?: boolean;
+  readonly project: string;
+  readonly name: string;
+  readonly componentName?: string;
+  readonly componentVersion?: string;
+  readonly publisher?: string;
+  readonly ipc?: boolean;
+  readonly platform?: GreengrassPlatform;
+  readonly infra?: 'component-version' | 'none';
+  readonly iac?: IacOption;
+  readonly preferInstallDependencies?: boolean;
 }

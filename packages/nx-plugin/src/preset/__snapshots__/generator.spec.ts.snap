@@ -121,6 +121,8 @@ The following list of generators are what is currently available in the \`@aws/n
 
 - **ts#docs**: Generates a documentation site
 
+- **ts#greengrass-component**: Add an AWS IoT Greengrass component to a TypeScript project (experimental)
+
 - **ts#infra**: Generates a cdk application
 
 - **ts#lambda-function**: Generate a TypeScript lambda function

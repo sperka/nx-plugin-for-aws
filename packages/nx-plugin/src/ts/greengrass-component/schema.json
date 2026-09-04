@@ -2,14 +2,69 @@
   "$schema": "https://json-schema.org/schema",
   "$id": "ts#greengrass-component",
   "title": "ts#greengrass-component",
+  "x-label": "Greengrass Component",
   "description": "Add an AWS IoT Greengrass component to a TypeScript project",
   "type": "object",
   "properties": {
-    "exampleOption": {
+    "project": {
       "type": "string",
-      "description": "An example option. Refer to https://nx.dev/extending-nx/recipes/generator-options for more info",
+      "description": "The typescript project to add the Greengrass component to",
+      "x-prompt": "Select the project to add the Greengrass component to",
+      "x-dropdown": "projects"
+    },
+    "name": {
+      "type": "string",
+      "description": "The name of the component to add",
       "x-priority": "important",
-      "x-prompt": "This is an example option!"
+      "$default": {
+        "$source": "argv",
+        "index": 0
+      },
+      "x-prompt": "What name would you like your Greengrass component to have? i.e: MyComponent"
+    },
+    "componentName": {
+      "type": "string",
+      "description": "The recipe ComponentName. Defaults to a reversed-domain name derived from your workspace's npm scope and the component name, eg. com.myscope.MyComponent."
+    },
+    "componentVersion": {
+      "type": "string",
+      "description": "The initial recipe ComponentVersion. Written into recipe.yaml once; the recipe is user-owned from then on.",
+      "default": "1.0.0"
+    },
+    "publisher": {
+      "type": "string",
+      "description": "The recipe ComponentPublisher. Defaults to the greengrass.publisher set in aws-nx-plugin.config.mts, else your workspace's npm scope."
+    },
+    "ipc": {
+      "type": "boolean",
+      "description": "Whether to wire the Greengrass IPC client (aws-iot-device-sdk-v2) and a least-privilege accessControl block scoped to the component's own topic. Off by default: aws-iot-device-sdk-v2 ships the aws-crt native addon, which cannot be bundled and requires an on-device install step.",
+      "default": false,
+      "x-priority": "important",
+      "x-prompt": "Would you like to use the Greengrass IPC client to publish/subscribe to local topics? (requires an on-device npm install step)"
+    },
+    "platform": {
+      "type": "string",
+      "description": "The core device platform to write into the recipe manifest. The bundle itself is pure JavaScript and is not platform-specific.",
+      "enum": ["linux-amd64", "linux-arm64"],
+      "default": "linux-arm64",
+      "x-priority": "important",
+      "x-prompt": "Which core device platform would you like to target?"
+    },
+    "infra": {
+      "type": "string",
+      "enum": ["component-version", "none"],
+      "default": "component-version",
+      "description": "Infrastructure to provision for this component. component-version vends a GreengrassComponentVersion CDK construct that publishes this component's built artifact.",
+      "x-priority": "important",
+      "x-prompt": "Which infrastructure would you like to provision?"
+    },
+    "iac": {
+      "type": "string",
+      "description": "The preferred IaC provider. By default this is inherited from your initial selection.",
+      "enum": ["inherit", "cdk", "terraform"],
+      "x-priority": "important",
+      "default": "inherit",
+      "x-prompt": "Which provider would you like to manage your infrastructure? (default: Inherit)"
     },
     "preferInstallDependencies": {
       "type": "boolean",
@@ -17,5 +72,5 @@
       "default": true
     }
   },
-  "required": ["exampleOption"]
+  "required": ["project", "name"]
 }

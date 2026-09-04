@@ -145,7 +145,7 @@ Add capabilities to existing projects:
 | `smithy#project`          | Generate a Smithy model project, either defining a service or a library of reusable shapes                           |
 | `terraform#project`       | Generates a Terraform project                                                                                        |
 | `ts#docs`                 | Generates a documentation site                                                                                       |
-| `ts#greengrass-component` | Add an AWS IoT Greengrass component to a TypeScript project                                                          |
+| `ts#greengrass-component` | Add an AWS IoT Greengrass component to a TypeScript project (experimental)                                           |
 | `ts#infra`                | Generates a cdk application                                                                                          |
 | `ts#lambda-function`      | Generate a TypeScript lambda function                                                                                |
 | `ts#dcr-proxy`            | Generate an OAuth Dynamic Client Registration (DCR) proxy construct for Cognito-authenticated MCP servers            |

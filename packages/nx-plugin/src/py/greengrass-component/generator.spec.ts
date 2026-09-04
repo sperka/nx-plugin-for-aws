@@ -648,6 +648,37 @@ describe('py#greengrass-component generator', () => {
           (d: string) => d === 'test-project:build',
         ),
       ).toHaveLength(1);
+
+      // The escalation has to record the iac on the entry its first run wrote,
+      // which is the only thing the orphan guard reads.
+      const projectConfig = JSON.parse(
+        tree.read('apps/test_project/project.json', 'utf-8'),
+      );
+      expect(projectConfig.metadata.components[0].iac).toBe('cdk');
+    });
+
+    it('throws on --infra none after an escalation from --infra none provisioned infrastructure', async () => {
+      seedPythonProject(tree);
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        infra: 'none',
+      });
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        infra: 'component-version',
+        iac: 'cdk',
+      });
+
+      await expect(
+        pyGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          infra: 'none',
+        }),
+      ).rejects.toThrow(/would leave that infrastructure orphaned/);
     });
 
     it('is a stable no-op when re-run with --infra none both times', async () => {

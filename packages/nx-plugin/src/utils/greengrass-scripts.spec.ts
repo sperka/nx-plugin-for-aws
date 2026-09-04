@@ -225,6 +225,33 @@ describe('greengrass recipe-utils.ts', () => {
       );
     });
 
+    it('should still reject a broken Run path when an Install step names the component dir', () => {
+      // The ipc=true shape: an Install step that `cd`s into the decompressed
+      // dir. It carries no trailing slash, so it cannot stand in for the Run
+      // path's reference and mask a broken one.
+      const recipe = {
+        ...validRecipe(),
+        Manifests: [
+          {
+            Artifacts: [
+              {
+                Uri: 's3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component.zip',
+                Unarchive: 'ZIP',
+              },
+            ],
+            Lifecycle: {
+              Install:
+                'cd {artifacts:decompressedPath}/my-component && npm install --omit=dev',
+              Run: 'node {artifacts:decompressedPath}/wrong-dir/index.js',
+            },
+          },
+        ],
+      };
+      expect(() => validateRecipe(recipe, 'my-component')).toThrow(
+        /Run script path must match the artifact zip base name/,
+      );
+    });
+
     it('should accept a top-level Lifecycle block, not only per-manifest', () => {
       const recipe = {
         ComponentName: 'com.example.MyComponent',
@@ -525,6 +552,63 @@ describe('greengrass build-artifact.ts', () => {
     expect(names).not.toContain('__pycache__/dependency.pyc');
   });
 
+  it('should package a package.json the user added to the component dir when no bundle-dir is given', () => {
+    const projectRoot = join(tmpDir, 'project');
+    const componentDir = join(projectRoot, 'greengrass', 'my-component');
+    const distDir = join(tmpDir, 'dist');
+    mkdirSync(componentDir, { recursive: true });
+    writeFileSync(join(componentDir, 'main.py'), 'print("hello")\n');
+    // Only bundle mode owns a package.json as framework metadata; without a
+    // bundle-dir it is a file the user put there and the device may need.
+    writeFileSync(
+      join(componentDir, 'package.json'),
+      '{"name":"user-authored"}',
+    );
+    writeFileSync(
+      join(componentDir, 'recipe.yaml'),
+      [
+        'ComponentName: com.example.MyComponent',
+        'ComponentVersion: 1.0.0',
+        'Manifests:',
+        '  - Artifacts:',
+        '      - Uri: s3://bucket/my-component.zip',
+        '        Unarchive: ZIP',
+        '    Lifecycle:',
+        '      Run: python3 {artifacts:decompressedPath}/my-component/main.py',
+        '',
+      ].join('\n'),
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(scriptsDir, 'build-artifact.mjs'),
+        projectRoot,
+        'my-component',
+        distDir,
+      ],
+      { encoding: 'utf-8' },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    const entries = readZipEntries(
+      readFileSync(
+        join(
+          distDir,
+          'greengrass-build',
+          'artifacts',
+          'com.example.MyComponent',
+          '1.0.0',
+          'my-component.zip',
+        ),
+      ),
+    );
+    expect(entries.map((entry) => entry.name).sort()).toEqual([
+      'main.py',
+      'package.json',
+    ]);
+  });
+
   it('should drop the previous version from greengrass-build on rebuild after a version bump', () => {
     const projectRoot = join(tmpDir, 'project');
     const componentDir = join(projectRoot, 'greengrass', 'my-component');
@@ -579,5 +663,164 @@ describe('greengrass build-artifact.ts', () => {
         ),
       ),
     ).toEqual(['1.0.1']);
+  });
+
+  it('should zip a bundle directory at the archive root instead of the component source, when given', () => {
+    const projectRoot = join(tmpDir, 'project');
+    const componentDir = join(projectRoot, 'greengrass', 'my-component');
+    const bundleDir = join(tmpDir, 'bundle');
+    const distDir = join(tmpDir, 'dist');
+    mkdirSync(componentDir, { recursive: true });
+    mkdirSync(bundleDir, { recursive: true });
+    // TypeScript source that produced the bundle - must not appear in the zip.
+    writeFileSync(join(componentDir, 'main.ts'), 'console.log("source");\n');
+    writeFileSync(
+      join(componentDir, 'package.json'),
+      '{"name":"my-component"}',
+    );
+    writeFileSync(join(bundleDir, 'index.js'), 'console.log("bundled");\n');
+    writeFileSync(
+      join(componentDir, 'recipe.yaml'),
+      [
+        'ComponentName: com.example.MyComponent',
+        'ComponentVersion: 1.0.0',
+        'Manifests:',
+        '  - Artifacts:',
+        '      - Uri: s3://bucket/my-component.zip',
+        '        Unarchive: ZIP',
+        '    Lifecycle:',
+        '      Run: node {artifacts:decompressedPath}/my-component/index.js',
+        '',
+      ].join('\n'),
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(scriptsDir, 'build-artifact.mjs'),
+        projectRoot,
+        'my-component',
+        distDir,
+        bundleDir,
+      ],
+      { encoding: 'utf-8' },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    const entries = readZipEntries(
+      readFileSync(
+        join(
+          distDir,
+          'greengrass-build',
+          'artifacts',
+          'com.example.MyComponent',
+          '1.0.0',
+          'my-component.zip',
+        ),
+      ),
+    );
+    const names = entries.map((entry) => entry.name).sort();
+    expect(names).toEqual(['index.js', 'package.json']);
+    expect(names).not.toContain('main.ts');
+  });
+
+  it('should omit package.json from a bundle-mode zip when no Install lifecycle needs it', () => {
+    const projectRoot = join(tmpDir, 'project');
+    const componentDir = join(projectRoot, 'greengrass', 'my-component');
+    const bundleDir = join(tmpDir, 'bundle');
+    const distDir = join(tmpDir, 'dist');
+    mkdirSync(componentDir, { recursive: true });
+    mkdirSync(bundleDir, { recursive: true });
+    writeFileSync(join(bundleDir, 'index.js'), 'console.log("bundled");\n');
+    writeFileSync(
+      join(componentDir, 'recipe.yaml'),
+      [
+        'ComponentName: com.example.MyComponent',
+        'ComponentVersion: 1.0.0',
+        'Manifests:',
+        '  - Artifacts:',
+        '      - Uri: s3://bucket/my-component.zip',
+        '        Unarchive: ZIP',
+        '    Lifecycle:',
+        '      Run: node {artifacts:decompressedPath}/my-component/index.js',
+        '',
+      ].join('\n'),
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(scriptsDir, 'build-artifact.mjs'),
+        projectRoot,
+        'my-component',
+        distDir,
+        bundleDir,
+      ],
+      { encoding: 'utf-8' },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    const entries = readZipEntries(
+      readFileSync(
+        join(
+          distDir,
+          'greengrass-build',
+          'artifacts',
+          'com.example.MyComponent',
+          '1.0.0',
+          'my-component.zip',
+        ),
+      ),
+    );
+    expect(entries.map((entry) => entry.name)).toEqual(['index.js']);
+  });
+
+  it('should fall back to packaging component source when the given bundle-dir does not exist', () => {
+    const projectRoot = join(tmpDir, 'project');
+    const componentDir = join(projectRoot, 'greengrass', 'my-component');
+    const distDir = join(tmpDir, 'dist');
+    mkdirSync(componentDir, { recursive: true });
+    writeFileSync(join(componentDir, 'main.py'), 'print("hello")\n');
+    writeFileSync(
+      join(componentDir, 'recipe.yaml'),
+      [
+        'ComponentName: com.example.MyComponent',
+        'ComponentVersion: 1.0.0',
+        'Manifests:',
+        '  - Artifacts:',
+        '      - Uri: s3://bucket/my-component.zip',
+        '        Unarchive: ZIP',
+        '    Lifecycle:',
+        '      Run: python3 {artifacts:decompressedPath}/my-component/main.py',
+        '',
+      ].join('\n'),
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(scriptsDir, 'build-artifact.mjs'),
+        projectRoot,
+        'my-component',
+        distDir,
+        join(tmpDir, 'does-not-exist'),
+      ],
+      { encoding: 'utf-8' },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    const entries = readZipEntries(
+      readFileSync(
+        join(
+          distDir,
+          'greengrass-build',
+          'artifacts',
+          'com.example.MyComponent',
+          '1.0.0',
+          'my-component.zip',
+        ),
+      ),
+    );
+    expect(entries.map((entry) => entry.name)).toEqual(['main.py']);
   });
 });

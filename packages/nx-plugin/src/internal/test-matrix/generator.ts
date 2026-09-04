@@ -36,6 +36,7 @@ import {
   tsDcrProxyGenerator,
   tsDocsGenerator,
   tsDynamoDBGenerator,
+  tsGreengrassComponentGenerator,
   tsInfraGenerator,
   tsLambdaFunctionGenerator,
   tsMcpServerGenerator,
@@ -228,33 +229,54 @@ export const internalTestMatrixGenerator = async (
     ...defaults,
   });
 
-  // Greengrass component, escalated to a published component version, plus
-  // the deployment project that publishes and deploys it. Hosted on a
-  // dedicated project: vendoring's `--only-binary :all:` refuses the
-  // source-built workspace members other entries add to py-project, and one
-  // component per project is the documented production default.
-  await pyProjectGenerator(tree, {
-    name: 'py-greengrass-project',
-    type: 'application',
-    ...projectDefaults,
-  });
-  await pyGreengrassComponentGenerator(tree, {
-    project: py('py-greengrass-project'),
-    name: 'my-greengrass-component',
-    iac: 'inherit',
-    ...defaults,
-  });
-  await greengrassDeploymentGenerator(tree, {
-    name: 'my-greengrass-deployment',
-    target: 'thing-group',
-    thingGroupName: 'my-greengrass-things',
-    artifactBucket: 'create',
-    deploymentPolicy: 'default',
-    nucleus: 'classic',
-    infra: 'deployment',
-    iac: 'inherit',
-    ...projectDefaults,
-  });
+  // Greengrass, which only CDK can provision: the `AWS::GreengrassV2`
+  // resources exist solely in the `hashicorp/awscc` Terraform provider, which
+  // no workspace pins, so these generators throw on `--iac terraform`.
+  if (options.infra !== 'terraform') {
+    // A component escalated to a published component version, plus the
+    // deployment project that publishes and deploys it. Hosted on a dedicated
+    // project: vendoring's `--only-binary :all:` refuses the source-built
+    // workspace members other entries add to py-project, and one component per
+    // project is the documented production default.
+    await pyProjectGenerator(tree, {
+      name: 'py-greengrass-project',
+      type: 'application',
+      ...projectDefaults,
+    });
+    await pyGreengrassComponentGenerator(tree, {
+      project: py('py-greengrass-project'),
+      name: 'my-greengrass-component',
+      iac: 'inherit',
+      ...defaults,
+    });
+    await greengrassDeploymentGenerator(tree, {
+      name: 'my-greengrass-deployment',
+      target: 'thing-group',
+      thingGroupName: 'my-greengrass-things',
+      artifactBucket: 'create',
+      deploymentPolicy: 'default',
+      nucleus: 'classic',
+      infra: 'deployment',
+      iac: 'inherit',
+      ...projectDefaults,
+    });
+
+    // The TypeScript component gets a dedicated host project for the same
+    // reason: the shared `bundle` target this generator wires rebuilds every
+    // bundled entrypoint in its project together, so hosting it alongside
+    // `ts-project`'s Lambda function would couple this device-oriented
+    // bundle's cache invalidation to an unrelated Lambda bundle's.
+    await tsProjectGenerator(tree, {
+      name: 'ts-greengrass-project',
+      ...projectDefaults,
+    });
+    await tsGreengrassComponentGenerator(tree, {
+      project: 'ts-greengrass-project',
+      name: 'my-ts-greengrass-component',
+      iac: 'inherit',
+      ...defaults,
+    });
+  }
 
   // MCP servers — uninfra'd and hosted on AgentCore.
   await pyMcpServerGenerator(tree, {

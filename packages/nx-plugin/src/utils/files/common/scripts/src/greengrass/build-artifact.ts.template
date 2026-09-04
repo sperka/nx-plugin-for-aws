@@ -5,7 +5,7 @@ import { loadRecipe, validateRecipe } from './recipe-utils<% if (esm) { %>.js<% 
 import { writeZip, type ZipEntry } from './zip-writer<% if (esm) { %>.js<% } %>';
 
 /*
- * Usage: build-artifact.ts <project-root> <component-dir> <dist>
+ * Usage: build-artifact.ts <project-root> <component-dir> <dist> [bundle-dir]
  *
  * <project-root>  path to the host project (e.g. a Python project root)
  * <component-dir> the component's directory name under <project-root>/greengrass/,
@@ -13,16 +13,29 @@ import { writeZip, type ZipEntry } from './zip-writer<% if (esm) { %>.js<% } %>'
  * <dist>           the component's dist root: reads <dist>/vendor (produced by
  *                  the "-vendor" target this target depends on) and writes
  *                  <dist>/greengrass-build/{recipes,artifacts}
+ * <bundle-dir>     optional: a directory of already-bundled deployable code
+ *                  (e.g. a TypeScript rolldown bundle output). When given and
+ *                  it exists, its contents are zipped at the archive root
+ *                  INSTEAD of <project-root>/greengrass/<component-dir>/ and
+ *                  <dist>/vendor - a compiled bundle is the deployable
+ *                  content, so the TypeScript source that produced it must
+ *                  not also ship. <project-root>/greengrass/<component-dir>/package.json,
+ *                  when present, is included too (the minimal manifest an
+ *                  Install lifecycle step's `npm install` needs for a native
+ *                  dependency the bundle marked external).
  *
- * Everything under <project-root>/greengrass/<component-dir>/ is packaged
- * except recipe.yaml and gdk-config.json, which are framework metadata, not
- * deployed code, and __pycache__ and .lock, which are tool staging output.
+ * Without <bundle-dir>, everything under <project-root>/greengrass/<component-dir>/
+ * is packaged except recipe.yaml and gdk-config.json, which are framework
+ * metadata, not deployed code, and __pycache__ and .lock, which are tool
+ * staging output.
  */
 
 const log = (msg: string): void => console.error(`[build-artifact] ${msg}`);
 
 function usage(): never {
-  log('Usage: build-artifact.ts <project-root> <component-dir> <dist>');
+  log(
+    'Usage: build-artifact.ts <project-root> <component-dir> <dist> [bundle-dir]',
+  );
   process.exit(1);
 }
 
@@ -56,7 +69,8 @@ function entriesFrom(dir: string, exclude: ReadonlySet<string>): ZipEntry[] {
 }
 
 function main(): void {
-  const [projectRoot, componentDirName, dist] = process.argv.slice(2);
+  const [projectRoot, componentDirName, dist, bundleDir] =
+    process.argv.slice(2);
   if (!projectRoot || !componentDirName || !dist) {
     usage();
   }
@@ -96,22 +110,42 @@ function main(): void {
   mkdirSync(artifactDir, { recursive: true });
   mkdirSync(recipesDir, { recursive: true });
 
-  // Framework metadata that ships alongside the recipe but never inside the
-  // deployed artifact.
-  const entries = entriesFrom(
-    componentDir,
-    new Set(['recipe.yaml', 'gdk-config.json', '.lock']),
-  );
-  if (existsSync(vendorDir)) {
-    // requirements.txt is the "-vendor" target's own intermediate, not
-    // something the device needs.
-    entries.push(
-      ...entriesFrom(vendorDir, new Set(['requirements.txt', '.lock'])),
+  let entries: ZipEntry[];
+  if (bundleDir && existsSync(bundleDir)) {
+    // A pre-bundled language (e.g. TypeScript via rolldown): the bundle
+    // output is the deployable content, so the source that produced it is
+    // never packaged.
+    entries = entriesFrom(bundleDir, new Set(['.lock']));
+    const packageJsonPath = join(componentDir, 'package.json');
+    if (existsSync(packageJsonPath)) {
+      // Ships alongside the bundle only when an Install lifecycle step needs
+      // it (e.g. `npm install` for a native dependency the bundle marked
+      // external) - absent for a fully self-contained bundle.
+      entries.push({
+        name: 'package.json',
+        data: readFileSync(packageJsonPath),
+      });
+    }
+  } else {
+    // Framework metadata that ships alongside the recipe but never inside
+    // the deployed artifact. A package.json here is the user's own, so it is
+    // packaged like any other source file - only bundle mode treats one as
+    // framework metadata.
+    entries = entriesFrom(
+      componentDir,
+      new Set(['recipe.yaml', 'gdk-config.json', '.lock']),
     );
+    if (existsSync(vendorDir)) {
+      // requirements.txt is the "-vendor" target's own intermediate, not
+      // something the device needs.
+      entries.push(
+        ...entriesFrom(vendorDir, new Set(['requirements.txt', '.lock'])),
+      );
+    }
   }
   if (entries.length === 0) {
     log(
-      `Nothing to package: "${componentDir}" has no deployable files and "${vendorDir}" does not exist`,
+      `Nothing to package: "${bundleDir && existsSync(bundleDir) ? bundleDir : componentDir}" has no deployable files and "${vendorDir}" does not exist`,
     );
     process.exit(1);
     return;
