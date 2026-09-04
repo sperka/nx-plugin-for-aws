@@ -163,6 +163,11 @@ describe('py#greengrass-component generator', () => {
     expect(targets['my-component-artifact'].options.command).toContain(
       'build-artifact.ts',
     );
+    // The vended scripts sit outside the project, so the cache key must
+    // name them or a refreshed script would serve a stale cached artifact.
+    expect(targets['my-component-artifact'].inputs).toContain(
+      '{workspaceRoot}/packages/common/scripts/src/greengrass/**/*',
+    );
 
     expect(targets['my-component-deploy-local']).toBeDefined();
     expect(targets['my-component-deploy-local'].dependsOn).toEqual([

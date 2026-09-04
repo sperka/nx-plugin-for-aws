@@ -247,6 +247,13 @@ export const pyGreengrassComponentGenerator = async (
 
   projectConfig.targets[artifactTarget] = normalizeTargetKeyOrder({
     cache: true,
+    // The vended scripts live outside this project, so the cache key must
+    // name them explicitly or a refreshed script serves a stale artifact.
+    inputs: [
+      'production',
+      '^production',
+      `{workspaceRoot}/${GREENGRASS_SCRIPTS_DIR}/**/*`,
+    ],
     outputs: [`{workspaceRoot}/${distDir}/greengrass-build`],
     executor: 'nx:run-commands',
     dependsOn: [vendorTarget],

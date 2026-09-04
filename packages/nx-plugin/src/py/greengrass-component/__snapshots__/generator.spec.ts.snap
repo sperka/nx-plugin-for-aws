@@ -120,6 +120,11 @@ Manifests:
       "executor": "nx:run-commands",
       "dependsOn": ["my-component-vendor"],
       "cache": true,
+      "inputs": [
+        "production",
+        "^production",
+        "{workspaceRoot}/packages/common/scripts/src/greengrass/**/*"
+      ],
       "outputs": [
         "{workspaceRoot}/dist/{projectRoot}/greengrass/my-component/greengrass-build"
       ],
