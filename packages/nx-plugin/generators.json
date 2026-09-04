@@ -255,6 +255,12 @@
       "guidePages": ["astro-docs"],
       "hidden": true
     },
+    "ts#greengrass-component": {
+      "factory": "./src/ts/greengrass-component/generator",
+      "schema": "./src/ts/greengrass-component/schema.json",
+      "description": "Add an AWS IoT Greengrass component to a TypeScript project",
+      "metric": "g75"
+    },
     "ts#infra": {
       "factory": "./src/infra/app/generator",
       "schema": "./src/infra/app/schema.json",
