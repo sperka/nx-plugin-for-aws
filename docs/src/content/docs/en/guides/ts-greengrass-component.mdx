@@ -1,23 +1,26 @@
 ---
-title: ts#greengrass-component
-description: Add an AWS IoT Greengrass component to a TypeScript project
+title: Greengrass Component (TypeScript)
+description: Add an AWS IoT Greengrass v2 component to a TypeScript project
 generator: ts#greengrass-component
 ---
 
 import { FileTree } from '@astrojs/starlight/components';
+import Link from '@components/link.astro';
 import RunGenerator from '@components/run-generator.astro';
 import GeneratorParameters from '@components/generator-parameters.astro';
+import NxCommands from '@components/nx-commands.astro';
 import Infrastructure from '@components/infrastructure.astro';
-import Snippet from '@components/snippet.astro';
 import OptionFilter from '@components/option-filter.astro';
 
-TODO: Add an overview of your generator here.
+The `ts#greengrass-component` generator adds an [AWS IoT Greengrass v2](https://docs.aws.amazon.com/greengrass/v2/developerguide/what-is-iot-greengrass.html) component to an existing TypeScript project: a recipe, a sample entrypoint, and the Nx targets to bundle the component and deploy it locally to a core device.
+
+With the default `infra: component-version` (unless `--infra none`), it also vends a `GreengrassComponentVersion` CDK construct that publishes the component's built artifact to AWS IoT Greengrass - pair it with a <Link path="guides/greengrass-deployment">`greengrass-deployment`</Link> project's artifact bucket to actually deploy it to a thing or thing group.
 
 ## Usage
 
-### Generate a ts#greengrass-component
+### Generate a Greengrass component
 
-You can generate a ts#greengrass-component in two ways:
+You can generate a Greengrass component in two ways:
 
 <RunGenerator generator="ts#greengrass-component" />
 
@@ -27,47 +30,235 @@ You can generate a ts#greengrass-component in two ways:
 
 ## Generator Output
 
-The generator will create the following project files:
+The generator adds the following files to your project:
 
 <FileTree>
- - todo.txt Update this section with what your generator generates!
+
+- greengrass
+  - \<component-name>
+    - recipe.yaml the component recipe — user-owned from first generation onward
+    - gdk-config.json a [GDK](https://github.com/aws-greengrass/aws-greengrass-gdk-cli)-shaped build config — framework-owned
+    - package.json only vended when ipc is true — the on-device install manifest for aws-iot-device-sdk-v2, framework-owned
+- src
+  - greengrass
+    - \<component-name>
+      - main.ts the component entrypoint — user-owned from first generation onward
+
 </FileTree>
 
-### Infrastructure
+Unlike `py#greengrass-component`, the entrypoint lives under your project's own `src/` tree (not beside `recipe.yaml`), so it compiles, lints and type-checks as part of the project's normal TypeScript targets.
 
-<Snippet name="shared-constructs" />
+## The Bundle and Three Targets
+
+TypeScript source is never packaged directly - the deployable content is a single-file bundle. The generator wires a shared `bundle` target (via the same [`rolldown`](https://rolldown.rs/) bundling this repo uses for `ts#lambda-function` and `ts#mcp-server`) plus three targets prefixed with the component's kebab-case name (`<c>` below):
+
+| Target             | Purpose                                                                          | Cached | Depends on |
+| ------------------ | --------------------------------------------------------------------------------- | ------ | ---------- |
+| `bundle`           | Bundles every entrypoint in the project (Lambda functions, MCP servers, this component, ...) into single-file, `node`-platform output | Yes    | `compile`  |
+| `<c>-artifact`     | Zips the component's bundle output into a GDK-shaped layout                       | Yes    | `bundle`   |
+| `<c>-deploy-local` | Creates a local deployment via `greengrass-cli` — runs **on** the core device      | No     | `<c>-artifact` |
+| `<c>-logs`         | Tails the component's log file — runs **on** the core device                      | No     | -          |
+
+`<c>-artifact` is also wired onto the project's `build` and `assemble` targets, so a normal build always produces a fresh artifact.
+
+`bundle` is shared with any other bundled entrypoint in the same project (a Lambda function added with `ts#lambda-function`, for example) - each entrypoint gets its own `rolldown.config.ts` entry and its own output subdirectory, but running `bundle` rebuilds all of them together. A dedicated project per component (the same production default `py#greengrass-component` recommends) keeps device-oriented bundling (a fixed `node` floor, `aws-iot-device-sdk-v2` external) from sharing a cache-invalidation boundary with unrelated cloud-oriented bundles (a Lambda function's, with `@aws-sdk/*` external).
+
+### Bundling (`bundle`)
+
+<NxCommands commands={['run <project>:bundle']} />
+
+This uses [`rolldown`](https://rolldown.rs/) to produce a single-file, `node`-platform bundle at:
+
+<FileTree>
+
+- dist/\<project-root>/bundle/greengrass/\<component-name>
+  - index.js the bundled entrypoint
+
+</FileTree>
+
+<OptionFilter when={{ ipc: true }} description="ipc=true marks aws-iot-device-sdk-v2 external">
+
+With `ipc: true`, `aws-iot-device-sdk-v2` is marked **external** rather than bundled: it depends on [`aws-crt`](https://github.com/awslabs/aws-crt-nodejs), which ships a native addon built per platform and Node ABI. A bundler cannot inline a native addon. The recipe's `Install` lifecycle step installs it on the device instead - see [The `aws-crt` native addon](#the-aws-crt-native-addon) below.
+
+</OptionFilter>
+
+<OptionFilter when={{ ipc: false }} description="ipc=false bundles everything, with no external dependency">
+
+With `ipc: false` (the default), nothing is marked external: the bundle is fully self-contained and needs nothing installed on the device beyond a `node` binary.
+
+</OptionFilter>
+
+### Building the artifact (`<c>-artifact`)
+
+<NxCommands commands={['run <project>:<component-name>-artifact']} />
+
+This zips the bundle output (plus `package.json`, only when `ipc: true`) into a zip at the archive root - not the TypeScript source that produced it - and writes the resolved recipe alongside it:
+
+<FileTree>
+
+- dist/\<project-root>/greengrass/\<component-name>
+  - greengrass-build
+    - recipes
+      - \<ComponentName>-\<version>.yaml resolved recipe
+    - artifacts
+      - \<ComponentName>
+        - \<version>
+          - \<component-name>.zip the deployable artifact
+
+</FileTree>
+
+This layout is **GDK-shaped, not GDK-compatible**: it matches the directory structure the [Greengrass Development Kit CLI](https://github.com/aws-greengrass/aws-greengrass-gdk-cli) produces, but it is written under Nx's own `dist/`, not the component folder GDK expects. The vended `gdk-config.json` (`build_system: custom`, `custom_build_command` pointing back at this same target) is there as an escape hatch if you also want to run `gdk component build`/`publish` directly - it is not a dependency of anything this generator wires.
+
+## Infrastructure
 
 <Infrastructure>
 <Fragment slot="cdk">
-<FileTree>
-  - packages/common/constructs/src
-    - app
-      - todo.txt document app specific cdk constructs if any
-    - core
-      - todo.txt document core cdk constructs if any
-</FileTree>
+
+With the default `infra: component-version` (`--infra none` skips this entirely), the generator vends `packages/common/constructs/src/app/greengrass/<component-name>.ts`: a `GreengrassComponentVersion` subclass pinning this component's `greengrass-build/recipes` and `greengrass-build/artifacts` paths. Wire it into your infra stack alongside a <Link path="guides/greengrass-deployment">`greengrass-deployment`</Link> project's artifact bucket:
+
+```ts title="packages/infra/src/stacks/application-stack.ts"
+import { MyComponent, MyDeployment } from '@my-scope/common-constructs';
+import { components } from '@my-scope/my-deployment';
+
+const deployment = new MyDeployment(this, 'MyDeployment', { components });
+const myComponent = new MyComponent(this, 'MyComponent', {
+  bucket: deployment.artifactBucket,
+});
+// Without this the IoT job can reach devices before the component version
+// exists, failing negotiation with FAILED_NO_STATE_CHANGE.
+deployment.dependOn(myComponent);
+```
+
+`nx run <infra>:deploy` publishes the component version - `common/constructs`'s `build`/`assemble` targets depend on this component's host project, so the artifact is always freshly built before it deploys.
+
 </Fragment>
 <Fragment slot="terraform">
-<FileTree>
-  - packages/common/terraform/src
-    - app
-      - todo.txt document app specific tf modules if any
-    - core
-      - todo.txt document core tf modules if any
-</FileTree>
+
+`--iac terraform` throws an actionable error rather than generating anything. Neither `AWS::GreengrassV2::ComponentVersion` nor `AWS::GreengrassV2::Deployment` exists in the `hashicorp/aws` Terraform provider this workspace pins. Use `--iac cdk` until that changes.
+
 </Fragment>
 </Infrastructure>
 
-:::danger
-Delete this section if your generator does not create infrastructure
+## Deploying and observing locally
+
+:::caution[Run these on the core device]
+`<c>-deploy-local` and `<c>-logs` only make sense executed **on** a Greengrass core device (or a container running the [nucleus](https://docs.aws.amazon.com/greengrass/v2/developerguide/greengrass-nucleus-component.html)) — they call `greengrass-cli`, which is installed alongside the nucleus, not on your development machine. Neither target is wired into the project's `dev` target: a routine `nx run <project>:dev` must never mutate a real device as a side effect.
 :::
 
-## TODO: More Docs!
+<NxCommands commands={['run <project>:<component-name>-deploy-local']} />
 
-Add more documentation detailing things like:
+Creates one local deployment (`greengrass-cli deployment create --recipeDir ... --artifactDir ... --merge <ComponentName>=<version>`) and exits — it does not tail or watch the deployment. Local deployments resolve the recipe's `s3://` placeholder artifact from `--artifactDir` by component name and version; this generator is experimental while that flow is being verified across nucleus versions.
 
-- How to work with the project/code you've generated
-- What new project.json targets have been added and how to run them (using the NxCommands component)
-- Best practices when working with your generated project/code
+<NxCommands commands={['run <project>:<component-name>-logs']} />
 
-See the existing guides for concrete examples.
+Tails the component's log file (`<GREENGRASS_ROOT>/logs/<ComponentName>.log`) in follow mode until you press Ctrl-C.
+
+Both targets read `GREENGRASS_ROOT` from the environment, defaulting to `/greengrass/v2`.
+
+## File ownership
+
+The component targets in `project.json`, `gdk-config.json` and (when `ipc: true`) `package.json` are framework-owned and re-synced to the current definition on every generator run, so manual edits to them do not survive a re-run. The vended scripts under `packages/common/scripts/src/greengrass/` are created once and never overwritten, so your patches survive. Delete those files and re-run the generator to pick up their current versions.
+
+## Recipe ownership
+
+`recipe.yaml` is written once, with the options you chose at generation time, and never rewritten by a later run of this generator, so re-running it with the same component name leaves your edits alone. Add configuration, lifecycle steps or dependencies directly in the recipe as your component grows.
+
+Two things in the generated recipe are load-bearing and worth understanding before you edit them:
+
+```yaml
+Manifests:
+  - Artifacts:
+      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<component-name>.zip
+        Unarchive: ZIP
+    Lifecycle:
+      Run: node {artifacts:decompressedPath}/<component-name>/index.js
+```
+
+- The `BUCKET_NAME` / `COMPONENT_NAME` / `COMPONENT_VERSION` placeholders are the same ones GDK uses. `<c>-artifact` copies them through to the resolved recipe untouched; a later publishing step substitutes them with the real bucket and key.
+- The `Uri` basename must stay `<component-name>.zip`, because that is the name `<c>-artifact` gives the zip, and Greengrass unarchives it to `{artifacts:decompressedPath}/<component-name>/` — which is where the `Run` script looks for `index.js`, the bundle's output filename. `<c>-artifact` fails with an explicit message if you break that pairing.
+- The device must have a **modern `node` binary on `PATH`** — the bundle is pure JavaScript with no ABI pinning (unlike Python's interpreter-version trap), but it still needs Node.js 18 or later to run.
+
+### Component version immutability
+
+`ComponentVersion` in `recipe.yaml` is user-owned from the start. Once a version of a component is published to AWS IoT Greengrass, that version's content can never change — publishing again under the same version with different content is rejected. **Bump `ComponentVersion` in `recipe.yaml` whenever you change the component**, before building a new artifact and redeploying via the `GreengrassComponentVersion` construct described in [Infrastructure](#infrastructure) above.
+
+<OptionFilter when={{ ipc: true }} description="ipc=true wires a least-privilege accessControl block">
+
+### IPC access control
+
+With `ipc: true`, the recipe includes a least-privilege `accessControl` block scoped to the component's own topic:
+
+```yaml
+ComponentConfiguration:
+  DefaultConfiguration:
+    accessControl:
+      aws.greengrass.ipc.pubsub:
+        <ComponentName>:pubsub:1:
+          policyDescription: Allow publishing heartbeat messages to this component's own topic.
+          operations:
+            - aws.greengrass#PublishToTopic
+          resources:
+            - <ComponentName>/heartbeat
+```
+
+Depending on `aws-iot-device-sdk-v2` alone does not authorize IPC operations — Greengrass enforces this `accessControl` policy independently, so widen `operations`/`resources` here as your component needs to publish or subscribe to more topics.
+
+</OptionFilter>
+
+## Implementing your component
+
+<OptionFilter when={{ ipc: true }} description="ipc=true — main.ts publishes over the Greengrass IPC client">
+
+With `ipc: true`, `main.ts` uses [`aws-iot-device-sdk-v2`](https://github.com/aws/aws-iot-device-sdk-js-v2)'s `greengrasscoreipc` client to publish a heartbeat message to the component's own local topic every 30 seconds:
+
+```ts
+import { greengrasscoreipc } from 'aws-iot-device-sdk-v2';
+
+export async function publishHeartbeat(
+  client: greengrasscoreipc.Client,
+  sequence: number,
+): Promise<void> {
+  await client.publishToTopic({
+    topic: TOPIC,
+    publishMessage: { jsonMessage: { message: { sequence } } },
+  });
+}
+```
+
+</OptionFilter>
+
+<OptionFilter when={{ ipc: false }} description="ipc=false — main.ts is a plain long-running loop">
+
+With `ipc: false` (the default), `main.ts` is a plain long-running loop that logs a heartbeat every 30 seconds, with no Greengrass SDK dependency at all - and no on-device install step, since the bundle is fully self-contained.
+
+</OptionFilter>
+
+### The `aws-crt` native addon
+
+<OptionFilter when={{ ipc: true }} description="Only relevant when ipc=true, since aws-iot-device-sdk-v2 depends on aws-crt">
+
+`aws-iot-device-sdk-v2` depends on [`aws-crt`](https://github.com/awslabs/aws-crt-nodejs), which ships a native addon built per platform and Node ABI — there is no pure-JavaScript fallback. A bundler cannot inline this, so `bundle` marks it **external** instead, and the recipe's `Install` lifecycle step runs `npm install --omit=dev` in the decompressed artifact directory to install it on the device from the vended `package.json`:
+
+```yaml
+Lifecycle:
+  Install: cd {artifacts:decompressedPath}/<component-name> && npm install --omit=dev
+  Run: node {artifacts:decompressedPath}/<component-name>/index.js
+```
+
+This is `npm install`, not `npm ci` — `npm ci` requires a `package-lock.json` this generator does not vend. `npm install` works from `package.json` alone, at the cost of resolving the dependency tree fresh on every deployment. **This step needs network access and a working `npm` on the device.** If your fleet has neither, keep `ipc: false` or pre-provision the dependency another way.
+
+</OptionFilter>
+
+## Supported platforms
+
+The `platform` option only affects the recipe manifest's `Platform` block - the bundle itself is pure JavaScript and is not platform-specific. Multi-architecture manifests (one recipe covering both `linux-amd64` and `linux-arm64`) and Windows cores are deferred, matching `py#greengrass-component`.
+
+### Nucleus classic vs nucleus lite
+
+The generated recipe and targets are verified against the [classic nucleus](https://docs.aws.amazon.com/greengrass/v2/developerguide/greengrass-nucleus-component.html) (`aws.greengrass.Nucleus`). [Nucleus lite](https://docs.aws.amazon.com/greengrass/v2/developerguide/greengrass-nucleus-lite-component.html) (`aws.greengrass.NucleusLite`) is a smaller runtime for constrained devices, and it is not equivalent:
+
+- Lite runs generic components only, and supports a subset of the recipe keys classic accepts.
+- Lite implements a subset of the IPC operations, so an `accessControl` policy that classic honours may not be enforceable there.
+- Lite gained container support only in v2.15 (July 2025).
+
+A component that works on classic can therefore misbehave on lite. Test on the nucleus your fleet actually runs before shipping; there is no runtime capability detection in the generated code.

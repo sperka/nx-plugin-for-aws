@@ -1,0 +1,8 @@
+{
+  "name": "<%- componentDirName %>",
+  "private": true,
+  "description": "Installed on the device by this component's recipe Install step - not published.",
+  "dependencies": {
+    "aws-iot-device-sdk-v2": "<%- awsIotDeviceSdkPin %>"
+  }
+}

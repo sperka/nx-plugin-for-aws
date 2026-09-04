@@ -109,6 +109,7 @@ export const TS_VERSIONS = {
   aws4fetch: '1.0.20',
   'aws-cdk': '2.1139.0',
   'aws-cdk-lib': '2.268.0',
+  'aws-iot-device-sdk-v2': '1.28.0',
   'aws-xray-sdk-core': '3.12.0',
   constructs: '10.8.1',
   cors: '2.8.6',

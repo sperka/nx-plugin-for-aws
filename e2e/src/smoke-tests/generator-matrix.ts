@@ -25,6 +25,9 @@ interface RunCliOpts {
  * Pass `{ preferInstallDependencies: true }` to install after every generator
  * instead — the idempotency test needs this so lockfiles (including `uv.lock`)
  * are fully synced before it snapshots the workspace.
+ *
+ * Generators whose infrastructure only exists for CDK cannot live here, since
+ * the Terraform pipeline runs the same list — see `runCdkOnlyGeneratorMatrix`.
  */
 export const runGeneratorMatrix = async (
   opts: RunCliOpts,
@@ -125,25 +128,6 @@ export const runGeneratorMatrix = async (
   );
   await runCLI(
     `generate @aws/nx-plugin:py#lambda-function --project=e2e_test.py_project --name=my-function --event=Any --no-interactive${deferFlag}`,
-    opts,
-  );
-
-  // Greengrass component, escalated to a published component version, plus
-  // the deployment project that publishes and deploys it. A dedicated host
-  // project: vendoring uses `--only-binary :all:`, which refuses the
-  // source-built workspace members other matrix entries add to the shared
-  // py_project — and one component per project is the documented production
-  // default.
-  await runCLI(
-    `generate @aws/nx-plugin:py#project --name=py-greengrass-project --projectType=application --no-interactive${deferFlag}`,
-    opts,
-  );
-  await runCLI(
-    `generate @aws/nx-plugin:py#greengrass-component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --no-interactive${deferFlag}`,
-    opts,
-  );
-  await runCLI(
-    `generate @aws/nx-plugin:greengrass-deployment --name=my-greengrass-deployment --target=thing-group --thingGroupName=my-greengrass-things --no-interactive${deferFlag}`,
     opts,
   );
 
@@ -558,6 +542,61 @@ export const runGeneratorMatrix = async (
   );
   await runCLI(
     `generate @aws/nx-plugin:ts#nx-migration --project=@e2e-test/plugin --name=upgrade-framework --description="Upgrade the framework and reconcile call sites" --kind=hybrid --no-interactive${deferFlag}`,
+    opts,
+  );
+};
+
+/**
+ * Generators the shared matrix above cannot host, because their infrastructure
+ * is CDK-only: the Greengrass constructs throw on `--iac terraform`, since the
+ * `AWS::GreengrassV2` resources exist only in the `hashicorp/awscc` provider,
+ * which no workspace pins. A generator inherits the workspace's provider, so
+ * these run from the CDK smoke test and the idempotency test only.
+ *
+ * Takes the same install-deferral contract as `runGeneratorMatrix`.
+ */
+export const runCdkOnlyGeneratorMatrix = async (
+  opts: RunCliOpts,
+  {
+    preferInstallDependencies = false,
+  }: { preferInstallDependencies?: boolean } = {},
+) => {
+  const deferFlag = preferInstallDependencies
+    ? ''
+    : ' --prefer-install-dependencies=false';
+
+  // Greengrass component, escalated to a published component version, plus
+  // the deployment project that publishes and deploys it. A dedicated host
+  // project: vendoring uses `--only-binary :all:`, which refuses the
+  // source-built workspace members other matrix entries add to the shared
+  // py_project — and one component per project is the documented production
+  // default.
+  await runCLI(
+    `generate @aws/nx-plugin:py#project --name=py-greengrass-project --projectType=application --no-interactive${deferFlag}`,
+    opts,
+  );
+  await runCLI(
+    `generate @aws/nx-plugin:py#greengrass-component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --no-interactive${deferFlag}`,
+    opts,
+  );
+  await runCLI(
+    `generate @aws/nx-plugin:greengrass-deployment --name=my-greengrass-deployment --target=thing-group --thingGroupName=my-greengrass-things --no-interactive${deferFlag}`,
+    opts,
+  );
+
+  // TypeScript Greengrass component. A dedicated host project, mirroring the
+  // py#greengrass-component decision above: the shared `bundle` target this
+  // generator wires (via addTypeScriptBundleTarget) rebuilds every bundled
+  // entrypoint in its project together, so hosting it alongside the
+  // cloud-oriented `my-function` Lambda would couple this device-oriented
+  // bundle's cache invalidation (fixed `node` floor, `aws-iot-device-sdk-v2`
+  // external) to an unrelated Lambda bundle's (`@aws-sdk/*` external).
+  await runCLI(
+    `generate @aws/nx-plugin:ts#project --name=ts-greengrass-project --no-interactive${deferFlag}`,
+    opts,
+  );
+  await runCLI(
+    `generate @aws/nx-plugin:ts#greengrass-component --project=ts-greengrass-project --name=my-ts-greengrass-component --no-interactive${deferFlag}`,
     opts,
   );
 };

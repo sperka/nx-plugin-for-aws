@@ -101,6 +101,17 @@ describe('smoke test - infra-none', () => {
       opts,
     );
 
+    // TypeScript Greengrass component with infra=none — a dedicated host
+    // project, mirroring the py#greengrass-component decision above.
+    await runCLI(
+      `generate @aws/nx-plugin:ts#project --name=ts-greengrass-project --no-interactive`,
+      opts,
+    );
+    await runCLI(
+      `generate @aws/nx-plugin:ts#greengrass-component --project=ts-greengrass-project --name=my-ts-greengrass-component --infra=none --no-interactive`,
+      opts,
+    );
+
     await runCLI(`sync --verbose`, opts);
     await runCLI(
       `run-many --target build --all --output-style=stream --verbose`,
@@ -167,6 +178,12 @@ describe('smoke test - infra-none', () => {
       opts,
     );
 
+    // Re-run the TypeScript Greengrass component with infra=component-version
+    await runCLI(
+      `generate @aws/nx-plugin:ts#greengrass-component --project=ts-greengrass-project --name=my-ts-greengrass-component --infra=component-version --no-interactive`,
+      opts,
+    );
+
     await runCLI(`sync --verbose`, opts);
     await runCLI(
       `run-many --target build --all --output-style=stream --verbose`,
@@ -184,6 +201,11 @@ describe('smoke test - infra-none', () => {
     expect(
       existsSync(
         `${projectRoot}/packages/common/constructs/src/app/greengrass/my-greengrass-component.ts`,
+      ),
+    ).toBe(true);
+    expect(
+      existsSync(
+        `${projectRoot}/packages/common/constructs/src/app/greengrass/my-ts-greengrass-component.ts`,
       ),
     ).toBe(true);
   });
