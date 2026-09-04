@@ -229,8 +229,16 @@ export const internalTestMatrixGenerator = async (
 
   // Greengrass component — packaging and local deployment only; there is no
   // `infra`/`iac` option yet, so this generator takes no `iac: 'inherit'`.
+  // Hosted on a dedicated project: vendoring's `--only-binary :all:` refuses
+  // the source-built workspace members other entries add to py-project, and
+  // one component per project is the documented production default.
+  await pyProjectGenerator(tree, {
+    name: 'py-greengrass-project',
+    type: 'application',
+    ...projectDefaults,
+  });
   await pyGreengrassComponentGenerator(tree, {
-    project: py('py-project'),
+    project: py('py-greengrass-project'),
     name: 'my-greengrass-component',
     ...defaults,
   });
