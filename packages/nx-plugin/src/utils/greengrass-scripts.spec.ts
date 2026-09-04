@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -17,9 +19,9 @@ import { inflateRawSync } from 'node:zlib';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
-// Load the actual template files and strip EJS tags for import - a no-op for
-// these two templates, which have no cross-file imports and so no `<% %>`
-// tags, but kept for consistency with the other vended-script test suites.
+// Load the actual template files and strip EJS tags for import. The `<% if
+// (esm) { %>.js<% } %>` suffix on a relative import resolves to its ESM form,
+// because these tests import the transpiled output as `.mjs`.
 const loadTemplate = (relativePath: string): string => {
   const content = readFileSync(
     join(
@@ -33,20 +35,25 @@ const loadTemplate = (relativePath: string): string => {
     ),
     'utf-8',
   );
-  return content.replace(/^import.*<%.*%>.*$/gm, '').replace(/<%.*?%>/g, '');
+  return content
+    .replace(/<% if \(esm\) { %>\.js<% } %>/g, '.js')
+    .replace(/<%.*?%>/g, '');
 };
+
+const transpileTemplate = (templateFileName: string): string =>
+  ts.transpileModule(loadTemplate(templateFileName), {
+    compilerOptions: { module: ts.ModuleKind.ESNext },
+  }).outputText;
 
 // Unlike the plugin's own `importTypeScriptModule` (a `data:` URL import,
 // which cannot resolve bare package specifiers because it has no real
-// location to resolve `node_modules` against), these two templates import
-// real npm packages (`js-yaml`). So the module is written to a real
-// temporary file next to this spec instead, which resolves against this
-// package's own installed dependencies exactly as the vended copy resolves
-// against the shared-scripts project's dependencies.
+// location to resolve `node_modules` against), these templates import real npm
+// packages (`js-yaml`). So the module is written to a real temporary file next
+// to this spec instead, which resolves against this package's own installed
+// dependencies exactly as the vended copy resolves against the shared-scripts
+// project's dependencies.
 const importVendedModule = async <T>(templateFileName: string): Promise<T> => {
-  const jsCode = ts.transpileModule(loadTemplate(templateFileName), {
-    compilerOptions: { module: ts.ModuleKind.ESNext },
-  }).outputText;
+  const jsCode = transpileTemplate(templateFileName);
   const tempPath = join(
     import.meta.dirname,
     `.tmp-${templateFileName.replace(/\W/g, '-')}-${process.pid}-${Date.now()}.mjs`,
@@ -80,6 +87,28 @@ interface ZipWriterModule {
     entries: readonly { name: string; data: Buffer }[],
     outPath: string,
   ) => void;
+}
+
+/** Minimal independent ZIP reader used only to verify the vended scripts' output. */
+function readZipEntries(buf: Buffer): { name: string; data: Buffer }[] {
+  const entries: { name: string; data: Buffer }[] = [];
+  let offset = 0;
+  while (offset < buf.length && buf.readUInt32LE(offset) === 0x04034b50) {
+    const method = buf.readUInt16LE(offset + 8);
+    const compressedSize = buf.readUInt32LE(offset + 18);
+    const uncompressedSize = buf.readUInt32LE(offset + 22);
+    const nameLen = buf.readUInt16LE(offset + 26);
+    const extraLen = buf.readUInt16LE(offset + 28);
+    const nameStart = offset + 30;
+    const dataStart = nameStart + nameLen + extraLen;
+    const name = buf.toString('utf-8', nameStart, nameStart + nameLen);
+    const compressed = buf.subarray(dataStart, dataStart + compressedSize);
+    const data = method === 8 ? inflateRawSync(compressed) : compressed;
+    expect(data.length).toBe(uncompressedSize);
+    entries.push({ name, data });
+    offset = dataStart + compressedSize;
+  }
+  return entries;
 }
 
 describe('greengrass recipe-utils.ts', () => {
@@ -355,28 +384,6 @@ describe('greengrass zip-writer.ts', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  /** Minimal independent ZIP reader used only to verify writeZip's output. */
-  function readZipEntries(buf: Buffer): { name: string; data: Buffer }[] {
-    const entries: { name: string; data: Buffer }[] = [];
-    let offset = 0;
-    while (offset < buf.length && buf.readUInt32LE(offset) === 0x04034b50) {
-      const method = buf.readUInt16LE(offset + 8);
-      const compressedSize = buf.readUInt32LE(offset + 18);
-      const uncompressedSize = buf.readUInt32LE(offset + 22);
-      const nameLen = buf.readUInt16LE(offset + 26);
-      const extraLen = buf.readUInt16LE(offset + 28);
-      const nameStart = offset + 30;
-      const dataStart = nameStart + nameLen + extraLen;
-      const name = buf.toString('utf-8', nameStart, nameStart + nameLen);
-      const compressed = buf.subarray(dataStart, dataStart + compressedSize);
-      const data = method === 8 ? inflateRawSync(compressed) : compressed;
-      expect(data.length).toBe(uncompressedSize);
-      entries.push({ name, data });
-      offset = dataStart + compressedSize;
-    }
-    return entries;
-  }
-
   it('should round-trip multiple files with their exact contents', () => {
     const outPath = join(tmpDir, 'out.zip');
     const entries = [
@@ -420,5 +427,100 @@ describe('greengrass zip-writer.ts', () => {
     // Just the End Of Central Directory record, with zero entries.
     expect(buf.readUInt32LE(0)).toBe(0x06054b50);
     expect(buf.readUInt16LE(10)).toBe(0);
+  });
+});
+
+describe('greengrass build-artifact.ts', () => {
+  let tmpDir: string;
+  let scriptsDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'greengrass-build-artifact-'));
+    scriptsDir = mkdtempSync(
+      join(import.meta.dirname, '.tmp-greengrass-build-artifact-'),
+    );
+    writeFileSync(
+      join(scriptsDir, 'recipe-utils.mjs'),
+      transpileTemplate('recipe-utils.ts.template'),
+    );
+    writeFileSync(
+      join(scriptsDir, 'zip-writer.mjs'),
+      transpileTemplate('zip-writer.ts.template'),
+    );
+    writeFileSync(
+      join(scriptsDir, 'build-artifact.mjs'),
+      transpileTemplate('build-artifact.ts.template')
+        .replaceAll('./recipe-utils.js', './recipe-utils.mjs')
+        .replaceAll('./zip-writer.js', './zip-writer.mjs'),
+    );
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(scriptsDir, { recursive: true, force: true });
+  });
+
+  it('should exclude staging __pycache__ files and .lock entries', () => {
+    const projectRoot = join(tmpDir, 'project');
+    const componentDir = join(projectRoot, 'greengrass', 'my-component');
+    const distDir = join(tmpDir, 'dist');
+    const vendorDir = join(distDir, 'vendor');
+    mkdirSync(join(componentDir, '__pycache__'), { recursive: true });
+    mkdirSync(join(vendorDir, '__pycache__'), { recursive: true });
+    writeFileSync(join(componentDir, 'main.py'), 'print("hello")\n');
+    writeFileSync(
+      join(componentDir, 'recipe.yaml'),
+      [
+        'ComponentName: com.example.MyComponent',
+        'ComponentVersion: 1.0.0',
+        'Manifests:',
+        '  - Artifacts:',
+        '      - Uri: s3://bucket/my-component.zip',
+        '        Unarchive: ZIP',
+        '    Lifecycle:',
+        '      Run: python3 {artifacts:decompressedPath}/my-component/main.py',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(join(componentDir, '.lock'), '');
+    writeFileSync(
+      join(componentDir, '__pycache__', 'main.pyc'),
+      'source-cache',
+    );
+    writeFileSync(join(vendorDir, 'dependency.py'), 'VERSION = "1.0"\n');
+    writeFileSync(join(vendorDir, 'requirements.txt'), 'dependency==1.0\n');
+    writeFileSync(join(vendorDir, '.lock'), '');
+    writeFileSync(
+      join(vendorDir, '__pycache__', 'dependency.pyc'),
+      'staging-cache',
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(scriptsDir, 'build-artifact.mjs'),
+        projectRoot,
+        'my-component',
+        distDir,
+      ],
+      { encoding: 'utf-8' },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    const entries = readZipEntries(
+      readFileSync(
+        join(
+          distDir,
+          'greengrass-build',
+          'artifacts',
+          'com.example.MyComponent',
+          '1.0.0',
+          'my-component.zip',
+        ),
+      ),
+    );
+    const names = entries.map((entry) => entry.name);
+    expect(names).toEqual(['main.py', 'dependency.py']);
+    expect(names).not.toContain('__pycache__/dependency.pyc');
   });
 });

@@ -125,6 +125,7 @@ describe('py#greengrass-component generator', () => {
     const commands =
       projectConfig.targets['my-component-vendor'].options.commands;
     expect(commands[0]).toContain('--package test-project');
+    expect(commands[0]).toContain('--no-emit-project');
     expect(commands[1]).toContain('--python-version 3.11');
     expect(commands[1]).toContain('--python-platform x86_64-manylinux_2_28');
     expect(commands[1]).toContain('--only-binary :all:');

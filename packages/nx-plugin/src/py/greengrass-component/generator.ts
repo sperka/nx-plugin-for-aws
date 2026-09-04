@@ -237,7 +237,7 @@ export const pyGreengrassComponentGenerator = async (
       dependsOn: ['compile'],
       options: {
         commands: [
-          `uv export --frozen --no-dev --no-editable --project {projectRoot} --package ${projectConfig.name} -o ${distDir}/vendor/requirements.txt`,
+          `uv export --frozen --no-dev --no-editable --no-emit-project --project {projectRoot} --package ${projectConfig.name} -o ${distDir}/vendor/requirements.txt`,
           // `--only-binary :all:` is required: without it an sdist can build a
           // host-architecture binary into a cross-architecture artifact.
           `uv pip install -n --no-deps --no-installer-metadata --no-compile-bytecode --only-binary :all: --python-platform ${uvPlatform} --python-version ${pythonFloor} --target ${distDir}/vendor -r ${distDir}/vendor/requirements.txt`,

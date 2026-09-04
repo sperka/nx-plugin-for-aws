@@ -9,6 +9,7 @@ MAIN_PATH = PROJECT_ROOT / "greengrass" / "<%- componentDirName %>" / "main.py"
 
 def _load_main():
     spec = importlib.util.spec_from_file_location("<%- componentSnakeCase %>_main", MAIN_PATH)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
