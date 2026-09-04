@@ -1,0 +1,218 @@
+import { Arn, ArnFormat, RemovalPolicy, Stack, Token } from 'aws-cdk-lib';
+import { CfnDeployment } from 'aws-cdk-lib/aws-greengrassv2';
+import { CfnThingGroup } from 'aws-cdk-lib/aws-iot';
+import { Construct } from 'constructs';
+
+/**
+ * A component to deploy, in the friendly shape this construct accepts -
+ * `configurationUpdate.merge` is a plain object here; CloudFormation wants it
+ * JSON-encoded, which this construct does internally.
+ */
+export interface GreengrassDeploymentComponent {
+  readonly componentVersion?: string;
+  readonly configurationUpdate?: {
+    readonly merge?: Record<string, unknown>;
+    readonly reset?: readonly string[];
+  };
+  readonly runWith?: CfnDeployment.ComponentRunWithProperty;
+}
+
+export interface GreengrassDeploymentProps {
+  /**
+   * Creates a new `AWS::IoT::ThingGroup` and deploys to it. Mutually
+   * exclusive with {@link thingName} and {@link targetArn}.
+   */
+  readonly thingGroupName?: string;
+
+  /**
+   * Deploys to an existing thing, imported by name (not created). Mutually
+   * exclusive with {@link thingGroupName} and {@link targetArn}.
+   */
+  readonly thingName?: string;
+
+  /**
+   * Deploys to an existing thing or thing group, imported by ARN (not
+   * created). Validated against this stack's own partition, account and
+   * region when both the ARN and the stack's own value are literal strings -
+   * a copy-pasted ARN from the wrong account or region fails synth rather
+   * than the deployment. An environment-agnostic stack has none of those
+   * values at synth time, so nothing is checked. Mutually exclusive with
+   * {@link thingGroupName} and {@link thingName}.
+   */
+  readonly targetArn?: string;
+
+  /** The parent deployment's ARN, for a subdeployment onto a nested group. */
+  readonly parentTargetArn?: string;
+
+  readonly deploymentName?: string;
+
+  /** Components to deploy, keyed by `ComponentName`. */
+  readonly components?: Record<string, GreengrassDeploymentComponent>;
+
+  readonly deploymentPolicies?: CfnDeployment.DeploymentPoliciesProperty;
+
+  readonly iotJobConfiguration?: CfnDeployment.DeploymentIoTJobConfigurationProperty;
+
+  /**
+   * Applied to both `DeletionPolicy` and `UpdateReplacePolicy` on the
+   * `AWS::GreengrassV2::Deployment` resource. Deleting this resource removes
+   * *deployment management state* - it does not uninstall components already
+   * running on devices; that needs an explicit deployment revision that drops
+   * them. `RETAIN` is the default so a stack deletion can't orphan that
+   * state silently.
+   *
+   * @default RemovalPolicy.RETAIN
+   */
+  readonly removalPolicy?: RemovalPolicy;
+
+  readonly tags?: Record<string, string>;
+}
+
+const toCfnComponents = (
+  components: Record<string, GreengrassDeploymentComponent> | undefined,
+): Record<string, CfnDeployment.ComponentDeploymentSpecificationProperty> | undefined => {
+  if (!components) {
+    return undefined;
+  }
+  return Object.fromEntries(
+    Object.entries(components).map(([componentName, component]) => [
+      componentName,
+      {
+        componentVersion: component.componentVersion,
+        runWith: component.runWith,
+        ...(component.configurationUpdate
+          ? {
+              configurationUpdate: {
+                reset: component.configurationUpdate.reset as
+                  | string[]
+                  | undefined,
+                ...(component.configurationUpdate.merge
+                  ? { merge: JSON.stringify(component.configurationUpdate.merge) }
+                  : {}),
+              },
+            }
+          : {}),
+      },
+    ]),
+  );
+};
+
+/** Throws unless exactly one of the three target props is set. */
+const resolveTargetInput = (
+  props: GreengrassDeploymentProps,
+): 'thingGroupName' | 'thingName' | 'targetArn' => {
+  const provided = (
+    ['thingGroupName', 'thingName', 'targetArn'] as const
+  ).filter((key) => props[key] !== undefined);
+  if (provided.length !== 1) {
+    throw new Error(
+      `GreengrassDeployment requires exactly one of thingGroupName, thingName or targetArn, got: ${
+        provided.length === 0 ? '(none)' : provided.join(', ')
+      }.`,
+    );
+  }
+  return provided[0];
+};
+
+/**
+ * Throws if a literal (non-token) ARN's partition, account or region doesn't
+ * match the stack it's being deployed from. Every comparison is skipped when
+ * either side is an unresolved token - synth can't reason about a value that
+ * isn't known yet, and an environment-agnostic stack (one without an explicit
+ * `env`) leaves account, region and partition all unresolved.
+ */
+const assertArnMatchesStack = (stack: Stack, arn: string): void => {
+  if (Token.isUnresolved(arn)) {
+    return;
+  }
+  const parsed = Arn.split(arn, ArnFormat.SLASH_RESOURCE_NAME);
+  const mismatches: string[] = [];
+  if (parsed.service !== 'iot') {
+    mismatches.push(`service "${parsed.service}" is not "iot"`);
+  }
+  // `stack.partition` is the `AWS::Partition` pseudo parameter, so it is
+  // unresolved even on a stack with an explicit `env` - partition isn't
+  // derivable from an account number alone.
+  if (
+    parsed.partition &&
+    !Token.isUnresolved(stack.partition) &&
+    parsed.partition !== stack.partition
+  ) {
+    mismatches.push(
+      `partition "${parsed.partition}" does not match stack partition "${stack.partition}"`,
+    );
+  }
+  if (
+    parsed.account &&
+    !Token.isUnresolved(stack.account) &&
+    parsed.account !== stack.account
+  ) {
+    mismatches.push(
+      `account "${parsed.account}" does not match stack account "${stack.account}"`,
+    );
+  }
+  if (
+    parsed.region &&
+    !Token.isUnresolved(stack.region) &&
+    parsed.region !== stack.region
+  ) {
+    mismatches.push(
+      `region "${parsed.region}" does not match stack region "${stack.region}"`,
+    );
+  }
+  if (mismatches.length > 0) {
+    throw new Error(
+      `targetArn "${arn}" looks like it belongs to a different environment than this stack: ${mismatches.join(', ')}.`,
+    );
+  }
+};
+
+/**
+ * A Greengrass v2 deployment to a thing or thing group, with an optional
+ * `AWS::IoT::ThingGroup` created alongside it.
+ *
+ * CloudFormation only lets you add, update or delete up to 10 deployment
+ * resources per operation, and deleting this resource removes deployment
+ * management state without uninstalling anything already running on target
+ * devices - see the `removalPolicy` doc above.
+ */
+export class GreengrassDeployment extends Construct {
+  public readonly thingGroup?: CfnThingGroup;
+  public readonly targetArn: string;
+  public readonly deployment: CfnDeployment;
+
+  constructor(scope: Construct, id: string, props: GreengrassDeploymentProps) {
+    super(scope, id);
+
+    const target = resolveTargetInput(props);
+    const stack = Stack.of(this);
+
+    if (target === 'thingGroupName') {
+      this.thingGroup = new CfnThingGroup(this, 'ThingGroup', {
+        thingGroupName: props.thingGroupName,
+      });
+      this.targetArn = this.thingGroup.attrArn;
+    } else if (target === 'thingName') {
+      this.targetArn = stack.formatArn({
+        service: 'iot',
+        resource: 'thing',
+        resourceName: props.thingName,
+      });
+    } else {
+      assertArnMatchesStack(stack, props.targetArn!);
+      this.targetArn = props.targetArn!;
+    }
+
+    this.deployment = new CfnDeployment(this, 'Resource', {
+      targetArn: this.targetArn,
+      deploymentName: props.deploymentName,
+      components: toCfnComponents(props.components),
+      deploymentPolicies: props.deploymentPolicies,
+      iotJobConfiguration: props.iotJobConfiguration,
+      parentTargetArn: props.parentTargetArn,
+      tags: props.tags,
+    });
+
+    this.deployment.applyRemovalPolicy(props.removalPolicy ?? RemovalPolicy.RETAIN);
+  }
+}

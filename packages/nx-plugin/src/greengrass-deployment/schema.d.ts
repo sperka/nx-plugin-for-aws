@@ -1,9 +1,23 @@
 /**
- * TypeScript types for options defined in schema.json
- * Update this to match schema.json if you make changes.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
+import { IacOption } from '../utils/iac.js';
+
 export interface GreengrassDeploymentGeneratorSchema {
-  // Replace with your options
-  exampleOption: string;
+  name: string;
+  directory?: string;
+  subDirectory?: string;
+  target: 'thing-group' | 'thing' | 'existing-arn';
+  thingGroupName?: string;
+  thingName?: string;
+  targetArn?: string;
+  parentTargetArn?: string;
+  tokenExchangeRoleArn?: string;
+  artifactBucket: string;
+  deploymentPolicy: 'default' | 'no-rollback' | 'rollback';
+  nucleus: 'classic' | 'lite' | 'none';
+  infra: 'deployment' | 'none';
+  iac: IacOption;
   preferInstallDependencies?: boolean;
 }

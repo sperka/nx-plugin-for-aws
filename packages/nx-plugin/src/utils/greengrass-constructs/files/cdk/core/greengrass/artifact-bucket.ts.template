@@ -1,0 +1,113 @@
+import { RemovalPolicy, Tags } from 'aws-cdk-lib';
+import { Grant, type IGrantable } from 'aws-cdk-lib/aws-iam';
+import {
+  BlockPublicAccess,
+  Bucket,
+  BucketEncryption,
+  type IBucket,
+} from 'aws-cdk-lib/aws-s3';
+import { Construct } from 'constructs';
+
+export interface GreengrassArtifactBucketProps {
+  /**
+   * Physical name for a newly created bucket. Leave unset to let CloudFormation
+   * generate one.
+   *
+   * Ignored when {@link GreengrassArtifactBucketProps.existingBucketName} is set.
+   */
+  readonly bucketName?: string;
+
+  /**
+   * Name of an existing S3 bucket to import instead of creating one. When set,
+   * every other creation prop on this construct is ignored - the imported
+   * bucket's encryption, versioning and public-access settings are whatever
+   * they already are.
+   */
+  readonly existingBucketName?: string;
+
+  /**
+   * Applied to both `DeletionPolicy` and `UpdateReplacePolicy` on the created
+   * bucket. Component versions are immutable and outlive any single
+   * deployment, so the default is `RETAIN` - override to `DESTROY` only for
+   * short-lived e2e fixtures that tear themselves down.
+   *
+   * Ignored when importing an existing bucket.
+   *
+   * @default RemovalPolicy.RETAIN
+   */
+  readonly removalPolicy?: RemovalPolicy;
+}
+
+/**
+ * ONE explicit Greengrass component artifact repository per account and
+ * region: retained, versioned, SSE-S3 encrypted, with Block Public Access and
+ * a TLS-only bucket policy.
+ *
+ * Deliberately not a CDK asset bucket and not one bucket per deployment.
+ * Component versions are immutable and outlive any single deployment's
+ * lifecycle, and `cdk gc` can collect an asset object a published version
+ * still needs when a new core device joins later. Own this construct in one
+ * designated stack (typically the `greengrass-deployment` project's app
+ * construct) and import it everywhere else via
+ * {@link GreengrassArtifactBucketProps.existingBucketName} -
+ * `tryFindChild`-style deduplication doesn't reach across stacks, so which
+ * stack owns the bucket is a decision this construct leaves to its caller
+ * rather than hiding behind a singleton.
+ */
+export class GreengrassArtifactBucket extends Construct {
+  public readonly bucket: IBucket;
+
+  constructor(
+    scope: Construct,
+    id: string,
+    props: GreengrassArtifactBucketProps = {},
+  ) {
+    super(scope, id);
+
+    if (props.existingBucketName) {
+      this.bucket = Bucket.fromBucketName(
+        this,
+        'ImportedBucket',
+        props.existingBucketName,
+      );
+      return;
+    }
+
+    this.bucket = new Bucket(this, 'Bucket', {
+      bucketName: props.bucketName,
+      versioned: true,
+      encryption: BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+      removalPolicy: props.removalPolicy ?? RemovalPolicy.RETAIN,
+    });
+    // Ownership marker: the bucket outlives stacks (RETAIN), so a later
+    // inventory or cleanup pass needs a way to recognise it.
+    Tags.of(this.bucket).add('greengrass-artifact-repository', 'true');
+    // No lifecycle rule is applied: component versions are immutable and a
+    // published version's artifact must stay retrievable for as long as any
+    // deployment can reference it. Expire noncurrent versions or stale
+    // prefixes only through a deliberate, documented cleanup policy.
+  }
+
+  /**
+   * Grant `s3:GetObject`, scoped to `keyPrefix`, to `grantee` - the shape the
+   * `tokenExchangeRoleArn` deployment option needs: a Greengrass core device's
+   * token exchange role reads whichever component versions are deployed to
+   * it, so the practical scope is the whole bucket unless the caller knows a
+   * narrower prefix ahead of time.
+   *
+   * Deliberately a single action rather than `bucket.grantRead()`'s broader
+   * set (which also adds `s3:GetBucket*` / KMS actions where relevant) - the
+   * core device's Greengrass Nucleus only ever calls `GetObject` to fetch a
+   * component artifact.
+   */
+  public grantReadTo(grantee: IGrantable, keyPrefix: string = '*'): Grant {
+    return Grant.addToPrincipalOrResource({
+      grantee,
+      actions: ['s3:GetObject'],
+      resourceArns: [this.bucket.arnForObjects(keyPrefix)],
+      resource: this.bucket,
+    });
+  }
+}

@@ -1,0 +1,30 @@
+/**
+ * A component to deploy as part of "<%- name %>", and the configuration
+ * update to merge or reset on target devices.
+ *
+ * Mirrors `GreengrassDeploymentComponent` from the vended
+ * `common/constructs` `GreengrassDeployment` construct. Duplicated
+ * deliberately rather than imported: this project stays independent of
+ * `common/constructs`, which is a leaf every infra app depends on and must
+ * never depend back on a specific deployment's own library.
+ */
+export interface DeploymentComponent {
+  readonly componentVersion?: string;
+  readonly configurationUpdate?: {
+    readonly merge?: Record<string, unknown>;
+    readonly reset?: readonly string[];
+  };
+}
+
+/**
+ * Components this deployment installs, keyed by `ComponentName`. Add an
+ * entry per component you deploy, then pass this map to the
+ * `<%- nameClassName %>` app construct's `components` prop from your infra
+ * stack (`packages/common/constructs/src/app/greengrass/<%- nameKebabCase %>.ts`).
+ *
+ * User-owned from first generation onward - re-running this generator leaves
+ * your entries alone.
+ */
+export const components: Record<string, DeploymentComponent> = {
+  // 'com.example.MyComponent': { componentVersion: '1.0.0' },
+};

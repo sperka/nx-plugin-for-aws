@@ -1,0 +1,4 @@
+export * from './artifact-bucket<% if (esm) { %>.js<% } %>';
+export * from './component-version<% if (esm) { %>.js<% } %>';
+export * from './deployment<% if (esm) { %>.js<% } %>';
+export * from './recipe<% if (esm) { %>.js<% } %>';
