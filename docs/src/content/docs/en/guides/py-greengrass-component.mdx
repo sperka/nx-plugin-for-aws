@@ -107,7 +107,12 @@ import { MyComponent, MyDeployment } from '@my-scope/common-constructs';
 import { components } from '@my-scope/my-deployment';
 
 const deployment = new MyDeployment(this, 'MyDeployment', { components });
-new MyComponent(this, 'MyComponent', { bucket: deployment.artifactBucket });
+const myComponent = new MyComponent(this, 'MyComponent', {
+  bucket: deployment.artifactBucket,
+});
+// Without this the IoT job can reach devices before the component version
+// exists, failing negotiation with FAILED_NO_STATE_CHANGE.
+deployment.dependOn(myComponent);
 ```
 
 `nx run <infra>:deploy` publishes the component version - `common/constructs`'s `build`/`assemble` targets depend on this component's host project, so the artifact is always freshly built before it deploys.

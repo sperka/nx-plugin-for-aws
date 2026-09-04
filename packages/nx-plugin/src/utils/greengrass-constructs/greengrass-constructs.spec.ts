@@ -115,6 +115,9 @@ interface DeploymentModuleShape {
     readonly thingGroup?: unknown;
     readonly targetArn: unknown;
     readonly deployment: import('aws-cdk-lib').CfnResource;
+    dependOn: (
+      ...componentVersions: import('constructs').IDependable[]
+    ) => unknown;
   };
 }
 
@@ -125,7 +128,12 @@ let ArtifactBucketModule: ArtifactBucketModuleShape;
 let ComponentVersionModule: ComponentVersionModuleShape;
 let DeploymentModule: DeploymentModuleShape;
 
+// Holds the fake `greengrass-build` output `writeBuildOutput` writes, shared by
+// every spec that needs a real component version.
+let tmpDir: string;
+
 beforeAll(async () => {
+  tmpDir = mkdtempSync(join(tmpdir(), 'greengrass-component-version-'));
   for (const name of MODULE_NAMES) {
     writeFileSync(tmpModulePath(name), transpileTemplate(name));
   }
@@ -144,6 +152,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  rmSync(tmpDir, { recursive: true, force: true });
   for (const name of MODULE_NAMES) {
     try {
       unlinkSync(tmpModulePath(name));
@@ -152,6 +161,47 @@ afterAll(() => {
     }
   }
 });
+
+/**
+ * Writes a `greengrass-build`-shaped recipe and artifact pair under {@link tmpDir},
+ * which `GreengrassComponentVersion` reads at synth time.
+ */
+const writeBuildOutput = (
+  componentName: string,
+  componentVersion: string,
+  artifactContent: string,
+  // Defaults to matching the recipe. Override to exercise the guard against
+  // a recipe naming an artifact the build never produced.
+  artifactFileName = 'my-component.zip',
+): { recipesDir: string; artifactsDir: string } => {
+  const recipesDir = join(tmpDir, componentName, componentVersion, 'recipes');
+  const artifactsDir = join(
+    tmpDir,
+    componentName,
+    componentVersion,
+    'artifacts',
+  );
+  mkdirSync(recipesDir, { recursive: true });
+  mkdirSync(join(artifactsDir, componentName, componentVersion), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(recipesDir, `${componentName}-${componentVersion}.yaml`),
+    [
+      'RecipeFormatVersion: 2020-01-25',
+      `ComponentName: ${componentName}`,
+      `ComponentVersion: ${componentVersion}`,
+      'Manifests:',
+      '  - Artifacts:',
+      `      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component.zip`,
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(artifactsDir, componentName, componentVersion, artifactFileName),
+    artifactContent,
+  );
+  return { recipesDir, artifactsDir };
+};
 
 describe('recipe.ts (readRecipeSummary / substituteArtifactUris)', () => {
   it('extracts ComponentName and ComponentVersion', () => {
@@ -290,53 +340,6 @@ describe('GreengrassArtifactBucket', () => {
 });
 
 describe('GreengrassComponentVersion', () => {
-  let tmpDir: string;
-
-  beforeAll(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'greengrass-component-version-'));
-  });
-
-  afterAll(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  const writeBuildOutput = (
-    componentName: string,
-    componentVersion: string,
-    artifactContent: string,
-    // Defaults to matching the recipe. Override to exercise the guard against
-    // a recipe naming an artifact the build never produced.
-    artifactFileName = 'my-component.zip',
-  ): { recipesDir: string; artifactsDir: string } => {
-    const recipesDir = join(tmpDir, componentName, componentVersion, 'recipes');
-    const artifactsDir = join(
-      tmpDir,
-      componentName,
-      componentVersion,
-      'artifacts',
-    );
-    mkdirSync(recipesDir, { recursive: true });
-    mkdirSync(join(artifactsDir, componentName, componentVersion), {
-      recursive: true,
-    });
-    writeFileSync(
-      join(recipesDir, `${componentName}-${componentVersion}.yaml`),
-      [
-        'RecipeFormatVersion: 2020-01-25',
-        `ComponentName: ${componentName}`,
-        `ComponentVersion: ${componentVersion}`,
-        'Manifests:',
-        '  - Artifacts:',
-        `      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component.zip`,
-      ].join('\n'),
-    );
-    writeFileSync(
-      join(artifactsDir, componentName, componentVersion, artifactFileName),
-      artifactContent,
-    );
-    return { recipesDir, artifactsDir };
-  };
-
   const sha256Of = (content: string): string =>
     createHash('sha256').update(content).digest('hex');
 
@@ -556,6 +559,57 @@ describe('GreengrassDeployment', () => {
     expect(resources[deploymentLogicalId].DeletionPolicy).toBe('Retain');
     expect(resources[deploymentLogicalId].UpdateReplacePolicy).toBe('Retain');
     expect(deployment.thingGroup).toBeDefined();
+  });
+
+  it('dependOn orders the deployment after the given component versions', () => {
+    const { recipesDir, artifactsDir } = writeBuildOutput(
+      'com.example.DependOnOrdering',
+      '1.0.0',
+      'artifact bytes',
+    );
+
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
+      stack,
+      'ArtifactBucket',
+    );
+    const componentVersion =
+      new ComponentVersionModule.GreengrassComponentVersion(
+        stack,
+        'ComponentVersion',
+        { recipesDir, artifactsDir, bucket },
+      );
+    const deployment = new DeploymentModule.GreengrassDeployment(
+      stack,
+      'Deployment',
+      {
+        thingGroupName: 'my-things',
+        components: {
+          'com.example.DependOnOrdering': { componentVersion: '1.0.0' },
+        },
+      },
+    );
+
+    deployment.dependOn(componentVersion);
+
+    const json = assertionsLib.Template.fromStack(stack).toJSON();
+    const resources = json.Resources as Record<string, any>;
+    const deploymentResource =
+      resources[stack.getLogicalId(deployment.deployment)];
+    const dependsOn: string[] = Array.isArray(deploymentResource.DependsOn)
+      ? deploymentResource.DependsOn
+      : [deploymentResource.DependsOn].filter(Boolean);
+
+    // CloudFormation creates unrelated resources in parallel; without this edge
+    // the IoT job can reach devices before the version exists in the registry.
+    const componentVersionLogicalId = stack.getLogicalId(
+      componentVersion.cfnComponentVersion,
+    );
+    expect(resources[componentVersionLogicalId].Type).toBe(
+      'AWS::GreengrassV2::ComponentVersion',
+    );
+    expect(dependsOn).toContain(componentVersionLogicalId);
   });
 
   it('imports an existing thing by name without creating a thing group', () => {

@@ -1,7 +1,7 @@
 import { Arn, ArnFormat, RemovalPolicy, Stack, Token } from 'aws-cdk-lib';
 import { CfnDeployment } from 'aws-cdk-lib/aws-greengrassv2';
 import { CfnThingGroup } from 'aws-cdk-lib/aws-iot';
-import { Construct } from 'constructs';
+import { Construct, type IDependable } from 'constructs';
 
 /**
  * A component to deploy, in the friendly shape this construct accepts -
@@ -214,5 +214,22 @@ export class GreengrassDeployment extends Construct {
     });
 
     this.deployment.applyRemovalPolicy(props.removalPolicy ?? RemovalPolicy.RETAIN);
+  }
+
+  /**
+   * Order this deployment after the component versions it references.
+   *
+   * CloudFormation creates unrelated resources in parallel, so without this
+   * the IoT job can reach core devices before a referenced component version
+   * exists in the registry - the devices then fail version negotiation with
+   * FAILED_NO_STATE_CHANGE ("No local or cloud component version satisfies
+   * the requirements"). Call it with every `GreengrassComponentVersion` (or
+   * any construct publishing one) named in `components`.
+   */
+  public dependOn(...componentVersions: IDependable[]): this {
+    for (const componentVersion of componentVersions) {
+      this.deployment.node.addDependency(componentVersion);
+    }
+    return this;
   }
 }

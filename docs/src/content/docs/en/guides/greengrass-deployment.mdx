@@ -92,10 +92,18 @@ export const components: Record<string, DeploymentComponent> = {
 The generated app construct accepts a `components` prop, so your infra stack wires the deployment's typed component library straight through:
 
 ```ts title="packages/infra/src/stacks/application-stack.ts"
-import { MyDeployment } from '@my-scope/common-constructs';
+import { MyComponent, MyDeployment } from '@my-scope/common-constructs';
 import { components } from '@my-scope/my-deployment';
 
-new MyDeployment(this, 'MyDeployment', { components });
+const deployment = new MyDeployment(this, 'MyDeployment', { components });
+const myComponent = new MyComponent(this, 'MyComponent', {
+  bucket: deployment.artifactBucket,
+});
+// Order the deployment after every component version it references:
+// CloudFormation creates unrelated resources in parallel, so without this
+// the IoT job can reach core devices before the version exists in the
+// registry, and devices fail negotiation with FAILED_NO_STATE_CHANGE.
+deployment.dependOn(myComponent);
 ```
 
 `common/constructs` stays independent of any specific deployment's own library - the wiring happens once, in your infra stack, not inside the vended construct.
@@ -137,6 +145,10 @@ If you omit `tokenExchangeRoleArn`, attach the equivalent policy to your token e
 **Component versions are immutable.** `AWS::GreengrassV2::ComponentVersion`'s `InlineRecipe` is a replacement property - changing it replaces the resource rather than updating it in place. `CreateComponentVersion` itself rejects a resubmission of an already-published version under different content, so a rebuild that forgot to bump `ComponentVersion` fails the deployment rather than corrupting an already-deployed version. The vended construct also uploads each artifact under a content-hashed S3 key (`<ComponentName>/<Version>/<sha256>/<file>`), so a rebuild's upload can never physically overwrite the bytes an already-published version's artifact URI points at.
 
 **Both `DeletionPolicy` and `UpdateReplacePolicy` default to `Retain`** on the component version, the artifact bucket, and the deployment resource. Retained component versions accumulate over time - AWS IoT Greengrass has no automatic cleanup, so plan a periodic inventory (`ListComponentVersions`) and manual deletion of versions you no longer deploy.
+
+**Deployment revisions are replacement updates.** Changing a deployment's `components` or `configurationUpdate` replaces the `AWS::GreengrassV2::Deployment` resource - CloudFormation creates the new revision, and the retained old resource is superseded on the target. [Express mode disables rollback by default](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stack-failure-options.html#express-mode-and-rollback), and **disabling rollback is not supported for replacement updates**, so an express revision deploy fails with `Replacement type updates not supported on stack with disable-rollback`. The `deploy-sandbox` target always uses express mode, and `deploy` uses it too unless you generated the infra project with `stageConfig`. Pass `--no-express` to deploy a revision through either target. `deploy-ci` never uses express mode, so a pipeline deploys revisions unchanged.
+
+If an express deploy already left the stack in `UPDATE_FAILED`, you have two recovery options. Run `cdk rollback` from the infra project to return the stack to its last stable state. Or re-deploy the last good template with `--express` still set, because CloudFormation requires an update to a failed stack to keep rollback disabled. Then deploy the revision with `--no-express`.
 
 The same applies to the artifact bucket: no S3 lifecycle rule is applied by default, because a published component version's artifact must stay retrievable for as long as any deployment can reference it - a lifecycle rule that expires objects would break existing versions when a new core device joins and fetches them. The bucket is tagged `greengrass-artifact-repository=true` so an inventory pass can find it. When you retire component versions (delete the version, confirm no deployment references it), delete their `<ComponentName>/<version>/` prefixes in the same pass - that is the deliberate, documented cleanup policy this construct expects instead of an automatic rule.
 
