@@ -655,6 +655,10 @@ export default defineConfig({
                   link: '/guides/py-greengrass-component',
                 },
                 {
+                  label: 'ts#greengrass-component',
+                  link: '/guides/ts-greengrass-component',
+                },
+                {
                   label: 'greengrass-deployment',
                   link: '/guides/greengrass-deployment',
                 },
