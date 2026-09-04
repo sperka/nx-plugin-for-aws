@@ -69,6 +69,8 @@ The recipe's `Run` command pins the same interpreter version (`python3.14 main.p
 
 `--only-binary :all:` matters: without it, `uv` can fall back to building an sdist for the *host* architecture, silently producing a binary that will not load on the target device.
 
+The same flag means the host project must not depend on other **workspace Python projects**: those only exist as source, so vendoring fails loudly with `Building source distributions is disabled, but attempted to build <member>`. Host your component in a project without workspace-member dependencies — one component per dedicated project is the recommended production layout anyway.
+
 ### Building the artifact (`<c>-artifact`)
 
 <NxCommands commands={['run <project>:<component-name>-artifact']} />
