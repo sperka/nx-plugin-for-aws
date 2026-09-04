@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   unlinkSync,
@@ -522,5 +523,61 @@ describe('greengrass build-artifact.ts', () => {
     const names = entries.map((entry) => entry.name);
     expect(names).toEqual(['main.py', 'dependency.py']);
     expect(names).not.toContain('__pycache__/dependency.pyc');
+  });
+
+  it('should drop the previous version from greengrass-build on rebuild after a version bump', () => {
+    const projectRoot = join(tmpDir, 'project');
+    const componentDir = join(projectRoot, 'greengrass', 'my-component');
+    const distDir = join(tmpDir, 'dist');
+    const vendorDir = join(distDir, 'vendor');
+    mkdirSync(componentDir, { recursive: true });
+    mkdirSync(vendorDir, { recursive: true });
+    writeFileSync(join(componentDir, 'main.py'), 'print("hello")\n');
+    writeFileSync(join(vendorDir, 'dependency.py'), 'VERSION = "1.0"\n');
+    const recipe = (version: string) =>
+      [
+        'ComponentName: com.example.MyComponent',
+        `ComponentVersion: ${version}`,
+        'Manifests:',
+        '  - Artifacts:',
+        '      - Uri: s3://bucket/my-component.zip',
+        '        Unarchive: ZIP',
+        '    Lifecycle:',
+        '      Run: python3 {artifacts:decompressedPath}/my-component/main.py',
+        '',
+      ].join('\n');
+    const run = () =>
+      spawnSync(
+        process.execPath,
+        [
+          join(scriptsDir, 'build-artifact.mjs'),
+          projectRoot,
+          'my-component',
+          distDir,
+        ],
+        { encoding: 'utf-8' },
+      );
+
+    writeFileSync(join(componentDir, 'recipe.yaml'), recipe('1.0.0'));
+    expect(run().status).toBe(0);
+    writeFileSync(join(componentDir, 'recipe.yaml'), recipe('1.0.1'));
+    const second = run();
+    expect(second.status, second.stderr).toBe(0);
+
+    // The GreengrassComponentVersion construct requires exactly one resolved
+    // recipe, so a version bump must not leave the previous build behind.
+    expect(readdirSync(join(distDir, 'greengrass-build', 'recipes'))).toEqual([
+      'com.example.MyComponent-1.0.1.yaml',
+    ]);
+    expect(
+      readdirSync(
+        join(
+          distDir,
+          'greengrass-build',
+          'artifacts',
+          'com.example.MyComponent',
+        ),
+      ),
+    ).toEqual(['1.0.1']);
   });
 });

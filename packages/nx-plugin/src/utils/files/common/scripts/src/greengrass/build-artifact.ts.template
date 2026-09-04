@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import yaml from 'js-yaml';
 import { loadRecipe, validateRecipe } from './recipe-utils<% if (esm) { %>.js<% } %>';
@@ -80,6 +80,11 @@ function main(): void {
   }
 
   const vendorDir = join(dist, 'vendor');
+  // Recipe and artifact paths are named by version, so a rebuild after a
+  // version bump would otherwise accumulate stale siblings - and the
+  // GreengrassComponentVersion construct requires exactly one resolved
+  // recipe. Start from an empty greengrass-build every run.
+  rmSync(join(dist, 'greengrass-build'), { recursive: true, force: true });
   const artifactDir = join(
     dist,
     'greengrass-build',

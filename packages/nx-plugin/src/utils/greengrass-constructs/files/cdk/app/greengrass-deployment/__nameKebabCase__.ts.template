@@ -1,5 +1,5 @@
 <% if (tokenExchangeRoleArn) { %>import { Role } from 'aws-cdk-lib/aws-iam';
-<% } %>import { Construct } from 'constructs';
+<% } %>import { Construct, type IDependable } from 'constructs';
 import {
   GreengrassArtifactBucket,
   GreengrassDeployment,
@@ -51,4 +51,13 @@ export class <%- nameClassName %> extends Construct {
       }),
     );
 <% } %>  }
+
+  /**
+   * Order the deployment after the component versions it references, so the
+   * IoT job can't reach core devices before a version exists in the registry.
+   */
+  public dependOn(...componentVersions: IDependable[]): this {
+    this.deployment.dependOn(...componentVersions);
+    return this;
+  }
 }
