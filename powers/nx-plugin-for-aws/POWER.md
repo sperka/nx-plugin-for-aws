@@ -134,6 +134,7 @@ Add capabilities to existing projects:
 | `agentcore-gateway`       | Generate an AgentCore Gateway project                                                                              |
 | `agentcore-harness`       | Generate an AgentCore Harness project (experimental)                                                               |
 | `connection`              | Integrates a source project with a target project                                                                  |
+| `greengrass-deployment`   | Generate a Greengrass deployment project, vending component-version and deployment CDK infrastructure              |
 | `license`                 | Add LICENSE files and configure source code licence headers                                                        |
 | `py#api`                  | Create a Python API                                                                                                |
 | `py#greengrass-component` | Add an AWS IoT Greengrass component to a Python project (experimental)                                             |
