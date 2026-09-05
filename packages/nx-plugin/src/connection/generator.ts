@@ -12,6 +12,8 @@ import agentcoreGatewayGatewayConnectionGenerator from '../agentcore-gateway/gat
 import { AGENTCORE_GATEWAY_GENERATOR_INFO } from '../agentcore-gateway/generator.js';
 import agentcoreGatewayMcpConnectionGenerator from '../agentcore-gateway/mcp-connection/generator.js';
 import agentcoreGatewayReactConnectionGenerator from '../agentcore-gateway/react-connection/generator.js';
+import greengrassDeploymentComponentConnectionGenerator from '../greengrass-deployment/component-connection/generator.js';
+import { GREENGRASS_DEPLOYMENT_GENERATOR_INFO } from '../greengrass-deployment/generator.js';
 import pyAgentA2aConnectionGenerator from '../py/agent/a2a-connection/generator.js';
 import pyAgentGatewayConnectionGenerator from '../py/agent/gateway-connection/generator.js';
 import pyAgentMcpConnectionGenerator from '../py/agent/mcp-connection/generator.js';
@@ -174,6 +176,10 @@ const CONNECTION_GENERATORS = {
     pyRdbAgentConnectionGenerator(tree, options),
   'py#mcp-server -> py#rdb': (tree, options) =>
     pyRdbMcpServerConnectionGenerator(tree, options),
+  'greengrass-deployment -> py#greengrass-component': (tree, options) =>
+    greengrassDeploymentComponentConnectionGenerator(tree, options),
+  'greengrass-deployment -> ts#greengrass-component': (tree, options) =>
+    greengrassDeploymentComponentConnectionGenerator(tree, options),
 } satisfies Record<
   ConnectionKey,
   (tree: Tree, options: ResolvedConnectionOptions) => Promise<any>
@@ -453,6 +459,10 @@ const determineProjectTypeFromConfig = async (
     return 'agentcore-gateway';
   }
 
+  if (isGreengrassDeployment(projectConfiguration)) {
+    return 'greengrass-deployment';
+  }
+
   return undefined;
 };
 
@@ -574,5 +584,11 @@ const isAgentCoreGateway = (
 ): boolean =>
   ((projectConfiguration.metadata as any) ?? {}).generator ===
   AGENTCORE_GATEWAY_GENERATOR_INFO.id;
+
+const isGreengrassDeployment = (
+  projectConfiguration: ProjectConfiguration,
+): boolean =>
+  ((projectConfiguration.metadata as any) ?? {}).generator ===
+  GREENGRASS_DEPLOYMENT_GENERATOR_INFO.id;
 
 export default connectionGenerator;

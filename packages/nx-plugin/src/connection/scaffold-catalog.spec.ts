@@ -150,6 +150,31 @@ describe('scaffold catalog', () => {
           snakeCaseName: true,
         },
       },
+      'greengrass-deployment': {
+        label: 'Greengrass Deployment',
+        generator: 'greengrass-deployment',
+        kind: 'project',
+      },
+      'ts#greengrass-component': {
+        label: 'Greengrass Component',
+        generator: 'ts#greengrass-component',
+        kind: 'component',
+        host: {
+          generator: 'ts#project',
+          options: {},
+          snakeCaseName: false,
+        },
+      },
+      'py#greengrass-component': {
+        label: 'Greengrass Component',
+        generator: 'py#greengrass-component',
+        kind: 'component',
+        host: {
+          generator: 'py#project',
+          options: { type: 'application' },
+          snakeCaseName: true,
+        },
+      },
     });
   });
 

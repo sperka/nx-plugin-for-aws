@@ -599,4 +599,11 @@ export const runCdkOnlyGeneratorMatrix = async (
     `generate @aws/nx-plugin:ts#greengrass-component --project=ts-greengrass-project --name=my-ts-greengrass-component --no-interactive${deferFlag}`,
     opts,
   );
+
+  // Connect the deployment to the Python component - the connection generator
+  // writes the component into `my-greengrass-deployment`'s `components` map.
+  await runCLI(
+    `generate @aws/nx-plugin:connection --sourceProject=my-greengrass-deployment --targetProject=e2e_test.py_greengrass_project --no-interactive${deferFlag}`,
+    opts,
+  );
 };

@@ -5,11 +5,21 @@
   "description": "Connect a Greengrass component to a greengrass-deployment project, adding it to the deployment's component map",
   "type": "object",
   "properties": {
-    "exampleOption": {
+    "sourceProject": {
       "type": "string",
-      "description": "An example option. Refer to https://nx.dev/extending-nx/recipes/generator-options for more info",
-      "x-priority": "important",
-      "x-prompt": "This is an example option!"
+      "description": "The greengrass-deployment project"
+    },
+    "targetProject": {
+      "type": "string",
+      "description": "The project hosting the Greengrass component"
+    },
+    "sourceComponent": {
+      "type": "string",
+      "description": "Unused - a greengrass-deployment is always the connection's source project, never one of its components"
+    },
+    "targetComponent": {
+      "type": "string",
+      "description": "The Greengrass component in the target project"
     },
     "preferInstallDependencies": {
       "type": "boolean",
@@ -17,5 +27,5 @@
       "default": true
     }
   },
-  "required": ["exampleOption"]
+  "required": ["sourceProject", "targetProject"]
 }
