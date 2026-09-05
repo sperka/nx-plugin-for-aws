@@ -39,6 +39,27 @@ const MODULE_NAMES = [
 ] as const;
 type ModuleName = (typeof MODULE_NAMES)[number];
 
+// `artifact-bucket` imports the shared `suppressRules` helper from the core
+// constructs dir one level up, which `sharedConstructsGenerator` vends into
+// the same workspace. Transpiled alongside the greengrass modules so the
+// suppression runs for real here rather than being stubbed out.
+const CHECKOV_TEMPLATE = join(
+  import.meta.dirname,
+  '..',
+  'files',
+  'common',
+  'constructs',
+  'src',
+  'core',
+  'checkov.ts.template',
+);
+
+const checkovTmpModulePath = (): string =>
+  join(
+    import.meta.dirname,
+    `.tmp-greengrass-constructs-checkov-${process.pid}.mjs`,
+  );
+
 const tmpModulePath = (name: ModuleName): string =>
   join(
     import.meta.dirname,
@@ -61,14 +82,30 @@ const transpileTemplate = (name: ModuleName): string => {
   }).outputText;
   // Point sibling imports (`./recipe.js`) at the real temp files this helper
   // writes them as.
-  return MODULE_NAMES.reduce(
+  const withSiblings = MODULE_NAMES.reduce(
     (code, sibling) =>
       code
         .split(`./${sibling}.js`)
         .join(pathToFileURL(tmpModulePath(sibling)).href),
     jsCode,
   );
+  return withSiblings
+    .split('../checkov.js')
+    .join(pathToFileURL(checkovTmpModulePath()).href);
 };
+
+const transpileCheckovTemplate = (): string =>
+  ts.transpileModule(
+    readFileSync(CHECKOV_TEMPLATE, 'utf-8')
+      .replace(/<% if \(esm\) \{ %>\.js<% \} %>/g, '.js')
+      .replace(/<%.*?%>/g, ''),
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+      },
+    },
+  ).outputText;
 
 // The vended modules are transpiled from `.ts.template` sources that don't
 // exist as real `.ts` files on disk, so their real types aren't statically
@@ -134,6 +171,7 @@ let tmpDir: string;
 
 beforeAll(async () => {
   tmpDir = mkdtempSync(join(tmpdir(), 'greengrass-component-version-'));
+  writeFileSync(checkovTmpModulePath(), transpileCheckovTemplate());
   for (const name of MODULE_NAMES) {
     writeFileSync(tmpModulePath(name), transpileTemplate(name));
   }

@@ -448,6 +448,24 @@ describe('greengrass zip-writer.ts', () => {
     expect(entry.data).toEqual(random);
   });
 
+  it('should be byte-reproducible across writes and entry orderings', () => {
+    const entries = [
+      { name: 'main.py', data: Buffer.from('print("hi")\n') },
+      { name: 'vendor/dep.py', data: Buffer.from('VERSION = "1.0"\n') },
+    ];
+    const first = join(tmpDir, 'first.zip');
+    const second = join(tmpDir, 'second.zip');
+
+    writeZip(entries, first);
+    writeZip([...entries].reverse(), second);
+
+    // The archive's sha256 keys the published S3 object and is substituted
+    // into the recipe, so identical content must always produce identical
+    // bytes - otherwise a rebuild asks CloudFormation to replace an
+    // already-published, immutable component version.
+    expect(readFileSync(first).equals(readFileSync(second))).toBe(true);
+  });
+
   it('should produce a parseable archive for an empty entry list', () => {
     const outPath = join(tmpDir, 'out.zip');
     writeZip([], outPath);
@@ -548,7 +566,8 @@ describe('greengrass build-artifact.ts', () => {
       ),
     );
     const names = entries.map((entry) => entry.name);
-    expect(names).toEqual(['main.py', 'dependency.py']);
+    // writeZip sorts entries so the archive's bytes are reproducible.
+    expect(names).toEqual(['dependency.py', 'main.py']);
     expect(names).not.toContain('__pycache__/dependency.pyc');
   });
 
