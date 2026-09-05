@@ -1,5 +1,6 @@
 import { RemovalPolicy, Tags } from 'aws-cdk-lib';
 import { Grant, type IGrantable } from 'aws-cdk-lib/aws-iam';
+import { suppressRules } from '../checkov<% if (esm) { %>.js<% } %>';
 import {
   BlockPublicAccess,
   Bucket,
@@ -81,6 +82,11 @@ export class GreengrassArtifactBucket extends Construct {
       blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
       removalPolicy: props.removalPolicy ?? RemovalPolicy.RETAIN,
     });
+    suppressRules(
+      this.bucket,
+      ['CKV_AWS_18'],
+      'Server access logging would need a second retained log bucket; component artifacts are immutable published bytes and reads are auditable through CloudTrail data events',
+    );
     // Ownership marker: the bucket outlives stacks (RETAIN), so a later
     // inventory or cleanup pass needs a way to recognise it.
     Tags.of(this.bucket).add('greengrass-artifact-repository', 'true');
