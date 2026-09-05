@@ -8,6 +8,7 @@ import auroraLogo from '@assets/logos/aurora.svg';
 import copilotkitLogo from '@assets/logos/copilotkit.png';
 import dynamodbLogo from '@assets/logos/dynamodb.svg';
 import fastapiLogo from '@assets/logos/fastapi.svg';
+import greengrassLogo from '@assets/logos/greengrass.svg';
 import mcpLogo from '@assets/logos/mcp.svg';
 import pythonLogo from '@assets/logos/python.svg';
 import reactLogo from '@assets/logos/react.svg';
@@ -28,6 +29,7 @@ const LOGOS: Record<string, { src: string }> = {
   copilotkit: copilotkitLogo,
   dynamodb: dynamodbLogo,
   fastapi: fastapiLogo,
+  greengrass: greengrassLogo,
   mcp: mcpLogo,
   python: pythonLogo,
   react: reactLogo,

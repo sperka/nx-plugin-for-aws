@@ -368,6 +368,44 @@ const GATEWAY_TO_MCP: readonly ConnectionConstraint[] = [
   },
 ];
 
+/**
+ * A component generated with `--infra none` publishes no `ComponentVersion`,
+ * so a deployment has nothing to reference. This is the same restriction the
+ * connection generator enforces at runtime (`--infra none` is a valid choice
+ * for a component that never joins a deployment, so the generator itself
+ * can't reject it up front - only a connection attempt can).
+ *
+ * Both ends also pin `iac` to `cdk`: neither
+ * `AWS::GreengrassV2::ComponentVersion` nor `AWS::GreengrassV2::Deployment`
+ * exists in the Terraform provider this plugin pins, so both generators throw
+ * on `--iac terraform`. Pinning it here states the value rather than leaving it
+ * at `inherit`, which resolves to whatever provider the workspace was created
+ * with.
+ */
+const DEPLOYMENT_TO_GREENGRASS_COMPONENT: readonly ConnectionConstraint[] = [
+  {
+    side: 'target',
+    option: 'infra',
+    equals: 'component-version',
+    reason:
+      'A component generated with --infra none publishes no ComponentVersion for the deployment to reference. Generate it with --infra component-version first.',
+  },
+  {
+    side: 'source',
+    option: 'iac',
+    equals: 'cdk',
+    reason:
+      'Greengrass infrastructure is CDK-only: neither Greengrass CloudFormation resource exists in the pinned Terraform provider.',
+  },
+  {
+    side: 'target',
+    option: 'iac',
+    equals: 'cdk',
+    reason:
+      'Greengrass infrastructure is CDK-only: neither Greengrass CloudFormation resource exists in the pinned Terraform provider.',
+  },
+];
+
 const GATEWAY_TO_AGENT: readonly ConnectionConstraint[] = [
   {
     side: 'source',
@@ -442,6 +480,10 @@ export const CONNECTION_CONSTRAINTS = {
         'The source gateway signs its request with IAM, so the target gateway must accept IAM.',
     },
   ],
+  'greengrass-deployment -> py#greengrass-component':
+    DEPLOYMENT_TO_GREENGRASS_COMPONENT,
+  'greengrass-deployment -> ts#greengrass-component':
+    DEPLOYMENT_TO_GREENGRASS_COMPONENT,
 } as const satisfies Partial<
   Record<ConnectionKey, readonly ConnectionConstraint[]>
 >;

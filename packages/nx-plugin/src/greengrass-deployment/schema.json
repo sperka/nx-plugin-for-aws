@@ -38,7 +38,7 @@
     },
     "thingGroupName": {
       "type": "string",
-      "description": "Name of the AWS IoT thing group to create and deploy to. Required (and only used) when target=thing-group."
+      "description": "Name of the AWS IoT thing group to create and deploy to. Only used when target=thing-group; defaults to the project name."
     },
     "thingName": {
       "type": "string",

@@ -335,6 +335,32 @@ describe('commands', () => {
     );
   });
 
+  // The deployment's `thingGroupName` is required by its `target` default but
+  // carries no schema default, so the builder emits nothing for it and the
+  // generator derives it from the project name. The `--iac=cdk` values come from
+  // the connection's own constraints, applied when the edge is drawn.
+  it('should emit a runnable greengrass graph', () => {
+    const commands = emitCommands(
+      graph([
+        node('my-deployment', 'greengrass-deployment', {
+          options: { iac: 'cdk' },
+        }),
+        node('sensor', 'py#greengrass-component', {
+          hostName: 'device-app',
+          options: { iac: 'cdk' },
+        }),
+      ]),
+      EMIT,
+    );
+    expect(commands.map((c) => c.command)).toEqual([
+      'pnpm create @aws/nx-workspace my-project --iac=cdk --interactive=false',
+      'nx g @aws/nx-plugin:py#project device-app --type=application',
+      'nx g @aws/nx-plugin:greengrass-deployment my-deployment --iac=cdk',
+      'nx g @aws/nx-plugin:py#greengrass-component --project=device_app --name=sensor --iac=cdk',
+      `nx g @aws/nx-plugin:ts#infra ${INFRA_PROJECT_NAME}`,
+    ]);
+  });
+
   it('should emit connections after the nodes they wire together', () => {
     const commands = emitCommands(
       graph(
@@ -912,6 +938,19 @@ describe('autoFixesForConnection', () => {
         (fix) => fix.nodeId === 'g' && fix.option === 'protocol',
       ),
     ).toBe(false);
+  });
+
+  // Greengrass infrastructure is CDK-only, so both ends are pinned rather than
+  // left on `inherit` — which would resolve to whatever the workspace was
+  // created with, and throw for Terraform.
+  it('should pin both ends of a greengrass connection to cdk', () => {
+    const deployment = node('d', 'greengrass-deployment');
+    const component = node('c', 'py#greengrass-component', {
+      hostName: 'device-app',
+    });
+    const fixes = autoFixesForConnection(deployment, component);
+    expect(fixes).toContainEqual({ nodeId: 'd', option: 'iac', value: 'cdk' });
+    expect(fixes).toContainEqual({ nodeId: 'c', option: 'iac', value: 'cdk' });
   });
 });
 

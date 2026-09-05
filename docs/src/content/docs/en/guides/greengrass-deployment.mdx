@@ -28,13 +28,15 @@ You can generate a greengrass-deployment in two ways:
 
 <GeneratorParameters generator="greengrass-deployment" />
 
-Exactly one of `thingGroupName`, `thingName` or `targetArn` must be set, matching the `target` option:
+At most one of `thingGroupName`, `thingName` or `targetArn` may be set, and it must be the one matching the `target` option:
 
-| `target`       | Option required   | Behaviour                                          |
-| -------------- | ------------------ | --------------------------------------------------- |
-| `thing-group`  | `thingGroupName`   | Creates a new `AWS::IoT::ThingGroup`               |
-| `thing`        | `thingName`        | Imports an existing thing by name                  |
-| `existing-arn` | `targetArn`        | Imports an existing thing or thing group by ARN    |
+| `target`       | Option             | Behaviour                                                          |
+| -------------- | ------------------ | ------------------------------------------------------------------ |
+| `thing-group`  | `thingGroupName`   | Creates a new `AWS::IoT::ThingGroup`, named after the project when omitted |
+| `thing`        | `thingName`        | Imports an existing thing by name - required                       |
+| `existing-arn` | `targetArn`        | Imports an existing thing or thing group by ARN - required          |
+
+`thingGroupName` names a group this generator creates, so it defaults to the project name. `thingName` and `targetArn` name resources that already exist, so the generator refuses to guess and asks for them.
 
 A literal (non-token) `targetArn` is validated at synth time against the deploying stack's own account and region, so a copy-pasted ARN from the wrong environment fails synth rather than deploying somewhere unexpected.
 
@@ -157,6 +159,23 @@ The same applies to the artifact bucket: no S3 lifecycle rule is applied by defa
 **CloudFormation allows at most 10 deployment resources added or deleted per operation.** Batch deployment changes across stacks if you approach that limit.
 
 </OptionFilter>
+
+## Local Deployments Conflict with Cloud Deployments
+
+A local deployment made on the device with `greengrass-cli` - what the component generators' `<c>-deploy-local` target creates - **pins that component to an exact version on that device**, and the nucleus treats the pin as a requirement it must keep satisfying. A cloud deployment asking the same device for a different version cannot satisfy both, so the nucleus refuses the whole deployment rather than choosing:
+
+```
+FAILED_NO_STATE_CHANGE ... Component com.myscope.MyComponent version constraints:
+LOCAL_DEPLOYMENT requires =1.0.0, thinggroup/my-things requires =1.0.1
+```
+
+The version in `components.ts` is not wrong here - the local pin is simply older, and it wins by existing. Remove it on the device, then deploy from the cloud again:
+
+```bash
+greengrass-cli deployment create --remove com.myscope.MyComponent
+```
+
+This is why local iteration and a deployed fleet do not mix on one device: use `<c>-deploy-local` on a development device, and let the cloud deployment own the devices in your thing group. If you do both on one device, clear the local deployment before every cloud deploy.
 
 ## Nucleus Compatibility
 

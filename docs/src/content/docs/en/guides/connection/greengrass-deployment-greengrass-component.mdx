@@ -1,0 +1,98 @@
+---
+title: Greengrass Deployment to Greengrass Component
+description: Add a Greengrass component to a deployment's component map
+when:
+  sourceType: greengrass-deployment
+  targetType:
+    - py#greengrass-component
+    - ts#greengrass-component
+---
+import { FileTree } from '@astrojs/starlight/components';
+import Link from '@components/link.astro';
+import RunGenerator from '@components/run-generator.astro';
+import GeneratorParameters from '@components/generator-parameters.astro';
+import NxCommands from '@components/nx-commands.astro';
+
+The `connection` generator can add a Greengrass component (<Link path="guides/py-greengrass-component">`py#greengrass-component`</Link> or <Link path="guides/ts-greengrass-component">`ts#greengrass-component`</Link>) to a <Link path="guides/greengrass-deployment">`greengrass-deployment`</Link> project's `components` map, so the deployment includes it without hand-editing the map yourself.
+
+## Prerequisites
+
+Before using this generator, ensure you have:
+
+1. A <Link path="guides/greengrass-deployment">`greengrass-deployment`</Link> project generated.
+2. A Greengrass component (<Link path="guides/py-greengrass-component">`py#greengrass-component`</Link> or <Link path="guides/ts-greengrass-component">`ts#greengrass-component`</Link>) generated with `--infra component-version`.
+
+:::caution[--infra none is rejected]
+A component generated with `--infra none` publishes no `ComponentVersion` for the deployment to reference. Re-run the component generator with `--infra component-version` first, then generate this connection.
+:::
+
+Both ends must be generated with `--iac cdk`: neither Greengrass CloudFormation resource exists in the Terraform provider this plugin pins, so both generators refuse `--iac terraform`. In a Terraform workspace, pass `--iac cdk` explicitly rather than leaving it to inherit - you will need a CDK app of your own to instantiate the vended constructs.
+
+## Usage
+
+### Run the Generator
+
+<RunGenerator generator="connection" />
+
+Select the deployment project as the source and the component's host project as the target. If the host project contains multiple components, specify `targetComponent` to disambiguate.
+
+### Options
+
+<GeneratorParameters generator="connection" />
+
+## Generator Output
+
+The generator wires existing projects together rather than emitting new source files. The following file is modified:
+
+<FileTree>
+
+- packages/\<deployment>
+  - src/components.ts gains an entry keyed by the component's `ComponentName`
+
+</FileTree>
+
+```ts title="packages/my-deployment/src/components.ts" {2}
+export const components: Record<string, DeploymentComponent> = {
+  'com.myscope.MyComponent': { componentVersion: '1.0.0' },
+};
+```
+
+The `ComponentName` and `componentVersion` written are read from the component's own `recipe.yaml`, which is user-owned from first generation onward and is the same file the vended `GreengrassComponentVersion` construct reads at synth time. So a component whose recipe you have already bumped is added at its current version, not the one it was generated with.
+
+### Re-running the generator
+
+Re-running with the same source and target is a clean no-op - the entry already exists and is left untouched, and the generator logs that it skipped it. Connecting a second, differently-named component adds a second entry; the first is never touched.
+
+Bumping `ComponentVersion` in the recipe and re-running does **not** update an existing entry, because the map is yours once written. The generator warns instead, naming both versions:
+
+```
+'com.myscope.MyComponent' is already in packages/my-deployment/src/components.ts at
+componentVersion '1.0.0', but its recipe.yaml now declares '1.0.1'. The entry is left
+as it is - update it by hand to deploy the new version.
+```
+
+Edit the entry to the new version to deploy it. Your own comments and any `configurationUpdate` you added to the map survive every run.
+
+If you restructure the `components` declaration itself (`satisfies Record<...>`, say, or splitting it across files) the generator can no longer find where to write, so it refuses with the entry to paste in by hand rather than reporting a connection it did not make.
+
+## Adding the deployment dependency in your stack
+
+The generator **cannot** wire the CloudFormation dependency between the component's `ComponentVersion` and the deployment, because it doesn't know which stack instantiates either construct. Call `.dependOn(...)` yourself, in the stack where you instantiate both:
+
+```ts title="packages/infra/src/stacks/application-stack.ts" {5}
+import { MyComponent, MyDeployment } from '@my-scope/common-constructs';
+import { components } from '@my-scope/my-deployment';
+
+const deployment = new MyDeployment(this, 'MyDeployment', { components });
+const myComponent = new MyComponent(this, 'MyComponent', {
+  bucket: deployment.artifactBucket,
+});
+// CloudFormation creates unrelated resources in parallel, so without this the
+// IoT job can reach core devices before the component version exists in the
+// registry, and devices fail negotiation with FAILED_NO_STATE_CHANGE.
+deployment.dependOn(myComponent);
+```
+
+Without this call, referencing the component in `components` at synth time does not make CloudFormation wait for the `ComponentVersion` to exist - `dependOn` is what orders the two resources.
+
+See the <Link path="guides/greengrass-deployment">`greengrass-deployment`</Link> guide for the full infrastructure this connection's endpoints vend, including the artifact bucket, the token exchange role grant, and the CloudFormation semantics around component version immutability and deployment revisions.

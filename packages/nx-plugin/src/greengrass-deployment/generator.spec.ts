@@ -155,6 +155,20 @@ describe('greengrass-deployment generator', () => {
     ).rejects.toThrow(/requires --thingName/);
   });
 
+  it('should derive thingGroupName from the project name when omitted', async () => {
+    await greengrassDeploymentGenerator(tree, {
+      ...defaultOptions,
+      thingGroupName: undefined,
+    });
+
+    expect(
+      tree.read(
+        'packages/common/constructs/src/app/greengrass/my-deployment.ts',
+        'utf-8',
+      ),
+    ).toContain(`thingGroupName: 'my-deployment',`);
+  });
+
   it('should throw when more than one target input is provided', async () => {
     await expect(
       greengrassDeploymentGenerator(tree, {

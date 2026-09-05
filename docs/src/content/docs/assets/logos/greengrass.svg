@@ -1,0 +1,9 @@
+<!-- Placeholder mark in the AWS IoT category colour (#7AA116), drawn for this
+     contribution. Sibling logos here are AWS's official architecture icons (see
+     dynamodb.svg), so this should be replaced with Arch_AWS-IoT-Greengrass from
+     the AWS Architecture Icons pack before release. -->
+<svg width="80" height="80" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect width="80" height="80" fill="#7AA116"/>
+<path d="M40 60C40 60 24 52.5 24 36C24 28 28 22 34 18C34 26 37 30 40 33C43 30 46 26 46 18C52 22 56 28 56 36C56 52.5 40 60 40 60Z" fill="white"/>
+<path d="M40 60V33" stroke="#7AA116" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

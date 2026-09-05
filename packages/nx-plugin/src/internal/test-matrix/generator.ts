@@ -276,6 +276,14 @@ export const internalTestMatrixGenerator = async (
       iac: 'inherit',
       ...defaults,
     });
+
+    // Connect the deployment to the Python component - writes it into
+    // `my-greengrass-deployment`'s `components` map.
+    await connectionGenerator(tree, {
+      sourceProject: 'my-greengrass-deployment',
+      targetProject: py('py-greengrass-project'),
+      ...defaults,
+    });
   }
 
   // MCP servers — uninfra'd and hosted on AgentCore.

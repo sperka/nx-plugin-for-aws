@@ -19,6 +19,7 @@ import copilotkitLogo from '@assets/logos/copilotkit.png';
 import auroraLogo from '@assets/logos/aurora.svg';
 import dynamodbLogo from '@assets/logos/dynamodb.svg';
 import agentcoreLogo from '@assets/logos/agentcore.svg';
+import greengrassLogo from '@assets/logos/greengrass.svg';
 
 type LogoId =
   | 'react'
@@ -33,7 +34,8 @@ type LogoId =
   | 'copilotkit'
   | 'aurora'
   | 'dynamodb'
-  | 'agentcore';
+  | 'agentcore'
+  | 'greengrass';
 
 interface LogoInfo {
   src?: ImageMetadata;
@@ -54,6 +56,7 @@ const logos: Record<LogoId, LogoInfo> = {
   aurora: { src: auroraLogo, alt: 'Amazon Aurora' },
   dynamodb: { src: dynamodbLogo, alt: 'Amazon DynamoDB' },
   agentcore: { src: agentcoreLogo, alt: 'Amazon Bedrock AgentCore Gateway' },
+  greengrass: { src: greengrassLogo, alt: 'AWS IoT Greengrass' },
 };
 
 interface Props {

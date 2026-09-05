@@ -1,0 +1,17 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`greengrass-deployment#component-connection generator > matches the snapshot of the modified components.ts 1`] = `
+"export interface DeploymentComponent {
+  readonly componentVersion?: string;
+  readonly configurationUpdate?: {
+    readonly merge?: Record<string, unknown>;
+    readonly reset?: readonly string[];
+  };
+}
+
+export const components: Record<string, DeploymentComponent> = {
+  // 'com.example.MyComponent': { componentVersion: '1.0.0' },
+  'com.example.MyComponent': { componentVersion: '1.0.0' },
+};
+"
+`;

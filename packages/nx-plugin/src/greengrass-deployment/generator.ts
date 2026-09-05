@@ -53,6 +53,12 @@ const TARGET_OPTIONS = ['thingGroupName', 'thingName', 'targetArn'] as const;
  * Validates the mutually exclusive target options against `target`, and
  * returns the pre-rendered `GreengrassDeployment` prop line plus a prose
  * description for the app construct's doc comment.
+ *
+ * `thingGroupName` names a group this generator creates, so an omitted value is
+ * derived from the project name rather than refused - the default `target` is
+ * `thing-group`, and a caller choosing options up front (the docs Graph
+ * Builder, say) has nothing else to go on. `thingName` and `targetArn` name
+ * resources that already exist, which nothing here can guess.
  */
 const resolveTarget = (
   options: GreengrassDeploymentGeneratorSchema,
@@ -65,7 +71,9 @@ const resolveTarget = (
         ? 'thingName'
         : 'targetArn';
 
-  if (!options[expected]) {
+  const thingGroupName = options.thingGroupName ?? kebabCase(options.name);
+
+  if (expected !== 'thingGroupName' && !options[expected]) {
     throw new Error(
       `--target=${options.target} requires --${expected} to be set.`,
     );
@@ -84,8 +92,8 @@ const resolveTarget = (
   switch (options.target) {
     case 'thing-group':
       return {
-        targetPropLine: `thingGroupName: '${options.thingGroupName}',`,
-        targetDescription: `a new thing group ("${options.thingGroupName}")`,
+        targetPropLine: `thingGroupName: '${thingGroupName}',`,
+        targetDescription: `a new thing group ("${thingGroupName}")`,
       };
     case 'thing':
       return {
