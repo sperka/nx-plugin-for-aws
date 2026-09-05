@@ -235,6 +235,18 @@ With `ipc: false` (the default), `main.ts` is a plain long-running loop that log
 
 </OptionFilter>
 
+### Why `ipc` defaults to false here, but true in Python
+
+`py#greengrass-component` defaults `ipc: true`, and most generators in this plugin default to a
+batteries-included end state (`infra: agentcore`, `auth: iam`, `session: s3`). This generator deliberately
+does not, for one reason: a component generated with `ipc: true` cannot run on a device that lacks network
+access, `npm` and a build toolchain, because `aws-crt`'s native addon has to be installed there at deployment
+time (see below). Python has no equivalent constraint - its wheels are vendored at build time for the target
+platform, so an IPC-enabled Python component is self-contained.
+
+The default therefore favours output that runs wherever a `node` binary exists. Pass `--ipc` when your fleet
+can satisfy the install step, and read the section below before you do.
+
 ### The `aws-crt` native addon
 
 <OptionFilter when={{ ipc: true }} description="Only relevant when ipc=true, since aws-iot-device-sdk-v2 depends on aws-crt">
