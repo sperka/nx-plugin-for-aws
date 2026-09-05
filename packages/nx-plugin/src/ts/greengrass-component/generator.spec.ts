@@ -799,6 +799,24 @@ describe('ts#greengrass-component generator', () => {
       ).rejects.toThrow(/hashicorp\/awscc/);
     });
 
+    it('throws an actionable error when the workspace carries pre-bundle-support vended scripts', async () => {
+      seedTypeScriptProject(tree);
+      // A build-artifact.ts vended by a plugin version that predates the
+      // bundle-dir argument — KeepExisting means it never refreshes on its own.
+      tree.write(
+        'packages/common/scripts/src/greengrass/build-artifact.ts',
+        '// Usage: build-artifact.ts <project-root> <component-dir> <dist>\n',
+      );
+
+      await expect(
+        tsGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          iac: 'cdk',
+        }),
+      ).rejects.toThrow(/older plugin version.*Delete the files/s);
+    });
+
     it('records iac in component metadata', async () => {
       seedTypeScriptProject(tree);
 
