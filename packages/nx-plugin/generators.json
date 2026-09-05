@@ -99,6 +99,13 @@
       "guidePages": ["greengrass-deployment"],
       "experimental": true
     },
+    "greengrass-deployment#component-connection": {
+      "factory": "./src/greengrass-deployment/component-connection/generator",
+      "schema": "./src/greengrass-deployment/component-connection/schema.json",
+      "description": "Connect a Greengrass component to a greengrass-deployment project, adding it to the deployment's component map",
+      "metric": "g76",
+      "hidden": true
+    },
     "license": {
       "factory": "./src/license/generator",
       "schema": "./src/license/schema.json",
