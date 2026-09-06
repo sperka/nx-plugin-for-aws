@@ -44,11 +44,11 @@
     },
     "platform": {
       "type": "string",
-      "description": "The core device platform to vendor Python dependencies for and to write into the recipe manifest.",
-      "enum": ["linux-amd64", "linux-arm64"],
+      "description": "The core device platform(s) to vendor Python dependencies for and to write into the recipe manifests. linux-amd64-arm64 vendors both and writes one manifest per architecture.",
+      "enum": ["linux-amd64", "linux-arm64", "linux-amd64-arm64"],
       "default": "linux-arm64",
       "x-priority": "important",
-      "x-prompt": "Which core device platform would you like to target?"
+      "x-prompt": "Which core device platform(s) would you like to target?"
     },
     "infra": {
       "type": "string",

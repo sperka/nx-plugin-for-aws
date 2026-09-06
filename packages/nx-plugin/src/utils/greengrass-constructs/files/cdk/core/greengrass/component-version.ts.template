@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import { RemovalPolicy } from 'aws-cdk-lib';
 import { CfnComponentVersion } from 'aws-cdk-lib/aws-greengrassv2';
 import { BucketDeployment, Source } from 'aws-cdk-lib/aws-s3-deployment';
@@ -22,8 +22,8 @@ export interface GreengrassComponentVersionProps {
 
   /**
    * Directory holding the `<c>-artifact` target's artifact tree
-   * (`greengrass-build/artifacts`), containing exactly one file at
-   * `<artifactsDir>/<ComponentName>/<ComponentVersion>/`.
+   * (`greengrass-build/artifacts`), containing one file per manifest platform
+   * at `<artifactsDir>/<ComponentName>/<ComponentVersion>/`.
    */
   readonly artifactsDir: string;
 
@@ -62,6 +62,24 @@ const findSingleFile = (
     );
   }
   return join(dir, entries[0]);
+};
+
+/** Reads `dir`, returning every file name sorted, throwing when it holds none. */
+const listFilesSorted = (dir: string, description: string): string[] => {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    throw new Error(
+      `No ${description} found at "${dir}" - run the component's "-artifact" target first.`,
+    );
+  }
+  if (entries.length === 0) {
+    throw new Error(
+      `Expected at least one ${description} in "${dir}", found 0 - run the component's "-artifact" target first.`,
+    );
+  }
+  return entries.sort();
 };
 
 /**
@@ -136,13 +154,40 @@ export class GreengrassComponentVersion extends Construct {
       componentName,
       componentVersion,
     );
-    const artifactPath = findSingleFile(
+    const artifactFileNames = listFilesSorted(
       artifactDir,
       `artifact for ${componentName}@${componentVersion}`,
     );
-    const sha256 = createHash('sha256')
-      .update(readFileSync(artifactPath))
-      .digest('hex');
+    const sha256ByName = new Map(
+      artifactFileNames.map((name) => [
+        name,
+        createHash('sha256')
+          .update(readFileSync(join(artifactDir, name)))
+          .digest('hex'),
+      ]),
+    );
+    // COMPATIBILITY HINGE - do not "simplify" this branch away. With exactly
+    // one artifact the prefix segment stays that artifact's OWN sha256, byte
+    // for byte the value every already-published version was keyed by.
+    // Routing the one-file case through the aggregate would re-key every
+    // existing component; a re-keyed artifact URI changes InlineRecipe, which
+    // CloudFormation can only apply by replacing an immutable version, and
+    // CreateComponentVersion then fails with AlreadyExists.
+    //
+    // With more than one, the prefix covers ALL of the version's artifacts:
+    // sorted `<name>:<sha256>` lines joined by "\n", hashed. Sorted, so the
+    // key is independent of directory iteration order. Identical formula in
+    // the Terraform module.
+    const sha256 =
+      artifactFileNames.length === 1
+        ? sha256ByName.get(artifactFileNames[0])!
+        : createHash('sha256')
+            .update(
+              artifactFileNames
+                .map((name) => `${name}:${sha256ByName.get(name)!}`)
+                .join('\n'),
+            )
+            .digest('hex');
 
     assertNoSynthTimeVersionDrift(
       componentName,
@@ -185,17 +230,32 @@ export class GreengrassComponentVersion extends Construct {
       sha256,
     });
 
-    // The recipe names its artifact; the build names the file. A mismatch
-    // would otherwise only surface on a device, as a failed artifact fetch.
-    const artifactBasename = basename(artifactPath);
-    const mismatched = substitutedBasenames.filter(
-      (name) => name !== artifactBasename,
-    );
-    if (mismatched.length > 0) {
+    // The recipe names its artifacts; the build names the files. A mismatch in
+    // either direction would otherwise only surface on a device: referenced but
+    // not built is a failed artifact fetch, built but not referenced is an
+    // architecture whose manifest was never added.
+    const builtNames = new Set(artifactFileNames);
+    // Deduped: one basename may legitimately be referenced by several
+    // manifests (a platform-independent bundle serving two architectures).
+    const referencedNames = new Set(substitutedBasenames);
+    const missing = [...referencedNames].filter((name) => !builtNames.has(name));
+    if (missing.length > 0) {
       throw new Error(
-        `"${recipePath}" references artifact ${mismatched
+        `"${recipePath}" references artifact ${missing
           .map((name) => `"${name}"`)
-          .join(', ')}, but the only file built for ${componentName}@${componentVersion} is "${artifactBasename}". Make the recipe's artifact URI end in "${artifactBasename}".`,
+          .join(', ')}, but the files built for ${componentName}@${componentVersion} are ${artifactFileNames
+          .map((name) => `"${name}"`)
+          .join(', ')}. Make the recipe's artifact URI end in one of those names.`,
+      );
+    }
+    const unreferenced = artifactFileNames.filter(
+      (name) => !referencedNames.has(name),
+    );
+    if (unreferenced.length > 0) {
+      throw new Error(
+        `The build produced ${unreferenced
+          .map((name) => `"${name}"`)
+          .join(', ')} for ${componentName}@${componentVersion}, which no manifest in "${recipePath}" references. Add a manifest whose artifact URI ends in each name, then bump ComponentVersion before re-deploying.`,
       );
     }
 

@@ -4,11 +4,11 @@ exports[`sharedGreengrassScriptsGenerator > should vend the greengrass scripts i
 "import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import yaml from 'js-yaml';
-import { loadRecipe, validateRecipe } from './recipe-utils.js';
+import { loadRecipe, validateManifestArchitectures, validateRecipe } from './recipe-utils.js';
 import { writeZip, type ZipEntry } from './zip-writer.js';
 
 /*
- * Usage: build-artifact.ts <project-root> <component-dir> <dist> [bundle-dir]
+ * Usage: build-artifact.ts <project-root> <component-dir> <dist> [bundle-dir] [--platforms=<arch>,<arch>]
  *
  * <project-root>  path to the host project (e.g. a Python project root)
  * <component-dir> the component's directory name under <project-root>/greengrass/,
@@ -26,6 +26,14 @@ import { writeZip, type ZipEntry } from './zip-writer.js';
  *                  when present, is included too (the minimal manifest an
  *                  Install lifecycle step's \`npm install\` needs for a native
  *                  dependency the bundle marked external).
+ * --platforms      optional: a comma-separated list of manifest architecture
+ *                  tokens (e.g. "amd64,aarch64"). When given, <dist>/vendor/<arch>
+ *                  is read per architecture and one <component-dir>-<arch>.zip
+ *                  is written per architecture, and every recipe manifest
+ *                  declaring one of these architectures must pair with that
+ *                  architecture's own zip. Cannot be combined with
+ *                  <bundle-dir>. Without it, behaviour is exactly as before:
+ *                  flat <dist>/vendor, one <component-dir>.zip.
  *
  * Without <bundle-dir>, everything under <project-root>/greengrass/<component-dir>/
  * is packaged except recipe.yaml and gdk-config.json, which are framework
@@ -37,7 +45,7 @@ const log = (msg: string): void => console.error(\`[build-artifact] \${msg}\`);
 
 function usage(): never {
   log(
-    'Usage: build-artifact.ts <project-root> <component-dir> <dist> [bundle-dir]',
+    'Usage: build-artifact.ts <project-root> <component-dir> <dist> [bundle-dir] [--platforms=<arch>,<arch>]',
   );
   process.exit(1);
 }
@@ -72,14 +80,37 @@ function entriesFrom(dir: string, exclude: ReadonlySet<string>): ZipEntry[] {
 }
 
 function main(): void {
-  const [projectRoot, componentDirName, dist, bundleDir] =
-    process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  const PLATFORMS_FLAG = '--platforms=';
+  const platforms = argv
+    .filter((a) => a.startsWith(PLATFORMS_FLAG))
+    .flatMap((a) => a.slice(PLATFORMS_FLAG.length).split(','))
+    .map((a) => a.trim())
+    .filter((a) => a.length > 0);
+  const [projectRoot, componentDirName, dist, bundleDir] = argv.filter(
+    (a) => !a.startsWith(PLATFORMS_FLAG),
+  );
   if (!projectRoot || !componentDirName || !dist) {
     usage();
   }
 
+  if (platforms.length > 0 && bundleDir) {
+    log(
+      '--platforms cannot be combined with a bundle-dir: per-architecture copies of one bundle would all hold identical bytes. Drop --platforms and serve both architectures from a single artifact with two manifests.',
+    );
+    process.exit(1);
+    return;
+  }
+
   const componentDir = join(projectRoot, 'greengrass', componentDirName);
   const recipePath = join(componentDir, 'recipe.yaml');
+  const baseNameByArchitecture = Object.fromEntries(
+    platforms.map((arch) => [arch, \`\${componentDirName}-\${arch}\`]),
+  );
+  const artifactBaseNames =
+    platforms.length === 0
+      ? [componentDirName]
+      : platforms.map((arch) => baseNameByArchitecture[arch]);
 
   let componentName: string;
   let componentVersion: string;
@@ -88,8 +119,13 @@ function main(): void {
     recipe = loadRecipe(recipePath);
     ({ componentName, componentVersion } = validateRecipe(
       recipe,
-      componentDirName,
+      artifactBaseNames,
     ));
+    // Only meaningful per architecture, so only checked when this build knows
+    // which architecture each zip is for.
+    if (platforms.length > 0) {
+      validateManifestArchitectures(recipe, baseNameByArchitecture);
+    }
   } catch (e) {
     log((e as Error).message);
     process.exit(1);
@@ -113,50 +149,82 @@ function main(): void {
   mkdirSync(artifactDir, { recursive: true });
   mkdirSync(recipesDir, { recursive: true });
 
-  let entries: ZipEntry[];
-  if (bundleDir && existsSync(bundleDir)) {
-    // A pre-bundled language (e.g. TypeScript via rolldown): the bundle
-    // output is the deployable content, so the source that produced it is
-    // never packaged.
-    entries = entriesFrom(bundleDir, new Set(['.lock']));
-    const packageJsonPath = join(componentDir, 'package.json');
-    if (existsSync(packageJsonPath)) {
-      // Ships alongside the bundle only when an Install lifecycle step needs
-      // it (e.g. \`npm install\` for a native dependency the bundle marked
-      // external) - absent for a fully self-contained bundle.
-      entries.push({
-        name: 'package.json',
-        data: readFileSync(packageJsonPath),
-      });
+  if (platforms.length > 0) {
+    // Multi-architecture: one zip per architecture, each holding the
+    // component's own files plus that architecture's own vendored wheels.
+    for (const arch of platforms) {
+      const archVendorDir = join(vendorDir, arch);
+      if (!existsSync(archVendorDir)) {
+        log(
+          \`Missing vendored dependencies for "\${arch}" at "\${archVendorDir}" - run the component's "-vendor" target first (it writes one directory per architecture when the component targets more than one).\`,
+        );
+        process.exit(1);
+        return;
+      }
+      const entries = [
+        ...entriesFrom(
+          componentDir,
+          new Set(['recipe.yaml', 'gdk-config.json', '.lock']),
+        ),
+        ...entriesFrom(archVendorDir, new Set(['.lock'])),
+      ];
+      if (entries.length === 0) {
+        log(
+          \`Nothing to package for "\${arch}": "\${componentDir}" has no deployable files and "\${archVendorDir}" has no vendored dependencies\`,
+        );
+        process.exit(1);
+        return;
+      }
+      const zipPath = join(artifactDir, \`\${componentDirName}-\${arch}.zip\`);
+      writeZip(entries, zipPath);
+      log(\`wrote \${zipPath}\`);
     }
   } else {
-    // Framework metadata that ships alongside the recipe but never inside
-    // the deployed artifact. A package.json here is the user's own, so it is
-    // packaged like any other source file - only bundle mode treats one as
-    // framework metadata.
-    entries = entriesFrom(
-      componentDir,
-      new Set(['recipe.yaml', 'gdk-config.json', '.lock']),
-    );
-    if (existsSync(vendorDir)) {
-      // requirements.txt is the "-vendor" target's own intermediate, not
-      // something the device needs.
-      entries.push(
-        ...entriesFrom(vendorDir, new Set(['requirements.txt', '.lock'])),
+    let entries: ZipEntry[];
+    if (bundleDir && existsSync(bundleDir)) {
+      // A pre-bundled language (e.g. TypeScript via rolldown): the bundle
+      // output is the deployable content, so the source that produced it is
+      // never packaged.
+      entries = entriesFrom(bundleDir, new Set(['.lock']));
+      const packageJsonPath = join(componentDir, 'package.json');
+      if (existsSync(packageJsonPath)) {
+        // Ships alongside the bundle only when an Install lifecycle step needs
+        // it (e.g. \`npm install\` for a native dependency the bundle marked
+        // external) - absent for a fully self-contained bundle.
+        entries.push({
+          name: 'package.json',
+          data: readFileSync(packageJsonPath),
+        });
+      }
+    } else {
+      // Framework metadata that ships alongside the recipe but never inside
+      // the deployed artifact. A package.json here is the user's own, so it is
+      // packaged like any other source file - only bundle mode treats one as
+      // framework metadata.
+      entries = entriesFrom(
+        componentDir,
+        new Set(['recipe.yaml', 'gdk-config.json', '.lock']),
       );
+      if (existsSync(vendorDir)) {
+        // requirements.txt is the "-vendor" target's own intermediate, not
+        // something the device needs.
+        entries.push(
+          ...entriesFrom(vendorDir, new Set(['requirements.txt', '.lock'])),
+        );
+      }
     }
-  }
-  if (entries.length === 0) {
-    log(
-      \`Nothing to package: "\${bundleDir && existsSync(bundleDir) ? bundleDir : componentDir}" has no deployable files and "\${vendorDir}" does not exist\`,
-    );
-    process.exit(1);
-    return;
-  }
+    if (entries.length === 0) {
+      log(
+        \`Nothing to package: "\${bundleDir && existsSync(bundleDir) ? bundleDir : componentDir}" has no deployable files and "\${vendorDir}" does not exist\`,
+      );
+      process.exit(1);
+      return;
+    }
 
-  const zipPath = join(artifactDir, \`\${componentDirName}.zip\`);
-  writeZip(entries, zipPath);
-  log(\`wrote \${zipPath}\`);
+    const zipPath = join(artifactDir, \`\${componentDirName}.zip\`);
+    writeZip(entries, zipPath);
+    log(\`wrote \${zipPath}\`);
+  }
 
   // The BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION artifact URI placeholders
   // are left exactly as authored - a later IaC step substitutes them.
@@ -339,15 +407,16 @@ export function loadRecipe(recipePath: string): GreengrassRecipe {
 
 /**
  * Validates only the recipe fields this vended toolchain consumes:
- * \`ComponentName\`, \`ComponentVersion\`, and the \`{artifacts:decompressedPath}\`
- * reference the local-deploy lifecycle script must carry so that a deployed
- * component can find its own artifact once Greengrass decompresses it.
+ * \`ComponentName\`, \`ComponentVersion\`, and, for every entry in
+ * \`artifactBaseNames\`, the \`{artifacts:decompressedPath}\` reference the
+ * local-deploy lifecycle script must carry so that a deployed component can
+ * find its own artifact once Greengrass decompresses it.
  *
  * Throws a single \`Error\` listing every violation when the recipe is invalid.
  */
 export function validateRecipe(
   recipe: GreengrassRecipe,
-  componentDirName: string,
+  artifactBaseNames: readonly string[],
 ): ResolvedComponent {
   const errors: string[] = [];
 
@@ -382,19 +451,20 @@ export function validateRecipe(
     );
   }
 
-  if (!referencesDecompressedComponentDir(recipe, componentDirName)) {
-    errors.push(
-      \`No lifecycle script references "\${DECOMPRESSED_PATH_TOKEN}/\${componentDirName}/" - \` +
-        \`the Run script path must match the artifact zip base name ("\${componentDirName}.zip")\`,
-    );
-  }
-
-  if (!declaresComponentZipArtifact(recipe, componentDirName)) {
-    errors.push(
-      \`No manifest declares an artifact whose Uri ends in "/\${componentDirName}.zip" - \` +
-        'Greengrass only unarchives a declared artifact, so ' +
-        \`"\${DECOMPRESSED_PATH_TOKEN}/\${componentDirName}/" would never resolve on the device\`,
-    );
+  for (const baseName of artifactBaseNames) {
+    if (!referencesDecompressedComponentDir(recipe, baseName)) {
+      errors.push(
+        \`No lifecycle script references "\${DECOMPRESSED_PATH_TOKEN}/\${baseName}/" - \` +
+          \`the Run script path must match the artifact zip base name ("\${baseName}.zip")\`,
+      );
+    }
+    if (!declaresComponentZipArtifact(recipe, baseName)) {
+      errors.push(
+        \`No manifest declares an artifact whose Uri ends in "/\${baseName}.zip" - \` +
+          'Greengrass only unarchives a declared artifact, so ' +
+          \`"\${DECOMPRESSED_PATH_TOKEN}/\${baseName}/" would never resolve on the device\`,
+      );
+    }
   }
 
   if (errors.length > 0) {
@@ -439,32 +509,100 @@ function referencesDecompressedComponentDir(
 /**
  * Whether any manifest declares an artifact whose Uri basename is
  * \`<componentDirName>.zip\`, which is the name the artifact this toolchain
- * writes actually carries. Case-insensitive on the key so a recipe authored
- * with \`URI\` (as some AWS samples spell it) still matches.
+ * writes actually carries.
  */
 function declaresComponentZipArtifact(
   recipe: GreengrassRecipe,
   componentDirName: string,
 ): boolean {
-  const suffix = \`/\${componentDirName}.zip\`;
   const manifests = Array.isArray(recipe.Manifests) ? recipe.Manifests : [];
-  return manifests.some((manifest) => {
-    const artifacts = (manifest as { Artifacts?: unknown })?.Artifacts;
-    if (!Array.isArray(artifacts)) {
+  return manifests.some((manifest) =>
+    manifestDeclaresZipArtifact(manifest, componentDirName),
+  );
+}
+
+/**
+ * Whether one manifest declares an artifact whose Uri basename is
+ * \`<componentDirName>.zip\`. Case-insensitive on the key so a recipe authored
+ * with \`URI\` (as some AWS samples spell it) still matches.
+ */
+function manifestDeclaresZipArtifact(
+  manifest: unknown,
+  componentDirName: string,
+): boolean {
+  const suffix = \`/\${componentDirName}.zip\`;
+  const artifacts = (manifest as { Artifacts?: unknown })?.Artifacts;
+  if (!Array.isArray(artifacts)) {
+    return false;
+  }
+  return artifacts.some((artifact) => {
+    if (artifact === null || typeof artifact !== 'object') {
       return false;
     }
-    return artifacts.some((artifact) => {
-      if (artifact === null || typeof artifact !== 'object') {
-        return false;
-      }
-      return Object.entries(artifact as Record<string, unknown>).some(
-        ([key, value]) =>
-          key.toLowerCase() === 'uri' &&
-          typeof value === 'string' &&
-          value.endsWith(suffix),
-      );
-    });
+    return Object.entries(artifact as Record<string, unknown>).some(
+      ([key, value]) =>
+        key.toLowerCase() === 'uri' &&
+        typeof value === 'string' &&
+        value.endsWith(suffix),
+    );
   });
+}
+
+/**
+ * Multi-architecture only: checks that every manifest whose
+ * \`Platform.architecture\` names an architecture this build vendored pairs with
+ * THAT architecture's own artifact, both in its \`Artifacts\` and in the
+ * lifecycle that unarchives it.
+ *
+ * {@link validateRecipe}'s checks are global - they prove every built zip is
+ * declared and referenced somewhere in the recipe. A recipe that swaps two
+ * manifests' artifacts and Run paths satisfies them, and a swap sends one
+ * architecture's native wheels to the other, which fails only on the device.
+ * A swap is one paste mistake away, because adding a second manifest to an
+ * existing component is a hand edit of a user-owned recipe.
+ *
+ * A manifest with no \`Platform.architecture\`, or one naming an architecture
+ * this build did not vendor, is left alone: a recipe may carry manifests this
+ * toolchain does not build.
+ */
+export function validateManifestArchitectures(
+  recipe: GreengrassRecipe,
+  baseNameByArchitecture: Readonly<Record<string, string>>,
+): void {
+  const errors: string[] = [];
+  const manifests = Array.isArray(recipe.Manifests) ? recipe.Manifests : [];
+  manifests.forEach((manifest, index) => {
+    const architecture = (
+      manifest as { Platform?: { architecture?: unknown } } | null
+    )?.Platform?.architecture;
+    if (typeof architecture !== 'string') {
+      return;
+    }
+    const baseName = baseNameByArchitecture[architecture];
+    if (!baseName) {
+      return;
+    }
+    if (!manifestDeclaresZipArtifact(manifest, baseName)) {
+      errors.push(
+        \`Manifest \${index + 1} declares "architecture: \${architecture}", so its own artifact Uri must end in "/\${baseName}.zip" - \` +
+          \`that is the zip this build writes for "\${architecture}". Manifests must not carry another architecture's artifact\`,
+      );
+    }
+    const lifecycle =
+      (manifest as { Lifecycle?: unknown }).Lifecycle ?? recipe.Lifecycle;
+    if (!referencesDecompressedComponentDir(lifecycle, baseName)) {
+      errors.push(
+        \`Manifest \${index + 1} declares "architecture: \${architecture}", so its lifecycle must reference \` +
+          \`"\${DECOMPRESSED_PATH_TOKEN}/\${baseName}/" - the directory that architecture's own artifact unarchives to\`,
+      );
+    }
+  });
+
+  if (errors.length > 0) {
+    throw new Error(
+      \`Invalid recipe:\\n\${errors.map((e) => \`  - \${e}\`).join('\\n')}\`,
+    );
+  }
 }
 
 /**

@@ -126,11 +126,19 @@ describe('py#greengrass-component generator', () => {
     );
     const commands =
       projectConfig.targets['my-component-vendor'].options.commands;
-    expect(commands[0]).toContain('--package test-project');
-    expect(commands[0]).toContain('--no-emit-project');
-    expect(commands[1]).toContain('--python-version 3.11');
-    expect(commands[1]).toContain('--python-platform x86_64-manylinux_2_28');
-    expect(commands[1]).toContain('--only-binary :all:');
+    // `uv pip install --target` never prunes, so the vendor dir is emptied
+    // first: artifact bytes must not depend on a previous build.
+    expect(commands[0]).toBe(
+      'shx rm -rf dist/{projectRoot}/greengrass/my-component/vendor',
+    );
+    expect(commands[1]).toBe(
+      'shx mkdir -p dist/{projectRoot}/greengrass/my-component/vendor',
+    );
+    expect(commands[2]).toContain('--package test-project');
+    expect(commands[2]).toContain('--no-emit-project');
+    expect(commands[3]).toContain('--python-version 3.11');
+    expect(commands[3]).toContain('--python-platform x86_64-manylinux_2_28');
+    expect(commands[3]).toContain('--only-binary :all:');
 
     const recipe = tree.read(
       'apps/test_project/greengrass/my-component/recipe.yaml',
@@ -312,7 +320,7 @@ describe('py#greengrass-component generator', () => {
     );
     // The stale target is replaced by the current definition.
     const vendorCommand =
-      projectConfig.targets['my-component-vendor'].options.commands[0];
+      projectConfig.targets['my-component-vendor'].options.commands[2];
     expect(vendorCommand).toContain('uv export');
     expect(vendorCommand).toContain('--no-emit-project');
     expect(vendorCommand).not.toContain('stale vendor command');
@@ -555,6 +563,351 @@ describe('py#greengrass-component generator', () => {
     expect(changes).toMatchSnapshot('main-snapshot');
   });
 
+  describe('multi-architecture (platform: linux-amd64-arm64)', () => {
+    it('should vendor each architecture into its own directory for linux-amd64-arm64', async () => {
+      seedPythonProject(tree, { requiresPython: '>=3.11' });
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-amd64-arm64',
+        infra: 'none',
+      });
+
+      const projectConfig = JSON.parse(
+        tree.read('apps/test_project/project.json', 'utf-8'),
+      );
+      const commands =
+        projectConfig.targets['my-component-vendor'].options.commands;
+      expect(commands).toHaveLength(5);
+      // One `rm` of the shared vendor root covers both architectures, so a
+      // switch back to a single platform cannot leave the other
+      // architecture's directory behind to be packaged.
+      expect(commands[0]).toBe(
+        'shx rm -rf dist/{projectRoot}/greengrass/my-component/vendor',
+      );
+      expect(commands[1]).toBe(
+        'shx mkdir -p dist/{projectRoot}/greengrass/my-component/vendor',
+      );
+      expect(commands[2]).toContain(
+        '-o dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt',
+      );
+      expect(commands[3]).toContain('--python-platform x86_64-manylinux_2_28');
+      expect(commands[3]).toContain(
+        '--target dist/{projectRoot}/greengrass/my-component/vendor/amd64',
+      );
+      expect(commands[3]).toContain('--python-version 3.11');
+      expect(commands[3]).toContain(
+        '-r dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt',
+      );
+      expect(commands[4]).toContain('--python-platform aarch64-manylinux_2_28');
+      expect(commands[4]).toContain(
+        '--target dist/{projectRoot}/greengrass/my-component/vendor/aarch64',
+      );
+      expect(commands[4]).toContain(
+        '-r dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt',
+      );
+    });
+
+    it('should pass --platforms=amd64,aarch64 to build-artifact for linux-amd64-arm64', async () => {
+      seedPythonProject(tree);
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-amd64-arm64',
+        infra: 'none',
+      });
+
+      const projectConfig = JSON.parse(
+        tree.read('apps/test_project/project.json', 'utf-8'),
+      );
+      expect(
+        projectConfig.targets['my-component-artifact'].options.command,
+      ).toContain('--platforms=amd64,aarch64');
+    });
+
+    it('should leave the single-platform vendor and artifact commands unchanged', async () => {
+      seedPythonProject(tree);
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        infra: 'none',
+      });
+
+      const projectConfig = JSON.parse(
+        tree.read('apps/test_project/project.json', 'utf-8'),
+      );
+      expect(
+        projectConfig.targets['my-component-artifact'].options.command,
+      ).not.toContain('--platforms');
+      expect(
+        projectConfig.targets['my-component-vendor'].options.commands,
+      ).toHaveLength(4);
+    });
+
+    it('should write one manifest per architecture with per-architecture zip names and Run paths', async () => {
+      seedPythonProject(tree, { requiresPython: '>=3.14' });
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-amd64-arm64',
+        infra: 'none',
+      });
+
+      const recipe = tree.read(
+        'apps/test_project/greengrass/my-component/recipe.yaml',
+        'utf-8',
+      );
+      expect(recipe).toContain('architecture: amd64');
+      expect(recipe).toContain('architecture: aarch64');
+      expect(recipe).toContain(
+        'Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component-amd64.zip',
+      );
+      expect(recipe).toContain(
+        'Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component-aarch64.zip',
+      );
+      expect(recipe).toContain(
+        'Run: python3.14 {artifacts:decompressedPath}/my-component-amd64/main.py',
+      );
+      expect(recipe).toContain(
+        'Run: python3.14 {artifacts:decompressedPath}/my-component-aarch64/main.py',
+      );
+    });
+
+    it('should not duplicate component targets, metadata entries or exports when re-run with the same multi-architecture options', async () => {
+      seedPythonProject(tree);
+
+      const options = {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-amd64-arm64' as const,
+        iac: 'cdk' as const,
+      };
+      await pyGreengrassComponentGenerator(tree, options);
+      await pyGreengrassComponentGenerator(tree, options);
+
+      const projectConfig = JSON.parse(
+        tree.read('apps/test_project/project.json', 'utf-8'),
+      );
+      expect(projectConfig.metadata.components).toHaveLength(1);
+      expect(
+        Object.keys(projectConfig.targets).filter((t) =>
+          t.startsWith('my-component-'),
+        ),
+      ).toHaveLength(4);
+
+      const appIndex = tree.read(
+        'packages/common/constructs/src/app/greengrass/index.ts',
+        'utf-8',
+      );
+      expect(appIndex?.match(/my-component\.js/g)).toHaveLength(1);
+    });
+
+    it.each([
+      { from: 'linux-arm64' as const, to: 'linux-amd64-arm64' as const },
+      { from: 'linux-amd64-arm64' as const, to: 'linux-arm64' as const },
+      { from: 'linux-arm64' as const, to: 'linux-amd64' as const },
+    ])(
+      'should throw when re-run with platform $to after having recorded $from',
+      async ({ from, to }) => {
+        seedPythonProject(tree);
+
+        await pyGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          platform: from,
+          infra: 'none',
+        });
+
+        await expect(
+          pyGreengrassComponentGenerator(tree, {
+            project: 'test-project',
+            name: 'my-component',
+            platform: to,
+            infra: 'none',
+          }),
+        ).rejects.toThrow(/cannot change it to/);
+      },
+    );
+
+    it('should name the recorded platform to re-run with, since omitting the option is not neutral', async () => {
+      seedPythonProject(tree);
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-amd64-arm64',
+        infra: 'none',
+      });
+
+      // No `platform` at all: the option defaults to linux-arm64, so a re-run
+      // that meant to change nothing asks to change the platform.
+      await expect(
+        pyGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          infra: 'none',
+        }),
+      ).rejects.toThrow(/re-run with --platform=linux-amd64-arm64/);
+    });
+
+    it('should leave recipe.yaml byte-identical when the platform-change guard fires', async () => {
+      seedPythonProject(tree);
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-arm64',
+        infra: 'none',
+      });
+
+      const recipePath =
+        'apps/test_project/greengrass/my-component/recipe.yaml';
+      const recipeBefore = tree.read(recipePath, 'utf-8');
+
+      await expect(
+        pyGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          platform: 'linux-amd64-arm64',
+          infra: 'none',
+        }),
+      ).rejects.toThrow();
+
+      expect(tree.read(recipePath, 'utf-8')).toBe(recipeBefore);
+    });
+
+    it('should refuse a multi-architecture component when the vended build-artifact.ts predates --platforms', async () => {
+      seedPythonProject(tree);
+      // A build-artifact.ts vended by a plugin version that predates
+      // multi-architecture support - KeepExisting means it never refreshes on
+      // its own.
+      tree.write(
+        'packages/common/scripts/src/greengrass/build-artifact.ts',
+        '// Usage: build-artifact.ts <project-root> <component-dir> <dist> [bundle-dir]\n',
+      );
+
+      await expect(
+        pyGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          platform: 'linux-amd64-arm64',
+          infra: 'none',
+        }),
+      ).rejects.toThrow(
+        /multi-architecture components.*Delete the files.*re-apply any patches/s,
+      );
+    });
+
+    it('should still generate a single-platform component against a build-artifact.ts that predates --platforms', async () => {
+      seedPythonProject(tree);
+      tree.write(
+        'packages/common/scripts/src/greengrass/build-artifact.ts',
+        '// Usage: build-artifact.ts <project-root> <component-dir> <dist> [bundle-dir]\n',
+      );
+
+      await expect(
+        pyGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          platform: 'linux-arm64',
+          infra: 'none',
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it('should record linux-amd64-arm64 as the platform in component metadata', async () => {
+      seedPythonProject(tree);
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        componentVersion: '2.3.4',
+        platform: 'linux-amd64-arm64',
+        ipc: false,
+        infra: 'none',
+      });
+
+      const projectConfig = JSON.parse(
+        tree.read('apps/test_project/project.json', 'utf-8'),
+      );
+      expect(projectConfig.metadata.components).toHaveLength(1);
+      expect(projectConfig.metadata.components[0]).toEqual({
+        generator: PY_GREENGRASS_COMPONENT_GENERATOR_INFO.id,
+        path: 'greengrass/my-component/main.py',
+        name: 'my-component',
+        componentName: 'com.proj.MyComponent',
+        componentVersion: '2.3.4',
+        platform: 'linux-amd64-arm64',
+        ipc: false,
+      });
+    });
+
+    it('should escalate a multi-architecture component from --infra none to --infra component-version exactly once', async () => {
+      seedPythonProject(tree);
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-amd64-arm64',
+        infra: 'none',
+      });
+      expect(tree.exists('packages/common/constructs')).toBe(false);
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-amd64-arm64',
+        infra: 'component-version',
+        iac: 'cdk',
+      });
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-amd64-arm64',
+        infra: 'component-version',
+        iac: 'cdk',
+      });
+
+      const appIndex = tree.read(
+        'packages/common/constructs/src/app/greengrass/index.ts',
+        'utf-8',
+      );
+      expect(appIndex?.match(/my-component\.js/g)).toHaveLength(1);
+    });
+
+    it('should match snapshot for a multi-architecture component', async () => {
+      seedPythonProject(tree, { requiresPython: '>=3.14' });
+
+      await pyGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-amd64-arm64',
+        infra: 'none',
+      });
+
+      const changes = sortObjectKeys(
+        tree
+          .listChanges()
+          .filter(
+            (f) =>
+              f.path.endsWith('.py') ||
+              f.path.endsWith('.yaml') ||
+              f.path.endsWith('gdk-config.json') ||
+              f.path.endsWith('project.json'),
+          )
+          .reduce((acc, curr) => {
+            acc[curr.path] = tree.read(curr.path, 'utf-8');
+            return acc;
+          }, {}),
+      );
+      expect(changes).toMatchSnapshot('multi-arch-snapshot');
+    });
+  });
+
   describe('infra escalation (--infra component-version)', () => {
     it('vends the per-component construct and registers the artifact dependency', async () => {
       seedPythonProject(tree);
@@ -732,7 +1085,9 @@ describe('py#greengrass-component generator', () => {
         'packages/common/terraform/src/app/greengrass-component/my-component/my-component.tf';
       expect(tree.exists(modulePath)).toBe(true);
       const module = tree.read(modulePath, 'utf-8');
-      expect(module).toContain('source = "../../../core/greengrass/component-version"');
+      expect(module).toContain(
+        'source = "../../../core/greengrass/component-version"',
+      );
       expect(module).toContain(
         'apps/test_project/greengrass/my-component/greengrass-build/recipes',
       );
@@ -740,7 +1095,11 @@ describe('py#greengrass-component generator', () => {
         'apps/test_project/greengrass/my-component/greengrass-build/artifacts',
       );
 
-      for (const dir of ['artifact-bucket', 'component-version', 'deployment']) {
+      for (const dir of [
+        'artifact-bucket',
+        'component-version',
+        'deployment',
+      ]) {
         expect(
           tree.exists(
             `packages/common/terraform/src/core/greengrass/${dir}/main.tf`,

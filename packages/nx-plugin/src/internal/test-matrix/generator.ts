@@ -246,6 +246,7 @@ export const internalTestMatrixGenerator = async (
   await pyGreengrassComponentGenerator(tree, {
     project: py('py-greengrass-project'),
     name: 'my-greengrass-component',
+    platform: 'linux-amd64-arm64',
     iac: 'inherit',
     ...defaults,
   });

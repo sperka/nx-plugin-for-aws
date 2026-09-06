@@ -11,10 +11,9 @@
 export const RECIPE_FORMAT_VERSION = '2020-01-25' as const;
 
 /**
- * Component platforms the generator supports. Multi-architecture manifests,
- * Windows and `linux-any` are deferred: `awscrt` (the native binding the IPC
- * client pulls in) ships architecture-specific wheels, so one artifact cannot
- * serve both architectures.
+ * Component platforms the generator supports. Windows and `linux-any` are
+ * deferred. A recipe may carry one manifest per platform - see
+ * `GREENGRASS_PLATFORM_SELECTIONS`.
  */
 export const GREENGRASS_PLATFORMS = ['linux-amd64', 'linux-arm64'] as const;
 
@@ -81,3 +80,31 @@ export interface GreengrassConfig {
   /** Default `ComponentPublisher` for new components, keyed by {@link GREENGRASS_PUBLISHER_CONFIG_KEY}. */
   publisher?: string;
 }
+
+/**
+ * What a component generator's `platform` option accepts: one architecture, or
+ * the explicit pair. Deliberately not a `multi` value that means "every
+ * supported architecture" - that would silently change what an existing
+ * invocation produces the day a third architecture lands.
+ */
+export const GREENGRASS_PLATFORM_SELECTIONS = [
+  'linux-amd64',
+  'linux-arm64',
+  'linux-amd64-arm64',
+] as const;
+
+export type GreengrassPlatformSelection =
+  (typeof GREENGRASS_PLATFORM_SELECTIONS)[number];
+
+/** The platforms each selection expands to, in manifest order. */
+export const GREENGRASS_SELECTION_PLATFORMS: Readonly<
+  Record<GreengrassPlatformSelection, readonly GreengrassPlatform[]>
+> = {
+  'linux-amd64': ['linux-amd64'],
+  'linux-arm64': ['linux-arm64'],
+  'linux-amd64-arm64': ['linux-amd64', 'linux-arm64'],
+} as const;
+
+export const resolvePlatforms = (
+  selection: GreengrassPlatformSelection,
+): readonly GreengrassPlatform[] => GREENGRASS_SELECTION_PLATFORMS[selection];

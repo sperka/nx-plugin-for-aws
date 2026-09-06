@@ -16,13 +16,14 @@ ComponentConfiguration:
             - <%- componentName %>/heartbeat
 <%_ } _%>
 Manifests:
+<%_ manifests.forEach((m) => { _%>
   - Platform:
-      os: <%- manifestOs %>
-      architecture: <%- manifestArchitecture %>
+      os: <%- m.os %>
+      architecture: <%- m.architecture %>
     Artifacts:
       # Placeholders are substituted at publish time. The basename must stay
-      # <%- componentDirName %>.zip, which is what the Run script below unarchives to.
-      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<%- componentDirName %>.zip
+      # <%- m.artifactBaseName %>.zip, which is what the Run script below unarchives to.
+      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<%- m.artifactBaseName %>.zip
         Unarchive: ZIP
     Lifecycle:
 <%_ if (ipc) { _%>
@@ -30,9 +31,10 @@ Manifests:
       # marks external rather than inlines - it is installed here instead, on
       # the device, from the package.json vended alongside this recipe. This
       # step needs network access and npm on the device.
-      Install: cd {artifacts:decompressedPath}/<%- componentDirName %> && npm install --omit=dev
+      Install: cd {artifacts:decompressedPath}/<%- m.artifactBaseName %> && npm install --omit=dev
 <%_ } _%>
       # Requires a node binary on the device's PATH - the bundle is pure
       # JavaScript with no ABI pinning, but it still needs a modern node
       # runtime (Node.js 18 or later) to execute.
-      Run: node {artifacts:decompressedPath}/<%- componentDirName %>/index.js
+      Run: node {artifacts:decompressedPath}/<%- m.artifactBaseName %>/index.js
+<%_ }); _%>
