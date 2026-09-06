@@ -37,10 +37,10 @@
     },
     "ipc": {
       "type": "boolean",
-      "description": "Whether to wire the Greengrass IPC client (aws-iot-device-sdk-v2) and a least-privilege accessControl block scoped to the component's own topic. Off by default: aws-iot-device-sdk-v2 ships the aws-crt native addon, which cannot be bundled and requires an on-device install step.",
+      "description": "Whether to wire the Greengrass IPC client (aws-iot-device-sdk-v2) and a least-privilege accessControl block scoped to the component's own topic. Off by default only for continuity of existing invocations - on adds about 2.3MB of vendored aws-crt native addon to the artifact per targeted architecture.",
       "default": false,
       "x-priority": "important",
-      "x-prompt": "Would you like to use the Greengrass IPC client to publish/subscribe to local topics? (requires an on-device npm install step)"
+      "x-prompt": "Would you like to use the Greengrass IPC client to publish/subscribe to local topics? (adds a vendored native addon to the artifact)"
     },
     "platform": {
       "type": "string",

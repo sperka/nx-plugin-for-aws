@@ -51,6 +51,7 @@ import {
   updateComponentGeneratorMetadata,
 } from '../../utils/nx.js';
 import { toProjectRelativePath } from '../../utils/paths.js';
+import { registerPnpmBuiltDependencies } from '../../utils/pnpm-workspace.js';
 import {
   SHARED_CONSTRUCTS_DEPENDENCIES,
   sharedConstructsGenerator,
@@ -63,7 +64,6 @@ import {
   SHARED_GREENGRASS_SCRIPTS_DEPENDENCIES,
   sharedGreengrassScriptsGenerator,
 } from '../../utils/shared-greengrass-scripts.js';
-import { TS_VERSIONS } from '../../utils/versions.js';
 import type { TsGreengrassComponentGeneratorSchema } from './schema.js';
 
 /** The metadata this generator records, which its predicates read. */
@@ -77,8 +77,9 @@ export interface GreengrassComponentMetadata {
 
 export const DEPENDENCIES = declareDependencies<GreengrassComponentMetadata>()({
   ts: [
-    // aws-crt ships a per-ABI native addon that cannot be bundled, so it is
-    // installed on the device instead - see the recipe's Install step.
+    // Bundled like everything else. Its aws-crt dependency ships a native
+    // addon that cannot be bundled, so the vendor target copies that addon
+    // into the artifact from this same pinned install - see vendor-crt-addon.ts.
     { name: 'aws-iot-device-sdk-v2', when: (m) => m.ipc },
     ...ownedElsewhere(BUNDLE_DEPENDENCIES),
     ...ownedElsewhere(SHARED_GREENGRASS_SCRIPTS_DEPENDENCIES),
@@ -149,23 +150,26 @@ export const tsGreengrassComponentGenerator = async (
   }
 
   const publisher = options.publisher ?? resolveGreengrassPublisher(tree);
-  // The opposite default from py#greengrass-component: aws-iot-device-sdk-v2
-  // ships the aws-crt native addon, which cannot be bundled, so opting in
-  // costs an on-device install step rather than being free.
+  // The default stays false only for continuity of existing invocations:
+  // `--ipc` is now as self-contained as the Python component, at the cost of
+  // about 2 MB of vendored native binary plus an accessControl block.
   const ipc = options.ipc ?? false;
   const platform: GreengrassPlatformSelection =
     options.platform ?? 'linux-arm64';
   const platforms = resolvePlatforms(platform);
-  // A rolldown bundle is pure JavaScript, and with `ipc=true` the on-device
-  // `npm install` resolves `aws-crt` for the device's own architecture - so,
-  // unlike the Python component, this generator has ONE artifact over N
-  // manifests, never N artifacts.
+  // A rolldown bundle is pure JavaScript over every architecture, and with
+  // `ipc=true` one zip carries every targeted architecture's own vendored
+  // addon - each manifest's Setenv selects only its own - so, unlike the
+  // Python component, this generator has ONE artifact over N manifests, never
+  // N artifacts.
   const manifests = platforms.map((p) => {
-    const { manifestPlatform } = GREENGRASS_PLATFORM_MAPPINGS[p];
+    const { manifestPlatform, nodeCrtAddonDir } =
+      GREENGRASS_PLATFORM_MAPPINGS[p];
     return {
       os: manifestPlatform.os,
       architecture: manifestPlatform.architecture,
       artifactBaseName: componentDirName,
+      nodeCrtAddonDir,
     };
   });
 
@@ -223,10 +227,11 @@ export const tsGreengrassComponentGenerator = async (
       .map(
         (m) =>
           `  - Platform:\n      os: ${m.os}\n      architecture: ${m.architecture}\n    Artifacts:\n      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/${m.artifactBaseName}.zip\n        Unarchive: ZIP\n    Lifecycle:\n${
-            // The Install step is part of the manifest, so a preview without it
-            // is not paste-ready for an ipc=true component.
+            // The Setenv block is per-manifest and names this architecture's
+            // vendored addon, so a preview without it is not paste-ready for an
+            // ipc=true component.
             ipc
-              ? `      Install: cd {artifacts:decompressedPath}/${m.artifactBaseName} && npm install --omit=dev\n`
+              ? `      Setenv:\n        AWS_CRT_NODEJS_BINARY_RELATIVE_PATH: native/aws-crt/${m.nodeCrtAddonDir}/aws-crt-nodejs.node\n`
               : ''
           }      Run: node {artifacts:decompressedPath}/${m.artifactBaseName}/index.js`,
       )
@@ -251,16 +256,14 @@ export const tsGreengrassComponentGenerator = async (
     manifests,
     componentDirName,
     project: projectConfig.name,
-    // Named `awsIotDeviceSdkPin` for the same reason, and it is not one of the
-    // embedded pins the version sync reaches: that path only visits Dockerfiles
-    // and `.tf` files. The on-device package.json this renders is
-    // framework-owned, so re-running this generator refreshes it from
-    // TS_VERSIONS, while the version sync owns the host project's own manifest
-    // entry through the `DEPENDENCIES` declaration above.
-    awsIotDeviceSdkPin: TS_VERSIONS['aws-iot-device-sdk-v2'],
   };
 
-  // recipe.yaml is user-owned from first generation onward.
+  // recipe.yaml is user-owned from first generation onward, so `ipc` shapes it
+  // only on the first run: a later run that flips `ipc` to true adds the vendor
+  // target and stages the addon, but leaves the recipe without the `Setenv` that
+  // points aws-crt's loader at it, and the component then fails on the device
+  // with "AWS CRT binary not present". Add that block by hand - the guide's
+  // migration note carries the exact shape.
   generateFiles(
     tree,
     joinPathFragments(import.meta.dirname, 'files', 'component'),
@@ -290,20 +293,6 @@ export const tsGreengrassComponentGenerator = async (
     { overwriteStrategy: OverwriteStrategy.Overwrite },
   );
 
-  if (ipc) {
-    // The minimal manifest the recipe's Install step needs to `npm install`
-    // aws-iot-device-sdk-v2 on the device - framework-owned, fully derived.
-    // Like recipe.yaml, `ipc` is only read on first generation: re-running
-    // with a different `ipc` value does not retroactively rewrite either.
-    generateFiles(
-      tree,
-      joinPathFragments(import.meta.dirname, 'files', 'ipc-package'),
-      componentDir,
-      templateOptions,
-      { overwriteStrategy: OverwriteStrategy.Overwrite },
-    );
-  }
-
   // Checked BEFORE vending: the scripts are created once and never
   // overwritten, so a workspace whose Greengrass scripts predate bundle
   // support keeps its old copy - and this generator's artifact target would
@@ -324,6 +313,33 @@ export const tsGreengrassComponentGenerator = async (
 
   await sharedGreengrassScriptsGenerator(tree, DEPENDENCIES);
 
+  if (ipc) {
+    // aws-crt ships an install script that builds its native addon from
+    // source. Recorded as `false`: this component vendors the prebuilt addon at
+    // build time, so the script must not run - and pnpm 11 fails the install
+    // outright with ERR_PNPM_IGNORED_BUILDS unless the decision is explicit.
+    registerPnpmBuiltDependencies(tree, { 'aws-crt': false });
+  }
+
+  if (ipc) {
+    // AFTER sharedGreengrassScriptsGenerator, never before: in a workspace with
+    // no shared scripts project yet, that generator creates one and deletes the
+    // whole `src` tree it scaffolded, which would take this script with it and
+    // leave the `-vendor` target invoking a file that does not exist.
+    //
+    // Vended here rather than by that generator, and only when ipc is true,
+    // because it vends its whole directory into every workspace - putting this
+    // script there would change what an ipc=false run produces. KeepExisting
+    // like every other vended script, so a user's patches survive.
+    generateFiles(
+      tree,
+      joinPathFragments(import.meta.dirname, 'files', 'scripts'),
+      GREENGRASS_SCRIPTS_DIR,
+      templateOptions,
+      { overwriteStrategy: OverwriteStrategy.KeepExisting },
+    );
+  }
+
   const bundleOutputDir = joinPathFragments('greengrass', componentDirName);
   await addTypeScriptBundleTarget(
     tree,
@@ -332,18 +348,44 @@ export const tsGreengrassComponentGenerator = async (
       targetFilePath: mainPathFromProjectRoot,
       bundleOutputDir,
       platform: 'node',
-      ...(ipc ? { external: ['aws-iot-device-sdk-v2'] } : {}),
     },
     DEPENDENCIES,
   );
 
   const artifactTarget = `${componentDirName}-artifact`;
+  const vendorTarget = `${componentDirName}-vendor`;
   const deployLocalTarget = `${componentDirName}-deploy-local`;
   const logsTarget = `${componentDirName}-logs`;
   const distDir = `dist/{projectRoot}/greengrass/${componentDirName}`;
   const bundleDir = `dist/{projectRoot}/bundle/${bundleOutputDir}`;
+  // Named `stage`, not `vendor`, so it cannot be confused with the
+  // `<dist>/vendor` path build-artifact.ts reads in Python (non-bundle) mode.
+  const stageDir = `${distDir}/stage`;
 
   projectConfig.targets ??= {};
+
+  if (ipc) {
+    projectConfig.targets[vendorTarget] = normalizeTargetKeyOrder({
+      cache: true,
+      inputs: [
+        'production',
+        '^production',
+        `{workspaceRoot}/${GREENGRASS_SCRIPTS_DIR}/**/*`,
+        // The addon bytes come from the installed aws-crt, not from any file
+        // in this project, so without this the target would serve the
+        // previous SDK's addon from cache after a version bump.
+        { externalDependencies: ['aws-iot-device-sdk-v2'] },
+      ],
+      outputs: [`{workspaceRoot}/${stageDir}`],
+      executor: 'nx:run-commands',
+      dependsOn: ['bundle'],
+      options: {
+        command: `tsx ${GREENGRASS_SCRIPTS_DIR}/vendor-crt-addon.ts {projectRoot} ${bundleDir} ${stageDir} ${manifests
+          .map((m) => m.nodeCrtAddonDir)
+          .join(',')}`,
+      },
+    });
+  }
 
   projectConfig.targets[artifactTarget] = normalizeTargetKeyOrder({
     cache: true,
@@ -356,9 +398,9 @@ export const tsGreengrassComponentGenerator = async (
     ],
     outputs: [`{workspaceRoot}/${distDir}/greengrass-build`],
     executor: 'nx:run-commands',
-    dependsOn: ['bundle'],
+    dependsOn: [ipc ? vendorTarget : 'bundle'],
     options: {
-      command: `tsx ${GREENGRASS_SCRIPTS_DIR}/build-artifact.ts {projectRoot} ${componentDirName} ${distDir} ${bundleDir}`,
+      command: `tsx ${GREENGRASS_SCRIPTS_DIR}/build-artifact.ts {projectRoot} ${componentDirName} ${distDir} ${ipc ? stageDir : bundleDir}`,
     },
   });
   addArtifactDependencyToTargets(projectConfig, artifactTarget);

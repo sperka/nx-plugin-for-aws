@@ -233,9 +233,10 @@ describe('greengrass recipe-utils.ts', () => {
     });
 
     it('should still reject a broken Run path when an Install step names the component dir', () => {
-      // The ipc=true shape: an Install step that `cd`s into the decompressed
-      // dir. It carries no trailing slash, so it cannot stand in for the Run
-      // path's reference and mask a broken one.
+      // A pre-vendoring ipc=true recipe: an Install step that `cd`s into the
+      // decompressed dir. It carries no trailing slash, so it cannot stand in
+      // for the Run path's reference and mask a broken one - the same
+      // trailing-slash rule that protects the vendored-addon shape below.
       const recipe = {
         ...validRecipe(),
         Manifests: [
@@ -257,6 +258,30 @@ describe('greengrass recipe-utils.ts', () => {
       expect(() => validateRecipe(recipe, ['my-component'])).toThrow(
         /Run script path must match the artifact zip base name/,
       );
+    });
+
+    it('should accept the vendored-addon ipc shape, whose Run still names the decompressed component dir', () => {
+      const recipe = {
+        ...validRecipe(),
+        Manifests: [
+          {
+            Artifacts: [
+              {
+                Uri: 's3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component.zip',
+                Unarchive: 'ZIP',
+              },
+            ],
+            Lifecycle: {
+              Setenv: {
+                AWS_CRT_NODEJS_BINARY_RELATIVE_PATH:
+                  'native/aws-crt/linux-arm64-glibc/aws-crt-nodejs.node',
+              },
+              Run: 'node {artifacts:decompressedPath}/my-component/index.js',
+            },
+          },
+        ],
+      };
+      expect(() => validateRecipe(recipe, ['my-component'])).not.toThrow();
     });
 
     it('should accept a top-level Lifecycle block, not only per-manifest', () => {
@@ -987,6 +1012,9 @@ describe('greengrass build-artifact.ts', () => {
     expect(names).not.toContain('main.ts');
   });
 
+  // No TypeScript generator vends an Install lifecycle any more, so this is
+  // the only bundle-mode path there is - kept as its own case for the day a
+  // recipe carries a hand-written Install step build-artifact.ts must still honour.
   it('should omit package.json from a bundle-mode zip when no Install lifecycle needs it', () => {
     const projectRoot = join(tmpDir, 'project');
     const componentDir = join(projectRoot, 'greengrass', 'my-component');
