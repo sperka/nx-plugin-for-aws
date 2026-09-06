@@ -18,7 +18,13 @@ Publishing a component's version is handled separately, by escalating a <Link pa
 
 ## Usage
 
-### Generate a greengrass-deployment
+Getting a deployment installing components onto real devices takes three steps:
+
+1. **Generate the deployment** - creates the typed component library and (unless `--infra none`) the artifact bucket and `AWS::GreengrassV2::Deployment` infrastructure.
+2. **Wire in each component** - a freshly generated deployment's `components` map is empty, so left alone it deploys nothing.
+3. **Wire the infrastructure dependency** - orders the deployment after the component versions it references (see [Infrastructure](#infrastructure) below).
+
+### 1. Generate a greengrass-deployment
 
 You can generate a greengrass-deployment in two ways:
 
@@ -53,7 +59,15 @@ The generator creates the following project structure in the `<directory>/<name>
   - project.json
 </FileTree>
 
-`components.ts` starts empty. Add an entry per component you deploy:
+### 2. Wire in each component
+
+`components.ts` (and `components.json` on Terraform) starts empty, and an empty `components` map deploys nothing - the deployment applies cleanly and installs zero components. For each Greengrass component (<Link path="guides/py-greengrass-component">`py#greengrass-component`</Link> or <Link path="guides/ts-greengrass-component">`ts#greengrass-component`</Link>, generated with `--infra component-version`) you want this deployment to install, run the <Link path="guides/connection/greengrass-deployment-greengrass-component">connection</Link> generator:
+
+<RunGenerator generator="connection" />
+
+Select this deployment as the source project and the component's host project as the target. This adds an entry to `components.ts` (and to `components.json` on Terraform) keyed by the component's `ComponentName`, at the `ComponentVersion` its `recipe.yaml` currently declares - see <Link path="guides/connection/greengrass-deployment-greengrass-component">its guide</Link> for exactly what it writes, and for re-running it after a version bump.
+
+You can also write the entry by hand instead - the connection generator only saves you the typing, and the cross-check between the two files. **On Terraform, editing `components.ts` alone deploys nothing:** `components.json` is the file the `deployment` module reads, so a hand-wired component needs an entry in both (see [Infrastructure](#infrastructure) below for the JSON shape). Add an entry per component you deploy:
 
 ```ts title="packages/my-deployment/src/components.ts"
 export const components: Record<string, DeploymentComponent> = {
@@ -161,6 +175,12 @@ Pass `components` explicitly to the module block only to override that file with
 
 A literal `target_arn` is cross-checked against the current account, region and partition, the same way the CDK construct's `assertArnMatchesStack` checks it against the deploying stack. One difference in *when* it fires: the check reads `aws_caller_identity`, and the `depends_on` above stops Terraform reading that until the component modules exist, so it is deferred from plan to apply. It still fails before the deployment is created, and with a clearer message than the API's. Independently of it, the awscc provider validates the ARN's shape (`arn:<partition>:iot:<region>:<account>:thing|thinggroup/...`) at plan time.
 
+### Bucket Naming
+
+Left unset, the generated `<name>-artifact-bucket` module names the created bucket `<name>-artifacts-<account-id>-<region>-<random-suffix>` rather than letting AWS generate an opaque `terraform-<random>` name - a bucket created that way carries no workspace or deployment identity, so a human doing manual cleanup (or recovering from a lost state file) has only a creation timestamp and a tag to go on. The random suffix lives in Terraform state, so the name is stable across applies. Pass `bucket_name` on the underlying `core/greengrass/artifact-bucket` module call to set a fixed name instead (S3 bucket names must be globally unique), or `existing_bucket_name` to adopt a bucket this workspace should not own.
+
+A bucket's name cannot be changed in place, so anything that changes the name Terraform computes - editing `bucket_name_prefix`, or upgrading a workspace whose bucket was created before this naming existed - plans a **replacement**. `prevent_destroy` refuses that plan rather than destroying a bucket holding published artifacts, and refuses it plan-wide, so nothing else applies either. Keep the existing bucket by naming it explicitly: set `bucket_name` to the name already in state.
+
 ### Retention Diverges From CDK Here
 
 `prevent_destroy = true` is applied to the created artifact bucket only, and that is the one place the CDK constructs' `RemovalPolicy.RETAIN` default carries over. It is deliberately **not** applied to the component version or the deployment, and Terraform has no equivalent of `RemovalPolicy.RETAIN` for them:
@@ -203,18 +223,28 @@ this.artifactBucket.grantReadTo(
 );
 ```
 
-The default key scope is every object in the bucket, because a core device reads whichever component versions get deployed to it and those are not known when the grant is written. `grantReadTo` takes a second argument if you do know a narrower prefix ahead of time - `grantReadTo(role, 'com.myscope.MyComponent/*')` limits the grant to one component's versions.
+**The default key scope is every object in the bucket.** This is deliberate, not an oversight: a core device reads whichever component versions get deployed to it, and that set lives in this deployment's own `components` map, which can gain an entry after this grant is created - there is no generation-time input a narrower default could derive a prefix from. Narrow it only when every component this role's device(s) will ever fetch is known to share a prefix (e.g. one Nx workspace's own component namespace, `com.myscope.*`). Pass `tokenExchangeKeyPrefix` alongside `tokenExchangeRoleArn` to do so:
 
-On Terraform, the same `--tokenExchangeRoleArn` generator option (baked into the generated `<name>-artifact-bucket` module the same way `--targetArn` etc. are) produces:
+```ts
+this.artifactBucket.grantReadTo(
+  Role.fromRoleArn(this, 'TokenExchangeRole', tokenExchangeRoleArn, { mutable: true }),
+  tokenExchangeKeyPrefix, // e.g. 'com.myscope.*'
+);
+```
+
+On Terraform, the same two generator options (baked into the generated `<name>-artifact-bucket` module the same way `--targetArn` etc. are) put these arguments on its module block, alongside the `bucket_name_prefix` of [Bucket Naming](#bucket-naming) and the comments the generator writes:
 
 ```hcl title="packages/common/terraform/src/app/greengrass-deployment/my-deployment-artifact-bucket/my-deployment-artifact-bucket.tf"
 module "artifact_bucket" {
-  source                  = "../../../core/greengrass/artifact-bucket"
-  token_exchange_role_arn = "arn:aws:iam::111111111111:role/GreengrassTokenExchangeRole"
+  source                    = "../../../core/greengrass/artifact-bucket"
+  token_exchange_role_arn   = "arn:aws:iam::111111111111:role/GreengrassTokenExchangeRole"
+  token_exchange_key_prefix = "com.myscope.*"
 }
 ```
 
-The underlying `core/greengrass/artifact-bucket` module also takes a `token_exchange_key_prefix` variable (defaulting to `*`) for the narrower-prefix case - edit the generated app module by hand to pass one through, since the generator itself has no equivalent option.
+`token_exchange_key_prefix` is only emitted when you pass `--tokenExchangeKeyPrefix`; omitted, the underlying `core/greengrass/artifact-bucket` module's own default (`*`) applies.
+
+Both options are baked in **at generation time only**. The generated app construct and app module are created once and then left alone, so re-running the generator with `--tokenExchangeKeyPrefix` does not narrow a deployment that already exists - narrow that one by editing its own generated file, adding the second `grantReadTo` argument on CDK or the `token_exchange_key_prefix` argument on Terraform.
 
 If you omit `tokenExchangeRoleArn`, attach the equivalent policy to your token exchange role by hand:
 

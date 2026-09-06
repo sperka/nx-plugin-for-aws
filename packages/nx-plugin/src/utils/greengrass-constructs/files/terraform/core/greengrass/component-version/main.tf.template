@@ -22,6 +22,10 @@ variable "artifacts_dir" {
 }
 
 variable "bucket_name" {
+  # Pass the artifact-bucket module's own `bucket_name` output here, not a
+  # hand-typed string - that output's `depends_on` is what orders the upload
+  # below after the bucket is versioned, encrypted, public-access-blocked and
+  # policy-attached, not just created. A literal string carries no such edge.
   description = "Name of the shared artifact bucket this version's artifact is uploaded to."
   type        = string
 }

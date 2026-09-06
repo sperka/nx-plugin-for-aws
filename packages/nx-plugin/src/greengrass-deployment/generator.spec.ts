@@ -2,7 +2,7 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-import type { Tree } from '@nx/devkit';
+import { logger, type Tree } from '@nx/devkit';
 import { expectHasMetricTags } from '../utils/metrics.spec.js';
 import { readProjectConfigurationUnqualified } from '../utils/nx.js';
 import { createTreeUsingTsSolutionSetup } from '../utils/test.js';
@@ -204,6 +204,11 @@ describe('greengrass-deployment generator', () => {
     expect(bucketModule).toContain(
       'source = "../../../core/greengrass/artifact-bucket"',
     );
+    // F7: a created bucket's default name carries this deployment's own
+    // identity rather than falling through to an AWS-generated one.
+    expect(bucketModule).toContain(
+      'bucket_name_prefix = "my-deployment-artifacts"',
+    );
 
     for (const dir of ['artifact-bucket', 'component-version', 'deployment']) {
       expect(
@@ -212,6 +217,12 @@ describe('greengrass-deployment generator', () => {
         ),
       ).toBe(true);
     }
+
+    // F5: credential-free terraform test coverage is vended alongside the
+    // core modules it exercises.
+    expect(
+      tree.exists('packages/common/terraform/src/tests/greengrass.tftest.hcl'),
+    ).toBe(true);
 
     expect(
       tree.read('packages/my-deployment/src/components.json', 'utf-8'),
@@ -245,12 +256,53 @@ describe('greengrass-deployment generator', () => {
         'arn:aws:iam::111111111111:role/GreengrassTokenExchangeRole',
     });
 
+    const content = tree.read(
+      'packages/common/constructs/src/app/greengrass/my-deployment.ts',
+      'utf-8',
+    );
+    expect(content).toContain('GreengrassTokenExchangeRole');
+    // Default (no tokenExchangeKeyPrefix): grantReadTo is called with no
+    // second argument, so the module's own '*' default applies.
+    expect(content).not.toContain('com.myscope');
+  });
+
+  it('should narrow the tokenExchangeRoleArn grant when tokenExchangeKeyPrefix is provided', async () => {
+    await greengrassDeploymentGenerator(tree, {
+      ...defaultOptions,
+      tokenExchangeRoleArn:
+        'arn:aws:iam::111111111111:role/GreengrassTokenExchangeRole',
+      tokenExchangeKeyPrefix: 'com.myscope.*',
+    });
+
     expect(
       tree.read(
         'packages/common/constructs/src/app/greengrass/my-deployment.ts',
         'utf-8',
       ),
-    ).toContain('GreengrassTokenExchangeRole');
+    ).toContain("'com.myscope.*'");
+  });
+
+  it('should warn, and emit nothing, when tokenExchangeKeyPrefix is given without a role', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    await greengrassDeploymentGenerator(tree, {
+      ...defaultOptions,
+      iac: 'terraform',
+      tokenExchangeKeyPrefix: 'com.myscope.*',
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Ignoring --tokenExchangeKeyPrefix'),
+    );
+    // A prefix without a role narrows nothing, so neither IaC path emits the
+    // argument (the module's own name still appears in the file's comments).
+    expect(
+      tree.read(
+        'packages/common/terraform/src/app/greengrass-deployment/my-deployment-artifact-bucket/my-deployment-artifact-bucket.tf',
+        'utf-8',
+      ),
+    ).not.toContain('token_exchange_key_prefix =');
+    warn.mockRestore();
   });
 
   it('should record the plugin metric', async () => {

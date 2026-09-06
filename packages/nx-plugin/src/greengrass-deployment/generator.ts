@@ -159,11 +159,20 @@ export const greengrassDeploymentGenerator = async (
   const target = options.target ?? 'thing-group';
   const artifactBucket = options.artifactBucket ?? 'create';
   const deploymentPolicy = options.deploymentPolicy ?? 'default';
-  const { targetPropLine, targetPropLineTf, targetDescription } =
-    resolveTarget({
+  const { targetPropLine, targetPropLineTf, targetDescription } = resolveTarget(
+    {
       ...options,
       target,
-    });
+    },
+  );
+
+  // The prefix only ever narrows the grant `tokenExchangeRoleArn` creates, so
+  // on its own it silently does nothing at all - neither IaC path emits it.
+  if (options.tokenExchangeKeyPrefix && !options.tokenExchangeRoleArn) {
+    logger.warn(
+      `Ignoring --tokenExchangeKeyPrefix: it narrows the s3:GetObject grant that --tokenExchangeRoleArn creates, and no role was given. Pass both, or attach the policy to your token exchange role by hand (the guide documents it).`,
+    );
+  }
 
   const { fullyQualifiedName, dir } = getTsLibDetails(tree, {
     name: options.name,
@@ -274,6 +283,7 @@ export const greengrassDeploymentGenerator = async (
         targetDescription,
         parentTargetArn: options.parentTargetArn,
         tokenExchangeRoleArn: options.tokenExchangeRoleArn,
+        tokenExchangeKeyPrefix: options.tokenExchangeKeyPrefix,
         artifactBucketImported: artifactBucket !== 'create',
         artifactBucketName:
           artifactBucket !== 'create' ? artifactBucket : undefined,

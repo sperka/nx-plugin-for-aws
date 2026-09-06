@@ -11,11 +11,21 @@
 # narrower `token_exchange_key_prefix`) right here.
 module "artifact_bucket" {
   source = "../../../core/greengrass/artifact-bucket"
-<% if (artifactBucketImported) { %>  existing_bucket_name = "<%- artifactBucketName %>"
-<% } %><% if (tokenExchangeRoleArn) { %>  # checkov flags any assignment whose name contains "token" as a possible
+<% if (artifactBucketImported) { %>
+  existing_bucket_name = "<%- artifactBucketName %>"
+<% } %><% if (!artifactBucketImported) { %>
+  # Ties the created bucket's name to this deployment, so manual cleanup (or
+  # a lost state file) has more to go on than a creation timestamp - see
+  # core/greengrass/artifact-bucket's own bucket_name_prefix default for why
+  # an AWS-generated "terraform-<random>" name is not the default.
+  bucket_name_prefix = "<%- nameKebabCase %>-artifacts"
+<% } %><% if (tokenExchangeRoleArn) { %>
+  # checkov flags any assignment whose name contains "token" as a possible
   # secret. An IAM role ARN is an identifier, not a credential.
   #checkov:skip=CKV_SECRET_6:An IAM role ARN is not a secret
   token_exchange_role_arn = "<%- tokenExchangeRoleArn %>"
+<% } %><% if (tokenExchangeRoleArn && tokenExchangeKeyPrefix) { %>
+  token_exchange_key_prefix = "<%- tokenExchangeKeyPrefix %>"
 <% } %>}
 
 output "bucket_name" {

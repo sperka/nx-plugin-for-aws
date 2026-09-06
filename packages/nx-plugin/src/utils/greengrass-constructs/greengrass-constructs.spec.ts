@@ -201,9 +201,15 @@ beforeAll(async () => {
 
 afterAll(() => {
   rmSync(tmpDir, { recursive: true, force: true });
-  for (const name of MODULE_NAMES) {
+  for (const path of [
+    ...MODULE_NAMES.map(tmpModulePath),
+    // The checkov helper is written next to the modules above, so it needs
+    // removing here too - left behind it accumulates one file per test-run
+    // pid in the source tree and fails `nx run @aws/nx-plugin:format`.
+    checkovTmpModulePath(),
+  ]) {
     try {
-      unlinkSync(tmpModulePath(name));
+      unlinkSync(path);
     } catch {
       // already cleaned up
     }
@@ -1196,6 +1202,7 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
         targetDescription: 'a new thing group ("my-things")',
         parentTargetArn: undefined,
         tokenExchangeRoleArn: 'arn:aws:iam::123456789012:role/GreengrassTes',
+        tokenExchangeKeyPrefix: undefined,
         artifactBucketImported: false,
         artifactBucketName: undefined,
         deploymentPoliciesLiteral: undefined,
@@ -1235,6 +1242,43 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     expect(content).toContain(
       'Resource = "${local.bucket_arn}/${var.token_exchange_key_prefix}"',
     );
+  });
+
+  it('orders the artifact-bucket module outputs after the bucket is hardened, not just created', async () => {
+    await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
+
+    // F3: `aws_s3_object.artifact` (in the component-version module) only
+    // ever receives this module's `bucket_name` output, a plain string with
+    // no dependency of its own - so the output itself must `depends_on` the
+    // four resources that harden the bucket, or an artifact can land before
+    // versioning, encryption, the public-access block or the policy exist.
+    const content = readCore('artifact-bucket');
+    const nameOutput = content.slice(content.indexOf('output "bucket_name"'));
+    for (const resource of [
+      'aws_s3_bucket_versioning.bucket',
+      'aws_s3_bucket_server_side_encryption_configuration.bucket',
+      'aws_s3_bucket_public_access_block.bucket',
+      'aws_s3_bucket_policy.bucket',
+    ]) {
+      expect(nameOutput.slice(0, nameOutput.indexOf('}'))).toContain(resource);
+    }
+  });
+
+  it('generates a bucket name derived from bucket_name_prefix, not an opaque AWS-generated one', async () => {
+    await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
+
+    // F7: leaving `bucket_name` unset must not fall through to an AWS-chosen
+    // "terraform-<random>" default - the generated name carries the
+    // caller's own prefix (typically the deployment's name) plus enough to
+    // stay globally unique.
+    const content = readCore('artifact-bucket');
+    expect(content).toContain('variable "bucket_name_prefix"');
+    expect(content).toContain(
+      'bucket = coalesce(var.bucket_name, local.generated_bucket_name)',
+    );
+    expect(content).toContain('resource "random_string" "bucket_suffix"');
+    expect(content).toContain('data.aws_caller_identity.current[0].account_id');
+    expect(content).toContain('data.aws_region.current[0].region');
   });
 
   it('is idempotent: re-running fully regenerates the framework-owned core modules', async () => {
@@ -1312,6 +1356,7 @@ describe('terraform app modules', () => {
         targetDescription: 'a new thing group ("my-things")',
         parentTargetArn: undefined,
         tokenExchangeRoleArn: undefined,
+        tokenExchangeKeyPrefix: undefined,
         artifactBucketImported: false,
         artifactBucketName: undefined,
         deploymentPoliciesLiteral: undefined,
@@ -1343,6 +1388,11 @@ describe('terraform app modules', () => {
     expect(bucketContent).toContain(
       'source = "../../../core/greengrass/artifact-bucket"',
     );
+    // F7: a created (not imported) bucket gets a name tied to this
+    // deployment, not the module's own AWS-generated default.
+    expect(bucketContent).toContain(
+      'bucket_name_prefix = "my-deployment-artifacts"',
+    );
   });
 
   it('renders the imported-bucket and token-exchange-role branches without leftover EJS tags', async () => {
@@ -1360,6 +1410,7 @@ describe('terraform app modules', () => {
           'arn:aws:iot:us-east-1:111111111111:thinggroup/parent-group',
         tokenExchangeRoleArn:
           'arn:aws:iam::111111111111:role/GreengrassTokenExchangeRole',
+        tokenExchangeKeyPrefix: 'com.example.MyComponent/*',
         artifactBucketImported: true,
         artifactBucketName: 'my-existing-bucket',
         deploymentPoliciesLiteral: `{ failureHandlingPolicy: 'DO_NOTHING' }`,
@@ -1391,8 +1442,14 @@ describe('terraform app modules', () => {
     expect(bucketContent).toContain(
       'existing_bucket_name = "my-existing-bucket"',
     );
+    // bucket_name_prefix only matters for a created bucket - importing one
+    // ignores every creation setting, so it must not be emitted here.
+    expect(bucketContent).not.toContain('bucket_name_prefix');
     expect(bucketContent).toContain(
       'token_exchange_role_arn = "arn:aws:iam::111111111111:role/GreengrassTokenExchangeRole"',
+    );
+    expect(bucketContent).toContain(
+      'token_exchange_key_prefix = "com.example.MyComponent/*"',
     );
   });
 
