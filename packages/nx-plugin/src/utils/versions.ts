@@ -471,6 +471,7 @@ export const terraformLambdaRuntimeVars = () => ({
  */
 export const TERRAFORM_VERSIONS = {
   aws: '6.63.0',
+  awscc: '1.100.0',
   random: '3.9.0',
   null: '3.3.1',
   archive: '2.8.0',
@@ -486,6 +487,7 @@ export type ITerraformProviderVersion = keyof typeof TERRAFORM_VERSIONS;
  */
 export const terraformProviderVersions = () => ({
   awsProviderVersion: TERRAFORM_VERSIONS.aws,
+  awsccProviderVersion: TERRAFORM_VERSIONS.awscc,
   randomProviderVersion: TERRAFORM_VERSIONS.random,
   nullProviderVersion: TERRAFORM_VERSIONS.null,
   archiveProviderVersion: TERRAFORM_VERSIONS.archive,

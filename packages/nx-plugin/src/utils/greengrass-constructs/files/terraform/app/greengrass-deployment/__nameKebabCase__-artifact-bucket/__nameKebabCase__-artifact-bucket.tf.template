@@ -1,0 +1,23 @@
+# Shared Greengrass artifact bucket for "<%- name %>"'s components<% if (artifactBucketImported) { %> (imported)<% } %>.
+#
+# A separate module from the deployment itself: a component's module needs
+# this bucket's name before its component version can be created, and the
+# deployment must be created only after that component version exists -
+# bundling both concerns in one module would force a dependency cycle the
+# moment a caller wires that ordering with `depends_on`.
+#
+# Re-running the generator re-syncs this file to its current options - hand
+# edits here do not survive a re-run.
+module "artifact_bucket" {
+  source = "../../../core/greengrass/artifact-bucket"
+<% if (artifactBucketImported) { %>  existing_bucket_name = "<%- artifactBucketName %>"
+<% } %><% if (tokenExchangeRoleArn) { %>  token_exchange_role_arn = "<%- tokenExchangeRoleArn %>"
+<% } %>}
+
+output "bucket_name" {
+  value = module.artifact_bucket.bucket_name
+}
+
+output "bucket_arn" {
+  value = module.artifact_bucket.bucket_arn
+}

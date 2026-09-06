@@ -18,7 +18,9 @@ import { runCLI } from '../utils';
  * the full module graph — so a plan-time error fails the test.
  *
  * The wiring is the same `main.tf` the terraform-deploy smoke test applies, so
- * this exercises the identical module graph without deploying anything.
+ * this exercises the identical module graph without deploying anything, plus
+ * the Greengrass modules from `files/terraform-plan/greengrass.tf.template` -
+ * which are plan-only, and deliberately absent from the applied fixture.
  */
 export const runTerraformPlanTest = async (opts: {
   cwd: string;
@@ -39,6 +41,15 @@ export const runTerraformPlanTest = async (opts: {
     'utf-8',
   ).replace(/<% TEST_RUN_ID %>/g, 'plantest');
   writeFileSync(join(infraSrc, 'main.tf'), mainTf);
+
+  // Greengrass modules, wired only here — see the template's own comment.
+  writeFileSync(
+    join(infraSrc, 'greengrass.tf'),
+    readFileSync(
+      join(__dirname, '../files/terraform-plan/greengrass.tf.template'),
+      'utf-8',
+    ),
+  );
 
   // `-backend=false` so `terraform init` doesn't try to configure the S3
   // backend (which would need credentials); the test framework keeps state

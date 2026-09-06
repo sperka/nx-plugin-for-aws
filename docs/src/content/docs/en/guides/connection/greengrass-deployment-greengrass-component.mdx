@@ -26,7 +26,7 @@ Before using this generator, ensure you have:
 A component generated with `--infra none` publishes no `ComponentVersion` for the deployment to reference. Re-run the component generator with `--infra component-version` first, then generate this connection.
 :::
 
-Both ends must be generated with `--iac cdk`: neither Greengrass CloudFormation resource exists in the Terraform provider this plugin pins, so both generators refuse `--iac terraform`. In a Terraform workspace, pass `--iac cdk` explicitly rather than leaving it to inherit - you will need a CDK app of your own to instantiate the vended constructs.
+Both `--iac cdk` and `--iac terraform` (via the `hashicorp/awscc` provider this plugin also pins, since neither Greengrass resource exists in the pinned `hashicorp/aws` provider) work, and this generator does not itself check that both ends used the same one - but they should: the CDK constructs and the Terraform modules don't interoperate, so a deployment generated with one and a component generated with the other cannot actually be wired together in your infra project.
 
 ## Usage
 
@@ -42,12 +42,13 @@ Select the deployment project as the source and the component's host project as 
 
 ## Generator Output
 
-The generator wires existing projects together rather than emitting new source files. The following file is modified:
+The generator wires existing projects together rather than emitting new source files. The following files are modified:
 
 <FileTree>
 
 - packages/\<deployment>
   - src/components.ts gains an entry keyed by the component's `ComponentName`
+  - src/components.json Only present on a Terraform deployment - gains the same entry, snake_cased, since Terraform cannot import a TypeScript module
 
 </FileTree>
 
@@ -55,6 +56,12 @@ The generator wires existing projects together rather than emitting new source f
 export const components: Record<string, DeploymentComponent> = {
   'com.myscope.MyComponent': { componentVersion: '1.0.0' },
 };
+```
+
+```json title="packages/my-deployment/src/components.json" {2}
+{
+  "com.myscope.MyComponent": { "component_version": "1.0.0" }
+}
 ```
 
 The `ComponentName` and `componentVersion` written are read from the component's own `recipe.yaml`, which is user-owned from first generation onward and is the same file the vended `GreengrassComponentVersion` construct reads at synth time. So a component whose recipe you have already bumped is added at its current version, not the one it was generated with.
@@ -72,6 +79,17 @@ as it is - update it by hand to deploy the new version.
 ```
 
 Edit the entry to the new version to deploy it. Your own comments and any `configurationUpdate` you added to the map survive every run.
+
+On a Terraform deployment `components.json` is left unchanged the same way, and warned about the same way - the message above is logged once per file. Update both by hand: `components.json` is the file Terraform reads, so that is the one that changes what gets deployed, and `components.ts` is the typed view of the same wiring. If you update only one, the next run of this generator refuses rather than proceeding:
+
+```
+'com.myscope.MyComponent' is at componentVersion '1.0.1' in packages/my-deployment/src/components.ts
+but component_version '1.0.0' in packages/my-deployment/src/components.json. Terraform deploys the
+version in packages/my-deployment/src/components.json. Make the two agree by hand, then run this
+connection again.
+```
+
+A Terraform deployment whose `components.json` has been deleted is also refused, rather than silently connecting only the TypeScript side - the module's `components` default reads that file, so a plan would fail without it. Re-run the `greengrass-deployment` generator to restore it.
 
 If you restructure the `components` declaration itself (`satisfies Record<...>`, say, or splitting it across files) the generator can no longer find where to write, so it refuses with the entry to paste in by hand rather than reporting a connection it did not make.
 
@@ -94,5 +112,19 @@ deployment.dependOn(myComponent);
 ```
 
 Without this call, referencing the component in `components` at synth time does not make CloudFormation wait for the `ComponentVersion` to exist - `dependOn` is what orders the two resources.
+
+On Terraform, the same ordering is a `depends_on` on the deployment module block in your own root module:
+
+```hcl title="packages/infra/src/main.tf" {8}
+module "my_component" {
+  source      = "../../common/terraform/src/app/greengrass-component/my-component"
+  bucket_name = module.my_deployment_artifact_bucket.bucket_name
+}
+
+module "my_deployment" {
+  source     = "../../common/terraform/src/app/greengrass-deployment/my-deployment"
+  depends_on = [module.my_component]
+}
+```
 
 See the <Link path="guides/greengrass-deployment">`greengrass-deployment`</Link> guide for the full infrastructure this connection's endpoints vend, including the artifact bucket, the token exchange role grant, and the CloudFormation semantics around component version immutability and deployment revisions.

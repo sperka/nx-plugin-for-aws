@@ -1,0 +1,29 @@
+variable "bucket_name" {
+  description = "Name of the shared artifact bucket this component version's artifact is uploaded to - typically a deployment module's `artifact_bucket_name` output."
+  type        = string
+}
+
+# Publishes the "<%- componentDisplayName %>" Greengrass component version
+# built by `nx run <%- project %>:<%- componentDirName %>-artifact`.
+#
+# Re-running the generator re-syncs this file to its current build paths -
+# hand edits here do not survive a re-run.
+module "component_version" {
+  source = "../../../core/greengrass/component-version"
+
+  recipes_dir   = "${path.module}/../../../../../../../<%- recipesDirFromRoot %>"
+  artifacts_dir = "${path.module}/../../../../../../../<%- artifactsDirFromRoot %>"
+  bucket_name   = var.bucket_name
+}
+
+output "component_name" {
+  value = module.component_version.component_name
+}
+
+output "component_version" {
+  value = module.component_version.component_version
+}
+
+output "arn" {
+  value = module.component_version.arn
+}

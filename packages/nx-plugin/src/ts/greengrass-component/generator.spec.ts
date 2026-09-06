@@ -787,16 +787,35 @@ describe('ts#greengrass-component generator', () => {
       ).rejects.toThrow(/would leave that infrastructure orphaned/);
     });
 
-    it('throws an actionable error for --iac terraform', async () => {
+    it('vends the per-component terraform module for --iac terraform', async () => {
       seedTypeScriptProject(tree);
 
-      await expect(
-        tsGreengrassComponentGenerator(tree, {
-          project: 'test-project',
-          name: 'my-component',
-          iac: 'terraform',
-        }),
-      ).rejects.toThrow(/hashicorp\/awscc/);
+      await tsGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        iac: 'terraform',
+      });
+
+      const modulePath =
+        'packages/common/terraform/src/app/greengrass-component/my-component/my-component.tf';
+      expect(tree.exists(modulePath)).toBe(true);
+      const module = tree.read(modulePath, 'utf-8');
+      expect(module).toContain('source = "../../../core/greengrass/component-version"');
+
+      for (const dir of ['artifact-bucket', 'component-version', 'deployment']) {
+        expect(
+          tree.exists(
+            `packages/common/terraform/src/core/greengrass/${dir}/main.tf`,
+          ),
+        ).toBe(true);
+      }
+
+      const sharedTerraformConfig = JSON.parse(
+        tree.read('packages/common/terraform/project.json', 'utf-8') ?? '{}',
+      );
+      expect(sharedTerraformConfig.targets.build.dependsOn).toContain(
+        'test-project:build',
+      );
     });
 
     it('throws an actionable error when the workspace carries pre-bundle-support vended scripts', async () => {

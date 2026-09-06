@@ -1,6 +1,6 @@
 ---
 title: Greengrass Deployment
-description: Generate a Greengrass deployment project, vending component-version and deployment CDK infrastructure
+description: Generate a Greengrass deployment project, vending component-version and deployment infrastructure
 generator: greengrass-deployment
 ---
 
@@ -12,7 +12,7 @@ import Infrastructure from '@components/infrastructure.astro';
 import Snippet from '@components/snippet.astro';
 import OptionFilter from '@components/option-filter.astro';
 
-The `greengrass-deployment` generator creates a small TypeScript library for typed [AWS IoT Greengrass v2](https://docs.aws.amazon.com/greengrass/v2/developerguide/what-is-iot-greengrass.html) component wiring, plus (unless `--infra none`) the CDK constructs an `AWS::GreengrassV2::Deployment` and its artifact bucket need: a retained `GreengrassArtifactBucket`, and an app construct wiring a `GreengrassDeployment` to the thing, thing group, or ARN you target.
+The `greengrass-deployment` generator creates a small TypeScript library for typed [AWS IoT Greengrass v2](https://docs.aws.amazon.com/greengrass/v2/developerguide/what-is-iot-greengrass.html) component wiring, plus (unless `--infra none`) the CDK constructs or Terraform modules an `AWS::GreengrassV2::Deployment` and its artifact bucket need: a retained artifact bucket, and a deployment targeting the thing, thing group, or ARN you target.
 
 Publishing a component's version is handled separately, by escalating a <Link path="guides/py-greengrass-component">`py#greengrass-component`</Link> with `--infra component-version` - this generator only owns the deployment side (the target, the artifact bucket, and the `AWS::GreengrassV2::Deployment` resource itself).
 
@@ -47,6 +47,7 @@ The generator creates the following project structure in the `<directory>/<name>
 <FileTree>
   - src
     - components.ts Typed component wiring for this deployment - user-owned from first generation onward
+    - components.json Only vended on `--iac terraform` - the same wiring, and the file the Terraform `deployment` module actually reads - see [Infrastructure](#infrastructure) below
     - index.ts Barrel export
   - package.json
   - project.json
@@ -113,7 +114,81 @@ deployment.dependOn(myComponent);
 </Fragment>
 <Fragment slot="terraform">
 
-`--iac terraform` throws an actionable error rather than generating anything. Neither `AWS::GreengrassV2::ComponentVersion` nor `AWS::GreengrassV2::Deployment` exists in the `hashicorp/aws` Terraform provider this workspace pins - both resources exist only in `hashicorp/awscc`, which is not currently pinned. Use `--iac cdk` until that changes.
+Neither `AWS::GreengrassV2::ComponentVersion` nor `AWS::GreengrassV2::Deployment` exists in the `hashicorp/aws` Terraform provider this workspace pins - both resources exist only in [`hashicorp/awscc`](https://registry.terraform.io/providers/hashicorp/awscc/latest/docs), which this workspace also pins, purely for these two resource types.
+
+<FileTree>
+  - packages/common/terraform/src
+    - core/greengrass
+      - artifact-bucket A retained, versioned, TLS-only S3 bucket module, plus an optional `token_exchange_role_arn` grant
+      - component-version Publishes a component's built artifact (used by `py#greengrass-component --infra component-version`)
+      - deployment The `awscc_greengrassv2_deployment` plus an optional `aws_iot_thing_group`
+    - app/greengrass-deployment
+      - \<name>-artifact-bucket A sibling module wrapping `core/greengrass/artifact-bucket` with this deployment's options
+      - \<name> A sibling module wrapping `core/greengrass/deployment` with this deployment's options
+</FileTree>
+
+The artifact bucket is a **separate module** from the deployment, not a property on it. A component version's module needs the bucket's name before it can be created, and the deployment must be created only after that component version exists - bundling both in one module the way the CDK construct does would force a dependency cycle the moment your root module wires that ordering with `depends_on`. Wire them together yourself:
+
+```hcl title="packages/infra/src/main.tf"
+module "my_deployment_artifact_bucket" {
+  source = "../../common/terraform/src/app/greengrass-deployment/my-deployment-artifact-bucket"
+}
+
+module "my_component" {
+  source      = "../../common/terraform/src/app/greengrass-component/my-component"
+  bucket_name = module.my_deployment_artifact_bucket.bucket_name
+}
+
+module "my_deployment" {
+  source = "../../common/terraform/src/app/greengrass-deployment/my-deployment"
+
+  # Mirrors the CDK construct's `deployment.dependOn(myComponent)`: without
+  # this, the IoT job can reach core devices before the version exists in
+  # the registry.
+  depends_on = [module.my_component]
+}
+```
+
+The `deployment` module's `components` variable defaults to reading `packages/my-deployment/src/components.json`. **On Terraform that JSON file is what gets deployed - `components.ts` is not read by anything.** Terraform cannot import a TypeScript module, so a Terraform deployment vends both files and the `greengrass-deployment#component-connection` generator writes both; `components.ts` stays as the typed, documented view of the same wiring. Both files are yours to edit, and the connection generator never rewrites an entry either one already holds - it warns instead, on both. If the two ever disagree about a component's version it refuses to run, because Terraform would deploy one version while `components.ts` documents the other. Its keys are snake_case, matching the `awscc_greengrassv2_deployment` schema, unlike `components.ts`'s camelCase:
+
+```json title="packages/my-deployment/src/components.json"
+{
+  "com.myscope.MyComponent": { "component_version": "1.0.0" }
+}
+```
+
+Pass `components` explicitly to the module block only to override that file with a value it cannot express (for example, `configuration_update.merge` must be pre-encoded with `jsonencode(...)`).
+
+A literal `target_arn` is cross-checked against the current account, region and partition, the same way the CDK construct's `assertArnMatchesStack` checks it against the deploying stack. One difference in *when* it fires: the check reads `aws_caller_identity`, and the `depends_on` above stops Terraform reading that until the component modules exist, so it is deferred from plan to apply. It still fails before the deployment is created, and with a clearer message than the API's. Independently of it, the awscc provider validates the ARN's shape (`arn:<partition>:iot:<region>:<account>:thing|thinggroup/...`) at plan time.
+
+### Retention Diverges From CDK Here
+
+`prevent_destroy = true` is applied to the created artifact bucket only, and that is the one place the CDK constructs' `RemovalPolicy.RETAIN` default carries over. It is deliberately **not** applied to the component version or the deployment, and Terraform has no equivalent of `RemovalPolicy.RETAIN` for them:
+
+- `prevent_destroy` rejects any plan that needs to replace the resource, rather than retaining anything. Both a component version (`inline_recipe`) and a deployment (`components`) are replaced on change, so it would refuse the ordinary "bump `ComponentVersion` in `recipe.yaml`, re-deploy" workflow outright.
+- So on Terraform, a replaced component version is **deleted** from the Greengrass registry, along with its artifact object in S3, where the CDK path retains both. The hashed artifact key means every content change is a new object, so nothing is overwritten either way - the difference is only whether the outgoing object is left behind.
+- Both resources use `create_before_destroy` instead, which is what keeps the safety property `RETAIN` was there for: the incoming version is published first, so `CreateComponentVersion` rejects a version that reuses an existing `ComponentVersion` with different content, and the outgoing version is deleted only after the deployment has been revised off it.
+
+To keep a published component version that Terraform is about to replace, drop it from state first so Terraform stops managing it and leaves it in AWS:
+
+```bash
+terraform state rm 'module.my_component.module.component_version.awscc_greengrassv2_component_version.this'
+terraform state rm 'module.my_component.module.component_version.aws_s3_object.artifact'
+```
+
+To keep one while deleting its module from the configuration entirely, use a [`removed` block](https://developer.hashicorp.com/terraform/language/resources/syntax#removing-resources) with `lifecycle { destroy = false }`.
+
+The artifact bucket's `prevent_destroy` cannot be overridden per module call the way the CDK prop can - it is a Terraform lifecycle literal. A workspace that genuinely needs to tear the bucket down must remove the `lifecycle` block by hand before `terraform destroy`.
+
+### The awscc Provider
+
+`terraform#project` configures `provider "awscc"` with the same `var.aws_region` as `provider "aws"`, in the application project's `src/providers.tf`. If your workspace predates that and you see Greengrass resources planned into an unexpected region, add the block by hand - a module whose provider the root module leaves unconfigured gets an empty default configuration, which takes its region from the ambient environment rather than from `var.aws_region`:
+
+```hcl title="packages/infra/src/providers.tf"
+provider "awscc" {
+  region = var.aws_region
+}
+```
 
 </Fragment>
 </Infrastructure>
@@ -129,6 +204,17 @@ this.artifactBucket.grantReadTo(
 ```
 
 The default key scope is every object in the bucket, because a core device reads whichever component versions get deployed to it and those are not known when the grant is written. `grantReadTo` takes a second argument if you do know a narrower prefix ahead of time - `grantReadTo(role, 'com.myscope.MyComponent/*')` limits the grant to one component's versions.
+
+On Terraform, the same `--tokenExchangeRoleArn` generator option (baked into the generated `<name>-artifact-bucket` module the same way `--targetArn` etc. are) produces:
+
+```hcl title="packages/common/terraform/src/app/greengrass-deployment/my-deployment-artifact-bucket/my-deployment-artifact-bucket.tf"
+module "artifact_bucket" {
+  source                  = "../../../core/greengrass/artifact-bucket"
+  token_exchange_role_arn = "arn:aws:iam::111111111111:role/GreengrassTokenExchangeRole"
+}
+```
+
+The underlying `core/greengrass/artifact-bucket` module also takes a `token_exchange_key_prefix` variable (defaulting to `*`) for the narrower-prefix case - edit the generated app module by hand to pass one through, since the generator itself has no equivalent option.
 
 If you omit `tokenExchangeRoleArn`, attach the equivalent policy to your token exchange role by hand:
 
@@ -146,7 +232,7 @@ If you omit `tokenExchangeRoleArn`, attach the equivalent policy to your token e
 
 **Component versions are immutable.** `AWS::GreengrassV2::ComponentVersion`'s `InlineRecipe` is a replacement property - changing it replaces the resource rather than updating it in place. `CreateComponentVersion` itself rejects a resubmission of an already-published version under different content, so a rebuild that forgot to bump `ComponentVersion` fails the deployment rather than corrupting an already-deployed version. The vended construct also uploads each artifact under a content-hashed S3 key (`<ComponentName>/<Version>/<sha256>/<file>`), so a rebuild's upload can never physically overwrite the bytes an already-published version's artifact URI points at.
 
-**Both `DeletionPolicy` and `UpdateReplacePolicy` default to `Retain`** on the component version, the artifact bucket, and the deployment resource. Retained component versions accumulate over time - AWS IoT Greengrass has no automatic cleanup, so plan a periodic inventory (`ListComponentVersions`) and manual deletion of versions you no longer deploy.
+**Both `DeletionPolicy` and `UpdateReplacePolicy` default to `Retain`** on the component version, the artifact bucket, and the deployment resource. Retained component versions accumulate over time - AWS IoT Greengrass has no automatic cleanup, so plan a periodic inventory (`ListComponentVersions`) and manual deletion of versions you no longer deploy. On Terraform only the artifact bucket is retained, and a replaced component version is deleted instead - see [Retention Diverges From CDK Here](#retention-diverges-from-cdk-here) for why, and for how to keep one.
 
 **Deployment revisions are replacement updates.** Changing a deployment's `components` or `configurationUpdate` replaces the `AWS::GreengrassV2::Deployment` resource - CloudFormation creates the new revision, and the retained old resource is superseded on the target. [Express mode disables rollback by default](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stack-failure-options.html#express-mode-and-rollback), and **disabling rollback is not supported for replacement updates**, so an express revision deploy fails with `Replacement type updates not supported on stack with disable-rollback`. The `deploy-sandbox` target always uses express mode, and `deploy` uses it too unless you generated the infra project with `stageConfig`. Pass `--no-express` to deploy a revision through either target. `deploy-ci` never uses express mode, so a pipeline deploys revisions unchanged.
 

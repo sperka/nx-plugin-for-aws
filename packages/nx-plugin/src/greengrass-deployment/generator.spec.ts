@@ -178,13 +178,44 @@ describe('greengrass-deployment generator', () => {
     ).rejects.toThrow(/only accepts --thingGroupName/);
   });
 
-  it('should throw an actionable error for --iac terraform', async () => {
-    await expect(
-      greengrassDeploymentGenerator(tree, {
-        ...defaultOptions,
-        iac: 'terraform',
-      }),
-    ).rejects.toThrow(/hashicorp\/awscc/);
+  it('should vend the terraform deployment and artifact-bucket modules for --iac terraform', async () => {
+    await greengrassDeploymentGenerator(tree, {
+      ...defaultOptions,
+      iac: 'terraform',
+    });
+
+    const deploymentModulePath =
+      'packages/common/terraform/src/app/greengrass-deployment/my-deployment/my-deployment.tf';
+    const bucketModulePath =
+      'packages/common/terraform/src/app/greengrass-deployment/my-deployment-artifact-bucket/my-deployment-artifact-bucket.tf';
+    expect(tree.exists(deploymentModulePath)).toBe(true);
+    expect(tree.exists(bucketModulePath)).toBe(true);
+
+    const deploymentModule = tree.read(deploymentModulePath, 'utf-8');
+    expect(deploymentModule).toContain('thing_group_name = "my-things"');
+    expect(deploymentModule).toContain(
+      'source = "../../../core/greengrass/deployment"',
+    );
+    expect(deploymentModule).toContain(
+      'packages/my-deployment/src/components.json',
+    );
+
+    const bucketModule = tree.read(bucketModulePath, 'utf-8');
+    expect(bucketModule).toContain(
+      'source = "../../../core/greengrass/artifact-bucket"',
+    );
+
+    for (const dir of ['artifact-bucket', 'component-version', 'deployment']) {
+      expect(
+        tree.exists(
+          `packages/common/terraform/src/core/greengrass/${dir}/main.tf`,
+        ),
+      ).toBe(true);
+    }
+
+    expect(
+      tree.read('packages/my-deployment/src/components.json', 'utf-8'),
+    ).toBe('{}\n');
   });
 
   it('should create an independent project for a different name', async () => {

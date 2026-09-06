@@ -95,7 +95,7 @@
     "greengrass-deployment": {
       "factory": "./src/greengrass-deployment/generator",
       "schema": "./src/greengrass-deployment/schema.json",
-      "description": "Generate a Greengrass deployment project, vending component-version and deployment CDK infrastructure",
+      "description": "Generate a Greengrass deployment project, vending component-version and deployment infrastructure",
       "metric": "g74",
       "guidePages": ["greengrass-deployment"],
       "experimental": true

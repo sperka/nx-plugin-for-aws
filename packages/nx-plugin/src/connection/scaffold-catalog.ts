@@ -375,12 +375,8 @@ const GATEWAY_TO_MCP: readonly ConnectionConstraint[] = [
  * for a component that never joins a deployment, so the generator itself
  * can't reject it up front - only a connection attempt can).
  *
- * Both ends also pin `iac` to `cdk`: neither
- * `AWS::GreengrassV2::ComponentVersion` nor `AWS::GreengrassV2::Deployment`
- * exists in the Terraform provider this plugin pins, so both generators throw
- * on `--iac terraform`. Pinning it here states the value rather than leaving it
- * at `inherit`, which resolves to whatever provider the workspace was created
- * with.
+ * `iac` carries no constraint: both generators support `cdk` and `terraform`,
+ * so both ends inherit the workspace's provider like every other endpoint.
  */
 const DEPLOYMENT_TO_GREENGRASS_COMPONENT: readonly ConnectionConstraint[] = [
   {
@@ -389,20 +385,6 @@ const DEPLOYMENT_TO_GREENGRASS_COMPONENT: readonly ConnectionConstraint[] = [
     equals: 'component-version',
     reason:
       'A component generated with --infra none publishes no ComponentVersion for the deployment to reference. Generate it with --infra component-version first.',
-  },
-  {
-    side: 'source',
-    option: 'iac',
-    equals: 'cdk',
-    reason:
-      'Greengrass infrastructure is CDK-only: neither Greengrass CloudFormation resource exists in the pinned Terraform provider.',
-  },
-  {
-    side: 'target',
-    option: 'iac',
-    equals: 'cdk',
-    reason:
-      'Greengrass infrastructure is CDK-only: neither Greengrass CloudFormation resource exists in the pinned Terraform provider.',
   },
 ];
 

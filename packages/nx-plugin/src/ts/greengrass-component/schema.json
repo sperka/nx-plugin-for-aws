@@ -54,7 +54,7 @@
       "type": "string",
       "enum": ["component-version", "none"],
       "default": "component-version",
-      "description": "Infrastructure to provision for this component. component-version vends a GreengrassComponentVersion CDK construct that publishes this component's built artifact.",
+      "description": "Infrastructure to provision for this component. component-version vends a GreengrassComponentVersion CDK construct or Terraform module that publishes this component's built artifact.",
       "x-priority": "important",
       "x-prompt": "Which infrastructure would you like to provision?"
     },

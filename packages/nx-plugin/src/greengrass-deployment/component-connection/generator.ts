@@ -7,6 +7,7 @@ import {
   joinPathFragments,
   logger,
   type Tree,
+  updateJson,
 } from '@nx/devkit';
 import {
   captureGritQL,
@@ -86,6 +87,49 @@ const addComponentToDeploymentMap = (
     }`,
     `${key}: ${entry}`,
   );
+};
+
+/**
+ * Insert `componentName` into the Terraform bridge file, and report what was
+ * already there.
+ *
+ * The Terraform `deployment` module's `components` default reads
+ * `src/components.json`, not `components.ts` - Terraform cannot import a
+ * TypeScript module, so a Terraform deployment vends both and this generator
+ * writes both. Keys are snake_case (`component_version`), matching the awscc
+ * provider's own schema, unlike `components.ts`'s camelCase.
+ *
+ * Idempotent like the TS map: an existing entry for `componentName` is left as
+ * it is, and reported back so the caller can warn about it the same way it
+ * warns about a stale TS entry.
+ */
+const syncComponentToDeploymentJson = (
+  tree: Tree,
+  componentsJsonPath: string,
+  componentName: string,
+  componentVersion: string,
+): { written: boolean; existingVersion?: string } => {
+  let existing: { component_version?: string } | undefined;
+  updateJson(
+    tree,
+    componentsJsonPath,
+    (components: Record<string, { component_version?: string }>) => {
+      existing = components[componentName];
+      if (existing) {
+        return components;
+      }
+      return {
+        ...components,
+        [componentName]: { component_version: componentVersion },
+      };
+    },
+  );
+  return {
+    written: existing === undefined,
+    ...(existing?.component_version
+      ? { existingVersion: existing.component_version }
+      : {}),
+  };
 };
 
 /**
@@ -169,7 +213,11 @@ const resolveComponentIdentity = (
  *
  * Both the map and the recipe are user-owned, so a re-run never rewrites an
  * entry that is already there: it reports the skip, and warns when the recipe's
- * version has moved past the one the map holds.
+ * version has moved past the one the map holds. On a Terraform deployment the
+ * same entry is written to `src/components.json` too - the file the vended
+ * Terraform `deployment` module actually reads - with the same
+ * report-don't-rewrite contract, and a refusal when the two files disagree
+ * (see {@link syncComponentToDeploymentJson}).
  *
  * The generator cannot wire the CloudFormation dependency between the
  * component's `ComponentVersion` and the deployment - that needs a `.dependOn(...)`
@@ -227,10 +275,9 @@ export const greengrassDeploymentComponentConnectionGenerator = async (
     { componentName: recordedName, componentVersion: recordedVersion },
   );
 
-  const componentsPath = joinPathFragments(
-    sourceProject.sourceRoot ?? joinPathFragments(sourceProject.root, 'src'),
-    'components.ts',
-  );
+  const sourceRoot =
+    sourceProject.sourceRoot ?? joinPathFragments(sourceProject.root, 'src');
+  const componentsPath = joinPathFragments(sourceRoot, 'components.ts');
   const entry = `{ componentVersion: '${componentVersion}' }`;
   const written = await addComponentToDeploymentMap(
     tree,
@@ -239,6 +286,7 @@ export const greengrassDeploymentComponentConnectionGenerator = async (
     entry,
   );
 
+  let tsVersion: string | undefined = componentVersion;
   if (!written) {
     const existing = await existingEntry(tree, componentsPath, componentName);
     if (!existing.exists) {
@@ -246,6 +294,7 @@ export const greengrassDeploymentComponentConnectionGenerator = async (
         `Could not find the 'components' map to add '${componentName}' to in ${componentsPath}. This connection edits the declaration the 'greengrass-deployment' generator vends (\`${COMPONENTS_DECLARATION} { ... }\`), and that file is yours to edit, so a restructured declaration is no longer recognised. Add the entry by hand instead:\n\n  '${componentName}': ${entry},\n`,
       );
     }
+    tsVersion = existing.version;
 
     // The entry is user-owned once written, so a re-run reports rather than
     // rewrites - including when the recipe has moved on since.
@@ -257,6 +306,50 @@ export const greengrassDeploymentComponentConnectionGenerator = async (
       logger.info(
         `'${componentName}' is already in ${componentsPath} - left unchanged.`,
       );
+    }
+  }
+
+  // On Terraform the JSON bridge - not `components.ts` - is what the vended
+  // `deployment` module reads, so it is required rather than best-effort: its
+  // `components` default calls `jsondecode(file(...))`, which fails the plan
+  // outright when the file is absent.
+  const componentsJsonPath = joinPathFragments(sourceRoot, 'components.json');
+  const deploymentIac = (sourceProject.metadata as { iac?: string } | undefined)
+    ?.iac;
+  if (deploymentIac === 'terraform') {
+    if (!tree.exists(componentsJsonPath)) {
+      throw new Error(
+        `'${sourceProject.name}' was generated with --iac terraform, but ${componentsJsonPath} is missing. That file, not ${componentsPath}, is what the vended Terraform 'deployment' module reads, and its 'components' default fails at plan time without it. Re-run 'greengrass-deployment --name=${sourceProject.name}' to restore it, then run this connection again.`,
+      );
+    }
+
+    const json = syncComponentToDeploymentJson(
+      tree,
+      componentsJsonPath,
+      componentName,
+      componentVersion,
+    );
+    const jsonVersion = json.written ? componentVersion : json.existingVersion;
+
+    // Neither file rewrites an entry that is already there, so a disagreement
+    // between them is not something a re-run can settle: Terraform would deploy
+    // the JSON's version while `components.ts` documents the other one.
+    if (tsVersion && jsonVersion && tsVersion !== jsonVersion) {
+      throw new Error(
+        `'${componentName}' is at componentVersion '${tsVersion}' in ${componentsPath} but component_version '${jsonVersion}' in ${componentsJsonPath}. Terraform deploys the version in ${componentsJsonPath}. Make the two agree by hand, then run this connection again.`,
+      );
+    }
+
+    if (!json.written) {
+      if (json.existingVersion && json.existingVersion !== componentVersion) {
+        logger.warn(
+          `'${componentName}' is already in ${componentsJsonPath} at component_version '${json.existingVersion}', but its recipe.yaml now declares '${componentVersion}'. The entry is left as it is - update it by hand to deploy the new version.`,
+        );
+      } else {
+        logger.info(
+          `'${componentName}' is already in ${componentsJsonPath} - left unchanged.`,
+        );
+      }
     }
   }
 

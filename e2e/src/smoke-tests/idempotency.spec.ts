@@ -6,10 +6,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { ensureDirSync } from 'fs-extra';
 import { createTestWorkspace, runCLI, tmpProjPath } from '../utils';
-import {
-  runCdkOnlyGeneratorMatrix,
-  runGeneratorMatrix,
-} from './generator-matrix';
+import { runGeneratorMatrix } from './generator-matrix';
 
 /**
  * idempotency smoke test — runs the full generator matrix, commits the result,
@@ -72,9 +69,6 @@ describe('smoke test - idempotency', () => {
 
     // First pass — scaffold the full matrix.
     await runGeneratorMatrix(opts, { preferInstallDependencies: true });
-    await runCdkOnlyGeneratorMatrix(opts, {
-      preferInstallDependencies: true,
-    });
 
     // Terraform project alongside CDK (mirrors runSmokeTest).
     await runCLI(
@@ -101,9 +95,6 @@ describe('smoke test - idempotency', () => {
       opts,
     );
     await runGeneratorMatrix(opts, { preferInstallDependencies: true });
-    await runCdkOnlyGeneratorMatrix(opts, {
-      preferInstallDependencies: true,
-    });
     await runCLI(
       `generate @aws/nx-plugin:terraform#project --name=tf-infra --no-interactive`,
       opts,

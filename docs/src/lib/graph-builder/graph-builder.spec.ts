@@ -940,17 +940,18 @@ describe('autoFixesForConnection', () => {
     ).toBe(false);
   });
 
-  // Greengrass infrastructure is CDK-only, so both ends are pinned rather than
-  // left on `inherit` — which would resolve to whatever the workspace was
-  // created with, and throw for Terraform.
-  it('should pin both ends of a greengrass connection to cdk', () => {
+  // Greengrass infrastructure is vended for both providers, so neither end of
+  // the connection is pinned — both inherit the workspace's own choice.
+  it('should leave both ends of a greengrass connection on the inherited iac', () => {
     const deployment = node('d', 'greengrass-deployment');
     const component = node('c', 'py#greengrass-component', {
       hostName: 'device-app',
     });
-    const fixes = autoFixesForConnection(deployment, component);
-    expect(fixes).toContainEqual({ nodeId: 'd', option: 'iac', value: 'cdk' });
-    expect(fixes).toContainEqual({ nodeId: 'c', option: 'iac', value: 'cdk' });
+    expect(
+      autoFixesForConnection(deployment, component).some(
+        (fix) => fix.option === 'iac',
+      ),
+    ).toBe(false);
   });
 });
 
