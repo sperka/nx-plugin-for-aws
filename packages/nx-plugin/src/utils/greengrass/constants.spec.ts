@@ -22,16 +22,18 @@ describe('greengrass constants', () => {
     expect(GREENGRASS_PLATFORMS).toEqual(['linux-amd64', 'linux-arm64']);
   });
 
-  it('should map linux-amd64 to the x86_64 manylinux uv platform and manifest platform', () => {
+  it('should map linux-amd64 to the x86_64 manylinux uv platform, its aws-crt addon dir and manifest platform', () => {
     expect(GREENGRASS_PLATFORM_MAPPINGS['linux-amd64']).toEqual({
       uvPlatform: 'x86_64-manylinux_2_28',
+      nodeCrtAddonDir: 'linux-x64-glibc',
       manifestPlatform: { os: 'linux', architecture: 'amd64' },
     });
   });
 
-  it('should map linux-arm64 to the aarch64 manylinux uv platform and manifest platform', () => {
+  it('should map linux-arm64 to the aarch64 manylinux uv platform, its aws-crt addon dir and manifest platform', () => {
     expect(GREENGRASS_PLATFORM_MAPPINGS['linux-arm64']).toEqual({
       uvPlatform: 'aarch64-manylinux_2_28',
+      nodeCrtAddonDir: 'linux-arm64-glibc',
       manifestPlatform: { os: 'linux', architecture: 'aarch64' },
     });
   });

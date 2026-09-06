@@ -38,7 +38,6 @@ The generator adds the following files to your project:
   - \<component-name>
     - recipe.yaml the component recipe — user-owned from first generation onward
     - gdk-config.json a [GDK](https://github.com/aws-greengrass/aws-greengrass-gdk-cli)-shaped build config — framework-owned
-    - package.json only vended when ipc is true — the on-device install manifest for aws-iot-device-sdk-v2, framework-owned
 - src
   - greengrass
     - \<component-name>
@@ -48,20 +47,21 @@ The generator adds the following files to your project:
 
 Unlike `py#greengrass-component`, the entrypoint lives under your project's own `src/` tree (not beside `recipe.yaml`), so it compiles, lints and type-checks as part of the project's normal TypeScript targets.
 
-## The Bundle and Three Targets
+## The Bundle and Its Targets
 
-TypeScript source is never packaged directly - the deployable content is a single-file bundle. The generator wires a shared `bundle` target (via the same [`rolldown`](https://rolldown.rs/) bundling this repo uses for `ts#lambda-function` and `ts#mcp-server`) plus three targets prefixed with the component's kebab-case name (`<c>` below):
+TypeScript source is never packaged directly - the deployable content is a single-file bundle. The generator wires a shared `bundle` target (via the same [`rolldown`](https://rolldown.rs/) bundling this repo uses for `ts#lambda-function` and `ts#mcp-server`) plus targets prefixed with the component's kebab-case name (`<c>` below):
 
 | Target             | Purpose                                                                          | Cached | Depends on |
 | ------------------ | --------------------------------------------------------------------------------- | ------ | ---------- |
 | `bundle`           | Bundles every entrypoint in the project (Lambda functions, MCP servers, this component, ...) into single-file, `node`-platform output | Yes    | `compile`  |
-| `<c>-artifact`     | Zips the component's bundle output into a GDK-shaped layout                       | Yes    | `bundle`   |
+| `<c>-vendor`       | ipc: true only - copies this build's aws-crt addon next to the bundle output      | Yes    | `bundle`   |
+| `<c>-artifact`     | Zips the component's bundle output (staged output, when ipc: true) into a GDK-shaped layout | Yes    | `<c>-vendor` when ipc: true, else `bundle` |
 | `<c>-deploy-local` | Creates a local deployment via `greengrass-cli` — runs **on** the core device      | No     | `<c>-artifact` |
 | `<c>-logs`         | Tails the component's log file — runs **on** the core device                      | No     | -          |
 
 `<c>-artifact` is also wired onto the project's `build` and `assemble` targets, so a normal build always produces a fresh artifact.
 
-`bundle` is shared with any other bundled entrypoint in the same project (a Lambda function added with `ts#lambda-function`, for example) - each entrypoint gets its own `rolldown.config.ts` entry and its own output subdirectory, but running `bundle` rebuilds all of them together. A dedicated project per component (the same production default `py#greengrass-component` recommends) keeps device-oriented bundling (a fixed `node` floor, `aws-iot-device-sdk-v2` external) from sharing a cache-invalidation boundary with unrelated cloud-oriented bundles (a Lambda function's, with `@aws-sdk/*` external).
+`bundle` is shared with any other bundled entrypoint in the same project (a Lambda function added with `ts#lambda-function`, for example) - each entrypoint gets its own `rolldown.config.ts` entry and its own output subdirectory, but running `bundle` rebuilds all of them together. A dedicated project per component (the same production default `py#greengrass-component` recommends) keeps device-oriented bundling (a fixed `node` floor and a vendored native addon) from sharing a cache-invalidation boundary with unrelated cloud-oriented bundles (a Lambda function's, with `@aws-sdk/*` external).
 
 ### Bundling (`bundle`)
 
@@ -76,9 +76,9 @@ This uses [`rolldown`](https://rolldown.rs/) to produce a single-file, `node`-pl
 
 </FileTree>
 
-<OptionFilter when={{ ipc: true }} description="ipc=true marks aws-iot-device-sdk-v2 external">
+<OptionFilter when={{ ipc: true }} description="ipc=true bundles aws-iot-device-sdk-v2 like everything else">
 
-With `ipc: true`, `aws-iot-device-sdk-v2` is marked **external** rather than bundled: it depends on [`aws-crt`](https://github.com/awslabs/aws-crt-nodejs), which ships a native addon built per platform and Node ABI. A bundler cannot inline a native addon. The recipe's `Install` lifecycle step installs it on the device instead - see [The `aws-crt` native addon](#the-aws-crt-native-addon) below.
+With `ipc: true`, `aws-iot-device-sdk-v2` is bundled like everything else. The one thing a bundler cannot inline is [`aws-crt`](https://github.com/awslabs/aws-crt-nodejs)'s native addon - the `<c>-vendor` target copies it into the artifact instead. See [The `aws-crt` native addon](#the-aws-crt-native-addon) below.
 
 </OptionFilter>
 
@@ -92,7 +92,7 @@ With `ipc: false` (the default), nothing is marked external: the bundle is fully
 
 <NxCommands commands={['run <project>:<component-name>-artifact']} />
 
-This zips the bundle output (plus `package.json`, only when `ipc: true`) into a zip at the archive root - not the TypeScript source that produced it - and writes the resolved recipe alongside it:
+This zips the bundle output - plus, when `ipc: true`, the vendored addon `<c>-vendor` staged next to it - into a zip at the archive root - not the TypeScript source that produced it - and writes the resolved recipe alongside it:
 
 <FileTree>
 
@@ -178,7 +178,7 @@ Both targets read `GREENGRASS_ROOT` from the environment, defaulting to `/greeng
 
 ## File ownership
 
-The component targets in `project.json`, `gdk-config.json` and (when `ipc: true`) `package.json` are framework-owned and re-synced to the current definition on every generator run, so manual edits to them do not survive a re-run. The vended scripts under `packages/common/scripts/src/greengrass/` are created once and never overwritten, so your patches survive. Delete those files and re-run the generator to pick up their current versions.
+The component targets in `project.json` and `gdk-config.json` are framework-owned and re-synced to the current definition on every generator run, so manual edits to them do not survive a re-run. The vended scripts under `packages/common/scripts/src/greengrass/` - including `vendor-crt-addon.ts`, vended only when `ipc: true` - are created once and never overwritten, so your patches survive. Delete those files and re-run the generator to pick up their current versions.
 
 Because those scripts never refresh on their own, this generator checks them up front: in a workspace whose Greengrass scripts were vended by a plugin version that predates bundled (TypeScript) components, it refuses to generate and tells you to delete and re-vend them — otherwise the `<c>-artifact` target would fail later with an unexplained `Nothing to package`.
 
@@ -258,34 +258,45 @@ With `ipc: false` (the default), `main.ts` is a plain long-running loop that log
 
 ### Why `ipc` defaults to false here, but true in Python
 
-`py#greengrass-component` defaults `ipc: true`, and most generators in this plugin default to a
-batteries-included end state (`infra: agentcore`, `auth: iam`, `session: s3`). This generator deliberately
-does not, for one reason: a component generated with `ipc: true` cannot run on a device that lacks network
-access, `npm` and a build toolchain, because `aws-crt`'s native addon has to be installed there at deployment
-time (see below). Python has no equivalent constraint - its wheels are vendored at build time for the target
-platform, so an IPC-enabled Python component is self-contained.
-
-The default therefore favours output that runs wherever a `node` binary exists. Pass `--ipc` when your fleet
-can satisfy the install step, and read the section below before you do.
+`ipc: true` is now as self-contained as the Python component - the remaining cost is about 2.3 MB of
+native binary in the artifact per targeted architecture, plus an `accessControl` block. The default
+stays `false` only so existing invocations keep producing what they produce today.
 
 ### The `aws-crt` native addon
 
 <OptionFilter when={{ ipc: true }} description="Only relevant when ipc=true, since aws-iot-device-sdk-v2 depends on aws-crt">
 
-`aws-iot-device-sdk-v2` depends on [`aws-crt`](https://github.com/awslabs/aws-crt-nodejs), which ships a native addon built per platform and Node ABI — there is no pure-JavaScript fallback. A bundler cannot inline this, so `bundle` marks it **external** instead, and the recipe's `Install` lifecycle step runs `npm install --omit=dev` in the decompressed artifact directory to install it on the device from the vended `package.json`:
+`aws-iot-device-sdk-v2` depends on [`aws-crt`](https://github.com/awslabs/aws-crt-nodejs), whose native addon a bundler cannot inline. `aws-crt` publishes that addon prebuilt for every platform it supports inside the npm package, and the addon is N-API based, so one binary serves every Node.js 18 or later runtime. No compiler is involved anywhere. The `<c>-vendor` target copies your target architecture's copy into a staged tree next to the bundle, which `<c>-artifact` then zips:
+
+```
+my-component.zip
+|- index.js
+`- native/aws-crt/linux-arm64-glibc/aws-crt-nodejs.node
+```
+
+and the recipe tells `aws-crt`'s loader where it landed:
 
 ```yaml
 Lifecycle:
-  Install: cd {artifacts:decompressedPath}/<component-name> && npm install --omit=dev
+  Setenv:
+    AWS_CRT_NODEJS_BINARY_RELATIVE_PATH: native/aws-crt/linux-arm64-glibc/aws-crt-nodejs.node
   Run: node {artifacts:decompressedPath}/<component-name>/index.js
 ```
 
-This is `npm install`, not `npm ci` — `npm ci` requires a `package-lock.json` this generator does not vend. `npm install` works from `package.json` alone, at the cost of resolving the dependency tree fresh on every deployment. **This step needs network access and a working `npm` on the device.** If your fleet has neither, keep `ipc: false` or pre-provision the dependency another way.
+There is no install step. The component itself needs a `node` binary and nothing else - no `npm`, no compiler, and no network access of its own, at deployment or at any later nucleus restart. A fresh cloud deployment still downloads the recipe and the artifact through the nucleus, exactly as it does for any component. The decompressed artifact folder stays read-only, which is what AWS documents it as.
 
-:::danger[`ipc: true` is not yet verified on a device]
-AWS documents the decompressed artifact folder as **read-only**: "the AWS IoT Greengrass Core software doesn't allow components to edit artifact files in the artifacts folder". The `Install` step above writes `node_modules` into exactly that folder, so it is expected to fail for a component running as the default component user - it would only succeed for one configured to run as root. `ipc: false` is unaffected, is the default, and is the path that has been exercised on real hardware.
+The vendored binary needs glibc 2.17 or later. It adds about 2.3 MB to the zip per targeted architecture, and unpacks to 5.4 MB for `linux-arm64-glibc` or 6.9 MB for `linux-x64-glibc`, so `platform: linux-amd64-arm64` pays that cost twice. A musl device (Alpine) is not covered: `aws-crt` ships `dist/bin/linux-<arch>-musl/aws-crt-nodejs.node` in the same npm package, so copy that binary onto the device yourself and point `AWS_CRT_NODEJS_BINARY_ABSOLUTE_PATH` at it.
 
-Until this is fixed (the install and the run need to move to `{work:path}`), treat `ipc: true` as unverified: prefer `ipc: false`, or vendor the dependency into the artifact yourself.
+:::note[Components generated before this change]
+Earlier `ipc: true` components carry `Install: cd {artifacts:decompressedPath}/<component-name> && npm install --omit=dev`, which writes `node_modules` into the artifact folder AWS documents as read-only, needs `npm` and the network at every nucleus launch, and loses the installed tree on every version bump. `recipe.yaml` and `rolldown.config.ts` are yours, so no generator run rewrites them. To migrate:
+
+1. Delete `packages/common/scripts/src/greengrass/` and re-run the generator with the same options, then re-apply any patches of your own to those scripts.
+2. Delete `external: ['aws-iot-device-sdk-v2'],` from this component's entry in `<project>/rolldown.config.ts`.
+3. In `<project>/greengrass/<component-name>/recipe.yaml`, in every manifest, delete the `Install:` line and add the `Setenv` block shown above, using `linux-arm64-glibc` under `architecture: aarch64` and `linux-x64-glibc` under `architecture: amd64`.
+4. Delete `<project>/greengrass/<component-name>/package.json`.
+5. Bump `ComponentVersion`. The artifact bytes change and published versions are immutable.
+
+On a device that already ran the old recipe, `node_modules` is left inside the old version's unarchived artifact folder, which the nucleus deletes with that version.
 :::
 
 </OptionFilter>
@@ -298,7 +309,7 @@ The `platform` option only affects the recipe manifest's `Platform` block - the 
 
 ### Multi-architecture components (`platform: linux-amd64-arm64`)
 
-Because the bundle is pure JavaScript, `platform: linux-amd64-arm64` writes **two manifests over the same one artifact** - nothing is vendored per architecture, unlike the Python component:
+Because the bundle is pure JavaScript, `platform: linux-amd64-arm64` writes **two manifests over the same one artifact** - unlike the Python component, which builds one zip per architecture:
 
 ```yaml
 Manifests:
@@ -320,9 +331,9 @@ Manifests:
       Run: node {artifacts:decompressedPath}/<component-name>/index.js
 ```
 
-<OptionFilter when={{ ipc: true }} description="ipc=true adds the same Install step to every manifest">
+<OptionFilter when={{ ipc: true }} description="ipc=true adds its own Setenv to every manifest">
 
-With `ipc: true` each manifest also carries the same `Install` line shown under [The `aws-crt` native addon](#the-aws-crt-native-addon) above, repeated identically: the on-device `npm install` resolves `aws-crt` for the device's own architecture, so one bundle plus one on-device install step covers both.
+With `ipc: true` each manifest carries the same `Setenv` shape shown under [The `aws-crt` native addon](#the-aws-crt-native-addon) above - each manifest's own `Setenv` names only its own architecture's addon, and the single zip holds both.
 
 </OptionFilter>
 
@@ -330,7 +341,9 @@ With `ipc: true` each manifest also carries the same `Install` line shown under 
 
 ### Changing `platform` after the first run
 
-`platform` shapes only the **first** generation of `recipe.yaml`, whichever value you pick. A later run with a different `platform` — including a run that simply omits the option, since it defaults to `linux-arm64` — is refused, because `recipe.yaml` is user-owned and never rewritten. The error names the platform to re-run with if you did not mean to change it, and otherwise prints the full `Manifests` block the new platform expects (with the `Install` step included when `ipc: true`) to paste in by hand, together with the reminder to bump `ComponentVersion`, since published versions are immutable.
+`platform` shapes only the **first** generation of `recipe.yaml`, whichever value you pick. A later run with a different `platform` — including a run that simply omits the option, since it defaults to `linux-arm64` — is refused, because `recipe.yaml` is user-owned and never rewritten. The error names the platform to re-run with if you did not mean to change it, and otherwise prints the full `Manifests` block the new platform expects (with the `Setenv` block included when `ipc: true`) to paste in by hand, together with the reminder to bump `ComponentVersion`, since published versions are immutable.
+
+`ipc` shapes only the first generation of `recipe.yaml` too, but a later run that flips it is **not** refused. Turning `ipc` on afterwards adds the `<c>-vendor` target and stages the addon, yet leaves your `recipe.yaml` without the `Setenv` block that points `aws-crt`'s loader at it - the component then fails on the device with `AWS CRT binary not present`. Add that block by hand, following steps 3 and 5 of the migration note under [The `aws-crt` native addon](#the-aws-crt-native-addon).
 
 ### Nucleus classic vs nucleus lite
 

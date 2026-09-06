@@ -27,11 +27,13 @@ Manifests:
         Unarchive: ZIP
     Lifecycle:
 <%_ if (ipc) { _%>
-      # aws-iot-device-sdk-v2 ships the aws-crt native addon, which the bundle
-      # marks external rather than inlines - it is installed here instead, on
-      # the device, from the package.json vended alongside this recipe. This
-      # step needs network access and npm on the device.
-      Install: cd {artifacts:decompressedPath}/<%- m.artifactBaseName %> && npm install --omit=dev
+      # aws-crt ships its native addon prebuilt for every platform it supports,
+      # so this component's build copies this architecture's copy into the
+      # artifact and aws-crt's own loader reads it from this path, resolved
+      # relative to index.js. There is no Install step: the decompressed
+      # artifact folder is read-only by contract, and nothing here writes to it.
+      Setenv:
+        AWS_CRT_NODEJS_BINARY_RELATIVE_PATH: native/aws-crt/<%- m.nodeCrtAddonDir %>/aws-crt-nodejs.node
 <%_ } _%>
       # Requires a node binary on the device's PATH - the bundle is pure
       # JavaScript with no ABI pinning, but it still needs a modern node

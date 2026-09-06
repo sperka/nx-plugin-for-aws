@@ -100,6 +100,7 @@ describe('ts#greengrass-component generator', () => {
     expect(recipe).toContain('Unarchive: ZIP');
     expect(recipe).not.toContain('accessControl');
     expect(recipe).not.toContain('Install:');
+    expect(recipe).not.toContain('Setenv:');
 
     const mainTs = tree.read(
       'packages/test-project/src/greengrass/my-component/main.ts',
@@ -111,7 +112,7 @@ describe('ts#greengrass-component generator', () => {
     ]);
   });
 
-  it('should wire the IPC client, accessControl block and Install lifecycle when ipc is true', async () => {
+  it('should wire the IPC client, accessControl block and vendored addon Setenv when ipc is true', async () => {
     seedTypeScriptProject(tree);
 
     await tsGreengrassComponentGenerator(tree, {
@@ -127,11 +128,10 @@ describe('ts#greengrass-component generator', () => {
     );
     expect(recipe).toContain('aws.greengrass.ipc.pubsub');
     expect(recipe).toContain('aws.greengrass#PublishToTopic');
-    // npm ci requires a package-lock.json this generator does not vend, so
-    // the Install step must use npm install, not npm ci.
     expect(recipe).toContain(
-      'Install: cd {artifacts:decompressedPath}/my-component && npm install --omit=dev',
+      'AWS_CRT_NODEJS_BINARY_RELATIVE_PATH: native/aws-crt/linux-arm64-glibc/aws-crt-nodejs.node',
     );
+    expect(recipe).not.toContain('Install:');
 
     const mainTs = tree.read(
       'packages/test-project/src/greengrass/my-component/main.ts',
@@ -147,20 +147,27 @@ describe('ts#greengrass-component generator', () => {
       'packages/test-project/src/greengrass/my-component/main.ts',
     ]);
 
-    const packageJson = JSON.parse(
-      tree.read(
-        'packages/test-project/greengrass/my-component/package.json',
-        'utf-8',
-      ),
-    );
-    expect(packageJson.dependencies['aws-iot-device-sdk-v2']).toBeDefined();
-
     const projectPackageJson = JSON.parse(
       tree.read('packages/test-project/package.json', 'utf-8'),
     );
     expect(
       projectPackageJson.dependencies['aws-iot-device-sdk-v2'],
     ).toBeDefined();
+  });
+
+  it('should not vend a package.json beside the recipe when ipc is true', async () => {
+    seedTypeScriptProject(tree);
+
+    await tsGreengrassComponentGenerator(tree, {
+      project: 'test-project',
+      name: 'my-component',
+      ipc: true,
+      infra: 'none',
+    });
+
+    expect(
+      tree.exists('packages/test-project/greengrass/my-component/package.json'),
+    ).toBeFalsy();
   });
 
   it('should not add aws-iot-device-sdk-v2 to the project package.json when ipc is false', async () => {
@@ -180,7 +187,7 @@ describe('ts#greengrass-component generator', () => {
     ).toBeUndefined();
   });
 
-  it('should wire the bundle target with rolldown, marking aws-iot-device-sdk-v2 external when ipc is true', async () => {
+  it('should wire the bundle target with rolldown, bundling aws-iot-device-sdk-v2 when ipc is true', async () => {
     seedTypeScriptProject(tree);
 
     await tsGreengrassComponentGenerator(tree, {
@@ -207,7 +214,7 @@ describe('ts#greengrass-component generator', () => {
     expect(rolldownConfig).toContain(
       '../../dist/packages/test-project/bundle/greengrass/my-component/index.js',
     );
-    expect(rolldownConfig).toContain("external: ['aws-iot-device-sdk-v2']");
+    expect(rolldownConfig).not.toContain('external:');
     expect(rolldownConfig).toContain("platform: 'node'");
   });
 
@@ -279,9 +286,192 @@ describe('ts#greengrass-component generator', () => {
     // Never wired into the project dev target — deploy-local mutates a real device.
     expect(targets.dev).toBeUndefined();
 
-    // No <c>-vendor target — TypeScript has no analogue to py's Python
-    // dependency vendoring step, since rolldown bundles dependencies directly.
+    // No <c>-vendor target when ipc is false - nothing needs staging, so the
+    // artifact target zips the bundle output directly.
     expect(targets['my-component-vendor']).toBeUndefined();
+  });
+
+  it("should wire a vendor target that stages the bundle and this architecture's addon when ipc is true", async () => {
+    seedTypeScriptProject(tree);
+
+    await tsGreengrassComponentGenerator(tree, {
+      project: 'test-project',
+      name: 'my-component',
+      ipc: true,
+      infra: 'none',
+    });
+
+    const projectConfig = JSON.parse(
+      tree.read('packages/test-project/project.json', 'utf-8'),
+    );
+    const vendorTarget = projectConfig.targets['my-component-vendor'];
+    expect(vendorTarget).toBeDefined();
+    expect(vendorTarget.dependsOn).toEqual(['bundle']);
+    expect(vendorTarget.outputs).toEqual([
+      '{workspaceRoot}/dist/{projectRoot}/greengrass/my-component/stage',
+    ]);
+    expect(vendorTarget.inputs).toContainEqual({
+      externalDependencies: ['aws-iot-device-sdk-v2'],
+    });
+    expect(vendorTarget.options.command).toBe(
+      'tsx packages/common/scripts/src/greengrass/vendor-crt-addon.ts {projectRoot} dist/{projectRoot}/bundle/greengrass/my-component dist/{projectRoot}/greengrass/my-component/stage linux-arm64-glibc',
+    );
+  });
+
+  it('should pass both architecture addon dirs to the vendor target for a multi-architecture component', async () => {
+    seedTypeScriptProject(tree);
+
+    await tsGreengrassComponentGenerator(tree, {
+      project: 'test-project',
+      name: 'my-component',
+      platform: 'linux-amd64-arm64',
+      ipc: true,
+      infra: 'none',
+    });
+
+    const projectConfig = JSON.parse(
+      tree.read('packages/test-project/project.json', 'utf-8'),
+    );
+    expect(
+      projectConfig.targets['my-component-vendor'].options.command,
+    ).toContain('linux-x64-glibc,linux-arm64-glibc');
+  });
+
+  it('should point the artifact target at the staged tree and depend on the vendor target when ipc is true', async () => {
+    seedTypeScriptProject(tree);
+
+    await tsGreengrassComponentGenerator(tree, {
+      project: 'test-project',
+      name: 'my-component',
+      ipc: true,
+      infra: 'none',
+    });
+
+    const projectConfig = JSON.parse(
+      tree.read('packages/test-project/project.json', 'utf-8'),
+    );
+    const artifactTarget = projectConfig.targets['my-component-artifact'];
+    expect(artifactTarget.dependsOn).toEqual(['my-component-vendor']);
+    expect(artifactTarget.options.command).toContain(
+      'dist/{projectRoot}/greengrass/my-component/stage',
+    );
+    expect(artifactTarget.options.command).not.toContain(
+      'dist/{projectRoot}/bundle/greengrass/my-component',
+    );
+  });
+
+  it('should not add a vendor target when ipc is false', async () => {
+    seedTypeScriptProject(tree);
+
+    await tsGreengrassComponentGenerator(tree, {
+      project: 'test-project',
+      name: 'my-component',
+      infra: 'none',
+    });
+
+    const projectConfig = JSON.parse(
+      tree.read('packages/test-project/project.json', 'utf-8'),
+    );
+    expect(projectConfig.targets['my-component-vendor']).toBeUndefined();
+    expect(projectConfig.targets['my-component-artifact'].dependsOn).toEqual([
+      'bundle',
+    ]);
+    expect(
+      projectConfig.targets['my-component-artifact'].options.command,
+    ).toContain('dist/{projectRoot}/bundle/greengrass/my-component');
+  });
+
+  it('should vend the vendor script only when ipc is true', async () => {
+    seedTypeScriptProject(tree);
+
+    await tsGreengrassComponentGenerator(tree, {
+      project: 'test-project',
+      name: 'my-component',
+      infra: 'none',
+    });
+
+    expect(
+      tree.exists('packages/common/scripts/src/greengrass/vendor-crt-addon.ts'),
+    ).toBeFalsy();
+  });
+
+  it('vends the addon script into a workspace that has no shared scripts project yet', async () => {
+    seedTypeScriptProject(tree);
+    // The plain first-ever ipc=true path. ensureSharedScriptsProject creates
+    // the shared scripts project and deletes the whole src tree it scaffolded,
+    // so a script vended BEFORE that call disappears and the -vendor target
+    // then dies with ERR_MODULE_NOT_FOUND on a real build. Reproduced on a
+    // device before this test existed.
+    expect(tree.exists('packages/common/scripts/project.json')).toBeFalsy();
+
+    await tsGreengrassComponentGenerator(tree, {
+      project: 'test-project',
+      name: 'my-component',
+      ipc: true,
+      infra: 'none',
+    });
+
+    expect(tree.exists('packages/common/scripts/project.json')).toBeTruthy();
+    expect(
+      tree.exists('packages/common/scripts/src/greengrass/vendor-crt-addon.ts'),
+    ).toBeTruthy();
+    // The script the -vendor target actually invokes must be the one on disk.
+    const projectConfig = JSON.parse(
+      tree.read('packages/test-project/project.json', 'utf-8'),
+    );
+    const vendorCommand =
+      projectConfig.targets['my-component-vendor'].options.command;
+    const scriptPath = vendorCommand.split(' ')[1];
+    expect(tree.exists(scriptPath)).toBeTruthy();
+  });
+
+  it('records aws-crt as a deliberately unbuilt dependency when ipc is true', async () => {
+    seedTypeScriptProject(tree);
+    tree.write('pnpm-workspace.yaml', 'packages:\n  - packages/*\n');
+
+    await tsGreengrassComponentGenerator(tree, {
+      project: 'test-project',
+      name: 'my-component',
+      ipc: true,
+      infra: 'none',
+    });
+
+    // pnpm 11 fails the whole install with ERR_PNPM_IGNORED_BUILDS unless every
+    // dependency carrying an install script has an explicit decision. aws-crt
+    // builds its native addon from source, and this component vendors the
+    // prebuilt one instead, so the honest decision is false - reproduced in a
+    // clean workspace, where `pnpm install` refused before this was recorded.
+    const workspace = tree.read('pnpm-workspace.yaml', 'utf-8');
+    expect(workspace).toContain('aws-crt');
+    expect(workspace).toMatch(/aws-crt['"]?:\s*false/);
+  });
+
+  it('should not reference the vendor target from the dev target', async () => {
+    seedTypeScriptProject(tree);
+    // A pre-existing dev target, as a real project would have - the vendor
+    // target must reach the artifact only through <c>-artifact's own
+    // dependsOn, never by being appended here.
+    updateJson(tree, 'packages/test-project/project.json', (projectConfig) => ({
+      ...projectConfig,
+      targets: {
+        ...projectConfig.targets,
+        dev: { executor: 'nx:run-commands', options: { command: 'echo dev' } },
+      },
+    }));
+
+    await tsGreengrassComponentGenerator(tree, {
+      project: 'test-project',
+      name: 'my-component',
+      ipc: true,
+      infra: 'none',
+    });
+
+    const projectConfig = JSON.parse(
+      tree.read('packages/test-project/project.json', 'utf-8'),
+    );
+    expect(projectConfig.targets.dev.dependsOn ?? []).not.toContain(
+      'my-component-vendor',
+    );
   });
 
   it('should not duplicate component targets when re-run with the same options', async () => {
@@ -517,7 +707,7 @@ describe('ts#greengrass-component generator', () => {
       ).toHaveLength(2);
     });
 
-    it('should render the Install step in every manifest when ipc is true', async () => {
+    it('should render the addon Setenv in every manifest when ipc is true', async () => {
       seedTypeScriptProject(tree);
 
       await tsGreengrassComponentGenerator(tree, {
@@ -534,9 +724,14 @@ describe('ts#greengrass-component generator', () => {
       );
       expect(
         recipe.match(
-          /Install: cd \{artifacts:decompressedPath\}\/my-component && npm install --omit=dev/g,
+          /Setenv:\n {8}AWS_CRT_NODEJS_BINARY_RELATIVE_PATH: native\/aws-crt\/linux-x64-glibc\/aws-crt-nodejs\.node/g,
         ),
-      ).toHaveLength(2);
+      ).toHaveLength(1);
+      expect(
+        recipe.match(
+          /Setenv:\n {8}AWS_CRT_NODEJS_BINARY_RELATIVE_PATH: native\/aws-crt\/linux-arm64-glibc\/aws-crt-nodejs\.node/g,
+        ),
+      ).toHaveLength(1);
     });
 
     it('should keep the artifact command free of --platforms for a multi-architecture typescript component', async () => {
@@ -618,7 +813,7 @@ describe('ts#greengrass-component generator', () => {
       ).rejects.toThrow(/re-run with --platform=linux-amd64/);
     });
 
-    it('should include the ipc Install step in the manifest block it tells the user to paste', async () => {
+    it('should include the addon Setenv in the manifest block it tells the user to paste', async () => {
       seedTypeScriptProject(tree);
 
       await tsGreengrassComponentGenerator(tree, {
@@ -629,8 +824,8 @@ describe('ts#greengrass-component generator', () => {
         infra: 'none',
       });
 
-      // The Install step is part of a manifest's Lifecycle, so a preview
-      // without it would drop the external SDK's on-device install.
+      // The Setenv block is part of a manifest's Lifecycle, so a preview
+      // without it would drop the addon the on-device loader needs to find.
       await expect(
         tsGreengrassComponentGenerator(tree, {
           project: 'test-project',
@@ -640,7 +835,7 @@ describe('ts#greengrass-component generator', () => {
           infra: 'none',
         }),
       ).rejects.toThrow(
-        /Install: cd \{artifacts:decompressedPath\}\/my-component && npm install --omit=dev/,
+        /Setenv:\n {8}AWS_CRT_NODEJS_BINARY_RELATIVE_PATH: native\/aws-crt\/linux-arm64-glibc\/aws-crt-nodejs\.node/,
       );
     });
 
@@ -654,6 +849,9 @@ describe('ts#greengrass-component generator', () => {
         infra: 'none',
       });
 
+      // Lifecycle: immediately followed by Run: node, with nothing in
+      // between, is what proves neither Install nor Setenv leaked into an
+      // ipc=false preview.
       await expect(
         tsGreengrassComponentGenerator(tree, {
           project: 'test-project',

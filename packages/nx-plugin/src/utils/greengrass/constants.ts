@@ -34,6 +34,14 @@ export interface GreengrassManifestPlatform {
 export interface GreengrassPlatformMapping {
   /** Value for `uv`'s `--python-platform` flag when vendoring dependencies. */
   readonly uvPlatform: 'x86_64-manylinux_2_28' | 'aarch64-manylinux_2_28';
+  /**
+   * The `dist/bin/<platform>-<arch>-<cRuntime>` directory name aws-crt uses for
+   * its prebuilt Node addon on this platform. Node's arch token (`x64`,
+   * `arm64`) is not the manifest token (`amd64`, `aarch64`), so both live in one
+   * entry instead of being derived from each other. glibc only - a musl device
+   * needs the escape hatch the guide documents.
+   */
+  readonly nodeCrtAddonDir: 'linux-x64-glibc' | 'linux-arm64-glibc';
   readonly manifestPlatform: GreengrassManifestPlatform;
 }
 
@@ -47,10 +55,12 @@ export const GREENGRASS_PLATFORM_MAPPINGS: Readonly<
 > = {
   'linux-amd64': {
     uvPlatform: 'x86_64-manylinux_2_28',
+    nodeCrtAddonDir: 'linux-x64-glibc',
     manifestPlatform: { os: 'linux', architecture: 'amd64' },
   },
   'linux-arm64': {
     uvPlatform: 'aarch64-manylinux_2_28',
+    nodeCrtAddonDir: 'linux-arm64-glibc',
     manifestPlatform: { os: 'linux', architecture: 'aarch64' },
   },
 } as const;
