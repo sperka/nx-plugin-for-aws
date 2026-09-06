@@ -3,7 +3,7 @@
   "$id": "greengrass-deployment",
   "title": "greengrass-deployment",
   "x-label": "Greengrass Deployment",
-  "description": "Generate a Greengrass deployment project, vending component-version and deployment CDK infrastructure",
+  "description": "Generate a Greengrass deployment project, vending component-version and deployment infrastructure",
   "type": "object",
   "properties": {
     "name": {

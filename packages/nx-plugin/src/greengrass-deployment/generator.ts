@@ -6,6 +6,7 @@ import {
   type GeneratorCallback,
   generateFiles,
   joinPathFragments,
+  logger,
   OverwriteStrategy,
   readProjectConfiguration,
   type Tree,
@@ -62,7 +63,11 @@ const TARGET_OPTIONS = ['thingGroupName', 'thingName', 'targetArn'] as const;
  */
 const resolveTarget = (
   options: GreengrassDeploymentGeneratorSchema,
-): { targetPropLine: string; targetDescription: string } => {
+): {
+  targetPropLine: string;
+  targetPropLineTf: string;
+  targetDescription: string;
+} => {
   const provided = TARGET_OPTIONS.filter((key) => options[key] !== undefined);
   const expected =
     options.target === 'thing-group'
@@ -93,16 +98,19 @@ const resolveTarget = (
     case 'thing-group':
       return {
         targetPropLine: `thingGroupName: '${thingGroupName}',`,
+        targetPropLineTf: `thing_group_name = "${thingGroupName}"`,
         targetDescription: `a new thing group ("${thingGroupName}")`,
       };
     case 'thing':
       return {
         targetPropLine: `thingName: '${options.thingName}',`,
+        targetPropLineTf: `thing_name = "${options.thingName}"`,
         targetDescription: `an existing thing ("${options.thingName}")`,
       };
     case 'existing-arn':
       return {
         targetPropLine: `targetArn: '${options.targetArn}',`,
+        targetPropLineTf: `target_arn = "${options.targetArn}"`,
         targetDescription: `an existing target (${options.targetArn})`,
       };
   }
@@ -122,10 +130,27 @@ const resolveDeploymentPoliciesLiteral = (
   }
 };
 
+/** Terraform-flavoured twin of {@link resolveDeploymentPoliciesLiteral}. */
+const resolveDeploymentPoliciesLiteralTf = (
+  deploymentPolicy: GreengrassDeploymentGeneratorSchema['deploymentPolicy'],
+): string | undefined => {
+  switch (deploymentPolicy) {
+    case 'no-rollback':
+      return `{ failure_handling_policy = "DO_NOTHING" }`;
+    case 'rollback':
+      return `{ failure_handling_policy = "ROLLBACK" }`;
+    default:
+      return undefined;
+  }
+};
+
 /**
  * Generates a Greengrass deployment: a small TypeScript library holding typed
- * component wiring, plus (unless `--infra none`) the CDK constructs a
- * `AWS::GreengrassV2::Deployment` and its artifact bucket need.
+ * component wiring, plus (unless `--infra none`) the CDK constructs or
+ * Terraform modules an `AWS::GreengrassV2::Deployment` and its artifact
+ * bucket need (Terraform via the `hashicorp/awscc` provider, since neither
+ * `AWS::GreengrassV2` resource exists in the pinned `hashicorp/aws`
+ * provider).
  */
 export const greengrassDeploymentGenerator = async (
   tree: Tree,
@@ -134,10 +159,11 @@ export const greengrassDeploymentGenerator = async (
   const target = options.target ?? 'thing-group';
   const artifactBucket = options.artifactBucket ?? 'create';
   const deploymentPolicy = options.deploymentPolicy ?? 'default';
-  const { targetPropLine, targetDescription } = resolveTarget({
-    ...options,
-    target,
-  });
+  const { targetPropLine, targetPropLineTf, targetDescription } =
+    resolveTarget({
+      ...options,
+      target,
+    });
 
   const { fullyQualifiedName, dir } = getTsLibDetails(tree, {
     name: options.name,
@@ -172,6 +198,12 @@ export const greengrassDeploymentGenerator = async (
     ...esmVars(tree),
   };
 
+  // Read before the user-owned files below are vended, so the Terraform branch
+  // can tell "first generation" from "re-run with the JSON bridge missing".
+  const componentsTsExisted = tree.exists(
+    joinPathFragments(dir, 'src', 'components.ts'),
+  );
+
   // Framework-owned barrel - safe to fully regenerate every run.
   generateFiles(
     tree,
@@ -199,6 +231,35 @@ export const greengrassDeploymentGenerator = async (
     iac ? { iac } : {},
   );
 
+  // Read at plan time by the terraform `deployment` app module's default,
+  // and kept in sync by `greengrass-deployment#component-connection`
+  // alongside `components.ts` - see that generator for why a separate,
+  // snake_cased bridge file is needed rather than importing the TypeScript
+  // map directly (Terraform cannot import TypeScript).
+  const componentsJsonPathFromRoot = joinPathFragments(
+    dir,
+    'src',
+    'components.json',
+  );
+  if (iac === 'terraform') {
+    const componentsJsonExisted = tree.exists(componentsJsonPathFromRoot);
+    generateFiles(
+      tree,
+      joinPathFragments(import.meta.dirname, 'files', 'components-json'),
+      joinPathFragments(dir, 'src'),
+      templateOptions,
+      { overwriteStrategy: OverwriteStrategy.KeepExisting },
+    );
+    // `KeepExisting` recreates a deleted file rather than leaving it out, so an
+    // empty bridge alongside a populated `components.ts` would otherwise mean
+    // Terraform silently deploying no components at all.
+    if (componentsTsExisted && !componentsJsonExisted) {
+      logger.warn(
+        `Created an empty ${componentsJsonPathFromRoot} next to an existing components.ts. Terraform deploys what that JSON file holds, so re-add every component already listed in components.ts - run 'greengrass-deployment#component-connection' again for each, or copy the entries across by hand (snake_case, e.g. { "com.example.MyComponent": { "component_version": "1.0.0" } }).`,
+      );
+    }
+  }
+
   if (options.infra !== 'none') {
     await sharedConstructsGenerator(tree, { iac: iac! }, DEPENDENCIES);
     await addGreengrassDeploymentAppConstruct(
@@ -209,6 +270,7 @@ export const greengrassDeploymentGenerator = async (
         nameClassName,
         nameKebabCase: templateOptions.nameKebabCase,
         targetPropLine,
+        targetPropLineTf,
         targetDescription,
         parentTargetArn: options.parentTargetArn,
         tokenExchangeRoleArn: options.tokenExchangeRoleArn,
@@ -217,7 +279,10 @@ export const greengrassDeploymentGenerator = async (
           artifactBucket !== 'create' ? artifactBucket : undefined,
         deploymentPoliciesLiteral:
           resolveDeploymentPoliciesLiteral(deploymentPolicy),
+        deploymentPoliciesLiteralTf:
+          resolveDeploymentPoliciesLiteralTf(deploymentPolicy),
         libraryImportPath: fullyQualifiedName,
+        componentsJsonPathFromRoot,
       },
       DEPENDENCIES,
     );

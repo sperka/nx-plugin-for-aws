@@ -6,6 +6,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "<%- awsProviderVersion %>"
     }
+    awscc = {
+      source  = "hashicorp/awscc"
+      version = "<%- awsccProviderVersion %>"
+    }
     null = {
       source  = "hashicorp/null"
       version = "<%- nullProviderVersion %>"
@@ -19,6 +23,15 @@ terraform {
 }
 
 provider "aws" {
+  region = var.aws_region
+}
+
+# Configured here even by a workspace using no awscc resource. A module
+# requiring a provider the root leaves unconfigured gets an empty default
+# configuration, which resolves its region from the ambient environment - so
+# without this block a vended module using awscc (Greengrass) would deploy into
+# whatever AWS_REGION happens to be set rather than var.aws_region.
+provider "awscc" {
   region = var.aws_region
 }
 

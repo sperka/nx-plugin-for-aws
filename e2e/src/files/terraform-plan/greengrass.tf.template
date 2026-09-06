@@ -1,0 +1,46 @@
+#
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+
+# Greengrass wiring for the terraform PLAN test only.
+#
+# Deliberately separate from `terraform-deploy/main.tf.template`: that file is
+# applied for real in the maintainers' AWS account by the terraform-deploy
+# suite, and a Greengrass apply there would publish component versions and an
+# IoT job with no core device to receive them - the same reason the CDK path has
+# no cdk-deploy stack instantiating these constructs. Under `terraform test`
+# with every provider mocked, this wiring costs nothing and still expands the
+# full module graph, which is what catches a plan-time error.
+#
+# The module directory names come from the generator matrix's Greengrass block
+# (`my-greengrass-deployment`, `my-greengrass-component`,
+# `my-ts-greengrass-component`); renaming a project there means renaming it
+# here.
+
+module "greengrass_artifact_bucket" {
+  source = "../../common/terraform/src/app/greengrass-deployment/my-greengrass-deployment-artifact-bucket"
+}
+
+# Reads the resolved recipe and built artifact its `<c>-artifact` target wrote,
+# so this only plans after `nx run-many --target build`.
+module "greengrass_py_component" {
+  source      = "../../common/terraform/src/app/greengrass-component/my-greengrass-component"
+  bucket_name = module.greengrass_artifact_bucket.bucket_name
+}
+
+module "greengrass_ts_component" {
+  source      = "../../common/terraform/src/app/greengrass-component/my-ts-greengrass-component"
+  bucket_name = module.greengrass_artifact_bucket.bucket_name
+}
+
+# `components` defaults to the deployment project's `src/components.json`, which
+# the connection generator populated with the Python component.
+module "greengrass_deployment" {
+  source = "../../common/terraform/src/app/greengrass-deployment/my-greengrass-deployment"
+
+  depends_on = [
+    module.greengrass_py_component,
+    module.greengrass_ts_component,
+  ]
+}

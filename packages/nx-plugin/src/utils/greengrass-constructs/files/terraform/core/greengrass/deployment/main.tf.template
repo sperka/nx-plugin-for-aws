@@ -1,0 +1,203 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "<%- awsProviderVersion %>"
+    }
+    awscc = {
+      source  = "hashicorp/awscc"
+      version = "<%- awsccProviderVersion %>"
+    }
+  }
+}
+
+variable "thing_group_name" {
+  description = "Creates a new aws_iot_thing_group and deploys to it. Mutually exclusive with thing_name and target_arn."
+  type        = string
+  default     = null
+}
+
+variable "thing_name" {
+  description = "Deploys to an existing thing, imported by name (not created). Mutually exclusive with thing_group_name and target_arn."
+  type        = string
+  default     = null
+}
+
+variable "target_arn" {
+  description = "Deploys to an existing thing or thing group, imported by ARN (not created). Mutually exclusive with thing_group_name and thing_name."
+  type        = string
+  default     = null
+}
+
+variable "parent_target_arn" {
+  description = "ARN of the parent deployment, for a subdeployment onto a nested thing group."
+  type        = string
+  default     = null
+}
+
+variable "deployment_name" {
+  type    = string
+  default = null
+}
+
+variable "components" {
+  description = "Components to deploy, keyed by ComponentName. `configuration_update.merge`, if set, must already be a JSON-encoded string (matching the awscc schema) - use jsonencode() when building this map."
+  type = map(object({
+    component_version = optional(string)
+    configuration_update = optional(object({
+      merge = optional(string)
+      reset = optional(list(string))
+    }))
+    run_with = optional(object({
+      posix_user   = optional(string)
+      windows_user = optional(string)
+      system_resource_limits = optional(object({
+        cpus   = optional(number)
+        memory = optional(number)
+      }))
+    }))
+  }))
+  default = {}
+}
+
+variable "deployment_policies" {
+  type = object({
+    failure_handling_policy = optional(string)
+    component_update_policy = optional(object({
+      timeout_in_seconds = optional(number)
+      action             = optional(string)
+    }))
+    configuration_validation_policy = optional(object({
+      timeout_in_seconds = optional(number)
+    }))
+  })
+  default = null
+}
+
+variable "iot_job_configuration" {
+  type    = any
+  default = null
+}
+
+variable "tags" {
+  type    = map(string)
+  default = {}
+}
+
+data "aws_partition" "current" {}
+data "aws_region" "current" {}
+data "aws_caller_identity" "current" {}
+
+locals {
+  target_inputs_provided = compact([
+    var.thing_group_name != null ? "thing_group_name" : "",
+    var.thing_name != null ? "thing_name" : "",
+    var.target_arn != null ? "target_arn" : "",
+  ])
+
+  creating_thing_group = var.thing_group_name != null
+
+  target_arn = (
+    var.thing_group_name != null ? aws_iot_thing_group.this[0].arn :
+    var.thing_name != null ? "arn:${data.aws_partition.current.partition}:iot:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:thing/${var.thing_name}" :
+    var.target_arn
+  )
+
+  # The CDK construct's `assertArnMatchesStack`: a literal `target_arn` naming
+  # another account, region or partition is a copy-paste mistake, and the plan
+  # can say so before the API does. `arn:<partition>:<service>:<region>:<account>:<resource>`,
+  # so a well-formed ARN has at least 6 colon-delimited fields.
+  # Terraform renders `error_message` whether or not its condition holds, and a
+  # null cannot go in a string template.
+  target_arn_display   = var.target_arn != null ? var.target_arn : ""
+  target_arn_fields    = var.target_arn != null ? split(":", var.target_arn) : []
+  target_arn_parsed    = length(local.target_arn_fields) > 5
+  target_arn_partition = local.target_arn_parsed ? local.target_arn_fields[1] : ""
+  target_arn_service   = local.target_arn_parsed ? local.target_arn_fields[2] : ""
+  target_arn_region    = local.target_arn_parsed ? local.target_arn_fields[3] : ""
+  target_arn_account   = local.target_arn_parsed ? local.target_arn_fields[4] : ""
+
+  target_arn_mismatches = !local.target_arn_parsed ? [] : compact([
+    local.target_arn_service != "iot" ? "service \"${local.target_arn_service}\" is not \"iot\"" : "",
+    local.target_arn_partition != "" && local.target_arn_partition != data.aws_partition.current.partition ? "partition \"${local.target_arn_partition}\" does not match \"${data.aws_partition.current.partition}\"" : "",
+    local.target_arn_account != "" && local.target_arn_account != data.aws_caller_identity.current.account_id ? "account \"${local.target_arn_account}\" does not match \"${data.aws_caller_identity.current.account_id}\"" : "",
+    local.target_arn_region != "" && local.target_arn_region != data.aws_region.current.region ? "region \"${local.target_arn_region}\" does not match \"${data.aws_region.current.region}\"" : "",
+  ])
+}
+
+resource "terraform_data" "guard" {
+  lifecycle {
+    precondition {
+      condition     = length(local.target_inputs_provided) == 1
+      error_message = "greengrass deployment requires exactly one of thing_group_name, thing_name or target_arn, got: ${length(local.target_inputs_provided) == 0 ? "(none)" : join(", ", local.target_inputs_provided)}."
+    }
+    # Evaluated at PLAN time only while this module block carries no
+    # `depends_on`. With one - which the generated app module's doc comment
+    # tells you to add, to order the deployment after its component versions -
+    # Terraform cannot read this module's data sources until that dependency
+    # exists, so the identity is unknown at plan and the precondition is
+    # deferred to apply. It still fails before the deployment is created,
+    # with this message instead of an API error.
+    #
+    # Independently of this check, the awscc provider validates `target_arn`
+    # against `arn:[^:]*:iot:[^:]*:[0-9]+:(thing|thinggroup)/.+` at plan time,
+    # which is what catches a malformed ARN or the wrong service.
+    #
+    # Under `terraform test` the mocked identity reaches this precondition
+    # through a nested module from either a root-level
+    # `mock_data "aws_caller_identity"` on `mock_provider "aws"` (what the
+    # generated plan test writes) or a per-run `override_data`. Note
+    # `expect_failures` cannot name a resource inside a module, so a test for
+    # this asserts on the plan error rather than expecting the failure.
+    precondition {
+      condition     = length(local.target_arn_mismatches) == 0
+      error_message = "target_arn \"${local.target_arn_display}\" looks like it belongs to a different environment than this configuration: ${join(", ", local.target_arn_mismatches)}."
+    }
+  }
+}
+
+resource "aws_iot_thing_group" "this" {
+  count = local.creating_thing_group ? 1 : 0
+  name  = var.thing_group_name
+  tags  = var.tags
+
+  depends_on = [terraform_data.guard]
+}
+
+# CloudFormation and the Cloud Control API both allow at most 10 deployment
+# resources added or deleted per operation, and deleting this resource
+# removes deployment management state - it does not uninstall components
+# already running on devices; that needs an explicit deployment revision
+# that drops them.
+resource "awscc_greengrassv2_deployment" "this" {
+  deployment_name       = var.deployment_name
+  target_arn            = local.target_arn
+  parent_target_arn     = var.parent_target_arn
+  components            = var.components
+  deployment_policies   = var.deployment_policies
+  iot_job_configuration = var.iot_job_configuration
+  tags                  = var.tags
+
+  depends_on = [terraform_data.guard]
+
+  # NOT `prevent_destroy`: `components` is a replacement property, so every
+  # deployment revision replaces this resource, and `prevent_destroy` would
+  # reject the plan rather than retain anything. `create_before_destroy` keeps
+  # the target under a managed deployment for the whole revision - the new
+  # revision is created first, and only then is the superseded one deleted.
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+output "target_arn" {
+  value = local.target_arn
+}
+
+output "deployment_id" {
+  value = awscc_greengrassv2_deployment.this.deployment_id
+}
+
+output "thing_group_arn" {
+  value = local.creating_thing_group ? aws_iot_thing_group.this[0].arn : null
+}

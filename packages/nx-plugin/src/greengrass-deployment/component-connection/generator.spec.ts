@@ -45,16 +45,24 @@ export const components: Record<string, DeploymentComponent> = {
 describe('greengrass-deployment#component-connection generator', () => {
   let tree: Tree;
 
-  const addDeploymentProject = (name = 'my-deployment') => {
+  const addDeploymentProject = (
+    name = 'my-deployment',
+    { iac }: { iac?: 'cdk' | 'terraform' } = {},
+  ) => {
     addProjectConfiguration(tree, `@proj/${name}`, {
       name: `@proj/${name}`,
       root: `packages/${name}`,
       projectType: 'library',
       sourceRoot: `packages/${name}/src`,
       targets: {},
-      metadata: { generator: 'greengrass-deployment' } as any,
+      metadata: { generator: 'greengrass-deployment', iac } as any,
     });
     tree.write(`packages/${name}/src/components.ts`, COMPONENTS_TS_TEMPLATE);
+    // Only a terraform deployment vends this bridge file - see
+    // `greengrass-deployment/files/components-json/components.json.template`.
+    if (iac === 'terraform') {
+      tree.write(`packages/${name}/src/components.json`, '{}\n');
+    }
     return name;
   };
 
@@ -149,6 +157,143 @@ Manifests:
     expect(tree.read(componentsPath(), 'utf-8')).toContain(
       `'com.example.MyComponent': { componentVersion: '1.0.0' }`,
     );
+  });
+
+  it('also syncs src/components.json for a terraform deployment', async () => {
+    const deployment = addDeploymentProject('my-deployment', {
+      iac: 'terraform',
+    });
+    const project = addComponentHostProject();
+
+    await greengrassDeploymentComponentConnectionGenerator(tree, {
+      sourceProject: `@proj/${deployment}`,
+      targetProject: project,
+      targetComponent: greengrassComponent() as any,
+    });
+
+    expect(tree.read(componentsPath(), 'utf-8')).toContain(
+      `'com.example.MyComponent': { componentVersion: '1.0.0' }`,
+    );
+    expect(
+      JSON.parse(tree.read('packages/my-deployment/src/components.json', 'utf-8')!),
+    ).toEqual({ 'com.example.MyComponent': { component_version: '1.0.0' } });
+
+    // Re-running is a no-op on both files, not a duplicate entry.
+    await greengrassDeploymentComponentConnectionGenerator(tree, {
+      sourceProject: `@proj/${deployment}`,
+      targetProject: project,
+      targetComponent: greengrassComponent() as any,
+    });
+    expect(
+      JSON.parse(tree.read('packages/my-deployment/src/components.json', 'utf-8')!),
+    ).toEqual({ 'com.example.MyComponent': { component_version: '1.0.0' } });
+  });
+
+  it('does not create src/components.json for a CDK deployment', async () => {
+    const deployment = addDeploymentProject('my-deployment', { iac: 'cdk' });
+    const project = addComponentHostProject();
+
+    await greengrassDeploymentComponentConnectionGenerator(tree, {
+      sourceProject: `@proj/${deployment}`,
+      targetProject: project,
+      targetComponent: greengrassComponent() as any,
+    });
+
+    expect(
+      tree.exists('packages/my-deployment/src/components.json'),
+    ).toBe(false);
+  });
+
+  it('refuses a terraform deployment whose src/components.json is missing', async () => {
+    // The Terraform `deployment` module's `components` default is
+    // `jsondecode(file(...))` on this file, so a silent no-op here would leave
+    // a workspace whose plan fails - and would leave `components.ts` looking
+    // like the source of truth when it is not.
+    const deployment = addDeploymentProject('my-deployment', {
+      iac: 'terraform',
+    });
+    tree.delete('packages/my-deployment/src/components.json');
+    const project = addComponentHostProject();
+
+    await expect(
+      greengrassDeploymentComponentConnectionGenerator(tree, {
+        sourceProject: `@proj/${deployment}`,
+        targetProject: project,
+        targetComponent: greengrassComponent() as any,
+      }),
+    ).rejects.toThrow(/components\.json is missing/);
+  });
+
+  it('refuses to continue when components.ts and components.json disagree', async () => {
+    const deployment = addDeploymentProject('my-deployment', {
+      iac: 'terraform',
+    });
+    const project = addComponentHostProject();
+
+    // Neither file rewrites an entry that is already there, so nothing a re-run
+    // does can settle a disagreement between them.
+    tree.write(
+      componentsPath(),
+      COMPONENTS_TS_TEMPLATE.replace(
+        '  // ',
+        `  'com.example.MyComponent': { componentVersion: '1.0.0' },\n  // `,
+      ),
+    );
+    tree.write(
+      'packages/my-deployment/src/components.json',
+      JSON.stringify({
+        'com.example.MyComponent': { component_version: '0.9.0' },
+      }),
+    );
+
+    await expect(
+      greengrassDeploymentComponentConnectionGenerator(tree, {
+        sourceProject: `@proj/${deployment}`,
+        targetProject: project,
+        targetComponent: greengrassComponent() as any,
+      }),
+    ).rejects.toThrow(/Terraform deploys the version in/);
+  });
+
+  it('warns about a stale components.json entry, like it does for components.ts', async () => {
+    const deployment = addDeploymentProject('my-deployment', {
+      iac: 'terraform',
+    });
+    const project = addComponentHostProject();
+    addRecipe({ componentVersion: '1.1.0' });
+    tree.write(
+      componentsPath(),
+      COMPONENTS_TS_TEMPLATE.replace(
+        '  // ',
+        `  'com.example.MyComponent': { componentVersion: '1.0.0' },\n  // `,
+      ),
+    );
+    tree.write(
+      'packages/my-deployment/src/components.json',
+      JSON.stringify({
+        'com.example.MyComponent': { component_version: '1.0.0' },
+      }),
+    );
+    const warn = vi
+      .spyOn(logger, 'warn')
+      .mockImplementation(() => undefined);
+
+    await greengrassDeploymentComponentConnectionGenerator(tree, {
+      sourceProject: `@proj/${deployment}`,
+      targetProject: project,
+      targetComponent: greengrassComponent() as any,
+    });
+
+    expect(
+      warn.mock.calls.filter(([message]) =>
+        String(message).includes("now declares '1.1.0'"),
+      ),
+    ).toHaveLength(2);
+    expect(
+      warn.mock.calls.some(([message]) =>
+        String(message).includes('components.json'),
+      ),
+    ).toBe(true);
   });
 
   it('adds a ts#greengrass-component to the deployment component map', async () => {

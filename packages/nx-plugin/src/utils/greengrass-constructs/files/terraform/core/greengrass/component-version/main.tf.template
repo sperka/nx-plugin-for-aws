@@ -1,0 +1,188 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "<%- awsProviderVersion %>"
+    }
+    awscc = {
+      source  = "hashicorp/awscc"
+      version = "<%- awsccProviderVersion %>"
+    }
+  }
+}
+
+variable "recipes_dir" {
+  description = "Directory holding the one resolved recipe YAML the <c>-artifact target writes (greengrass-build/recipes). Read at plan time."
+  type        = string
+}
+
+variable "artifacts_dir" {
+  description = "Directory holding the <c>-artifact target's artifact tree (greengrass-build/artifacts), containing exactly one file at <artifacts_dir>/<ComponentName>/<ComponentVersion>/."
+  type        = string
+}
+
+variable "bucket_name" {
+  description = "Name of the shared artifact bucket this version's artifact is uploaded to."
+  type        = string
+}
+
+locals {
+  placeholder_prefix = "s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/"
+
+  recipe_files      = fileset(var.recipes_dir, "*.y*ml")
+  recipe_candidate  = try(tolist(local.recipe_files)[0], null)
+  recipe_path       = "${var.recipes_dir}/${coalesce(local.recipe_candidate, "__no_recipe_found__")}"
+  recipe            = try(yamldecode(file(local.recipe_path)), {})
+  component_name    = try(local.recipe.ComponentName, "")
+  component_version = try(local.recipe.ComponentVersion, "")
+
+  artifact_dir       = "${var.artifacts_dir}/${local.component_name}/${local.component_version}"
+  artifact_files     = try(fileset(local.artifact_dir, "*"), [])
+  artifact_candidate = try(tolist(local.artifact_files)[0], null)
+  artifact_basename  = coalesce(local.artifact_candidate, "__no_artifact_found__")
+  artifact_path      = "${local.artifact_dir}/${local.artifact_basename}"
+  sha256             = try(filesha256(local.artifact_path), "")
+
+  destination_key_prefix = "${local.component_name}/${local.component_version}/${local.sha256}/"
+  replacement_prefix     = "s3://${var.bucket_name}/${local.destination_key_prefix}"
+
+  # Rewrite only `Manifests[].Artifacts[].Uri` carrying the GDK placeholder
+  # prefix, leaving every other field - including an artifact this module
+  # doesn't manage, such as a `docker:` URI or an already-published `s3://`
+  # one - exactly as authored. A fresh object is built rather than mutated in
+  # place, since HCL has no in-place mutation (unlike the CDK construct's
+  # `substituteArtifactUris`, which rewrites the parsed recipe object directly).
+  # A manifest without `Artifacts`, and a recipe without `Manifests`, keep
+  # exactly the keys they were authored with rather than gaining an empty list.
+  # A conditional `merge` cannot express that - HCL requires both arms of a
+  # conditional to have the same type, and "with the key" and "without it" are
+  # different object types - so the replacement key is expanded from a zero- or
+  # one-element list instead.
+  substituted_manifests = [
+    for manifest in try(local.recipe.Manifests, []) : merge(manifest, [
+      for _ in range(can(manifest.Artifacts) ? 1 : 0) : {
+        Artifacts = [
+          for artifact in manifest.Artifacts : merge(artifact, {
+            Uri = (
+              startswith(artifact.Uri, local.placeholder_prefix)
+              ? "${local.replacement_prefix}${substr(artifact.Uri, length(local.placeholder_prefix), -1)}"
+              : artifact.Uri
+            )
+          })
+        ]
+      }
+    ]...)
+  ]
+  substituted_recipe = merge(local.recipe, [
+    for _ in range(can(local.recipe.Manifests) ? 1 : 0) : {
+      Manifests = local.substituted_manifests
+    }
+  ]...)
+
+  substituted_basenames = distinct(flatten([
+    for manifest in try(local.recipe.Manifests, []) : [
+      for artifact in try(manifest.Artifacts, []) : substr(artifact.Uri, length(local.placeholder_prefix), -1)
+      if startswith(artifact.Uri, local.placeholder_prefix)
+    ]
+  ]))
+  mismatched_basenames = [for name in local.substituted_basenames : name if name != local.artifact_basename]
+}
+
+# Synth-time-equivalent guard. Terraform has no shared mutable state across
+# separate module calls in one plan (unlike the CDK construct's module-scoped
+# drift map), so the "two different constructs claim the same version with
+# different content in one synth" check has no direct analogue here - that
+# case is only caught by the AWS API at apply time (see the comment on the
+# `awscc_greengrassv2_component_version` resource below).
+resource "terraform_data" "guard" {
+  lifecycle {
+    precondition {
+      condition     = length(local.recipe_files) == 1
+      error_message = "Expected exactly one resolved recipe in \"${var.recipes_dir}\" - run the component's \"-artifact\" target first. Found ${length(local.recipe_files)}."
+    }
+    precondition {
+      condition     = length(local.artifact_files) == 1
+      error_message = "Expected exactly one artifact for ${local.component_name}@${local.component_version} in \"${local.artifact_dir}\" - run the component's \"-artifact\" target first. Found ${length(local.artifact_files)}."
+    }
+    precondition {
+      condition     = length(local.mismatched_basenames) == 0
+      error_message = "\"${local.recipe_path}\" references artifact(s) ${join(", ", local.mismatched_basenames)}, but the only file built for ${local.component_name}@${local.component_version} is \"${local.artifact_basename}\". Make the recipe's artifact URI end in that name."
+    }
+  }
+}
+
+# The key carries the artifact's own sha256, so changed content is always a
+# new key and this resource is replaced rather than updated - which DELETES
+# the object at the outgoing key. That diverges from the CDK construct, whose
+# `BucketDeployment` sets `retainOnDelete` and leaves the old object in place;
+# see the note on `awscc_greengrassv2_component_version` below for why this
+# path drops both the outgoing version and its bytes together.
+resource "aws_s3_object" "artifact" {
+  bucket      = var.bucket_name
+  key         = "${local.destination_key_prefix}${local.artifact_basename}"
+  source      = local.artifact_path
+  source_hash = local.sha256
+
+  depends_on = [terraform_data.guard]
+
+  # Upload the incoming object before deleting the outgoing one, so the
+  # component version created below can never point at a key that does not
+  # exist yet.
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Component versions are immutable: `awscc_greengrassv2_component_version`
+# replaces on any `inline_recipe` change, and `CreateComponentVersion` itself
+# rejects a resubmission of an existing version under different content - so
+# a same-version rebuild with different bytes fails at apply time rather than
+# silently corrupting an already-published version.
+resource "awscc_greengrassv2_component_version" "this" {
+  inline_recipe = yamlencode(local.substituted_recipe)
+
+  # Referencing `var.bucket_name` inside `inline_recipe` does not make
+  # Terraform wait for the upload - an explicit `depends_on` on the object
+  # itself is required, mirroring the CDK construct's
+  # `componentVersion.node.addDependency(bucketDeployment)`.
+  depends_on = [aws_s3_object.artifact]
+
+  # NOT `prevent_destroy`, and so NOT equivalent to the CDK construct's
+  # `RemovalPolicy.RETAIN` default. `inline_recipe` is a replacement property,
+  # and `prevent_destroy` rejects a plan that replaces the resource - it would
+  # refuse the ordinary "bump ComponentVersion in recipe.yaml and re-deploy"
+  # workflow outright, rather than retaining anything. CloudFormation's
+  # `UpdateReplacePolicy: Retain` has no Terraform analogue: on this path a
+  # replaced version is DELETED from the Greengrass registry, along with the
+  # artifact object above.
+  #
+  # `create_before_destroy` is what preserves the safety property RETAIN was
+  # there for. Terraform's default replace order destroys first, which would
+  # delete an already-published version and re-create it under the same
+  # (ComponentName, ComponentVersion) with different bytes - exactly the silent
+  # corruption `CreateComponentVersion` refuses when the create comes first.
+  # It also orders the whole graph correctly on a version bump: the new version
+  # is published, the deployment revised onto it, and only then is the outgoing
+  # version deleted, by which point no deployment references it.
+  #
+  # To keep a published version after removing it from Terraform's management
+  # (the closest thing to RETAIN here), drop it from state before applying:
+  # `terraform state rm '<address>'` for a bump, or a `removed` block with
+  # `lifecycle { destroy = false }` when deleting the module from the
+  # configuration entirely.
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+output "component_name" {
+  value = local.component_name
+}
+
+output "component_version" {
+  value = local.component_version
+}
+
+output "arn" {
+  value = awscc_greengrassv2_component_version.this.arn
+}

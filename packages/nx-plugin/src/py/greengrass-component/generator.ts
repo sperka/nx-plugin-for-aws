@@ -130,9 +130,8 @@ const resolveGreengrassPublisher = (tree: Tree): string =>
  * Generates an AWS IoT Greengrass v2 component on an existing Python project:
  * packaging and local-deployment targets (`<c>-vendor`, `<c>-artifact`,
  * `<c>-deploy-local`, `<c>-logs`), plus, unless `--infra none`, a
- * `GreengrassComponentVersion` CDK construct that publishes the built
- * artifact. `--iac terraform` throws: neither `AWS::GreengrassV2` resource
- * exists in the pinned `hashicorp/aws` Terraform provider.
+ * `GreengrassComponentVersion` CDK construct (or Terraform module, via the
+ * `hashicorp/awscc` provider) that publishes the built artifact.
  */
 export const pyGreengrassComponentGenerator = async (
   tree: Tree,

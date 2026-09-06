@@ -25,9 +25,6 @@ interface RunCliOpts {
  * Pass `{ preferInstallDependencies: true }` to install after every generator
  * instead — the idempotency test needs this so lockfiles (including `uv.lock`)
  * are fully synced before it snapshots the workspace.
- *
- * Generators whose infrastructure only exists for CDK cannot live here, since
- * the Terraform pipeline runs the same list — see `runCdkOnlyGeneratorMatrix`.
  */
 export const runGeneratorMatrix = async (
   opts: RunCliOpts,
@@ -544,29 +541,11 @@ export const runGeneratorMatrix = async (
     `generate @aws/nx-plugin:ts#nx-migration --project=@e2e-test/plugin --name=upgrade-framework --description="Upgrade the framework and reconcile call sites" --kind=hybrid --no-interactive${deferFlag}`,
     opts,
   );
-};
-
-/**
- * Generators the shared matrix above cannot host, because their infrastructure
- * is CDK-only: the Greengrass constructs throw on `--iac terraform`, since the
- * `AWS::GreengrassV2` resources exist only in the `hashicorp/awscc` provider,
- * which no workspace pins. A generator inherits the workspace's provider, so
- * these run from the CDK smoke test and the idempotency test only.
- *
- * Takes the same install-deferral contract as `runGeneratorMatrix`.
- */
-export const runCdkOnlyGeneratorMatrix = async (
-  opts: RunCliOpts,
-  {
-    preferInstallDependencies = false,
-  }: { preferInstallDependencies?: boolean } = {},
-) => {
-  const deferFlag = preferInstallDependencies
-    ? ''
-    : ' --prefer-install-dependencies=false';
 
   // Greengrass component, escalated to a published component version, plus
-  // the deployment project that publishes and deploys it. A dedicated host
+  // the deployment project that publishes and deploys it. `AWS::GreengrassV2`
+  // resources exist in the `hashicorp/awscc` Terraform provider (pinned), so
+  // this runs under both the CDK and Terraform pipelines. A dedicated host
   // project: vendoring uses `--only-binary :all:`, which refuses the
   // source-built workspace members other matrix entries add to the shared
   // py_project — and one component per project is the documented production
