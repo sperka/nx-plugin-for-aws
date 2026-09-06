@@ -830,26 +830,16 @@ main();
   - packages/*
   - packages/common/*
 catalog:
+  '@types/node': 26.4.1
   vite: 8.2.2
   vitest: 4.1.11
   '@vitest/coverage-v8': 4.1.11
+  jsdom: 29.1.1
+  '@nx/vitest': 23.2.0
   js-yaml: 4.3.2
   '@types/js-yaml': 4.0.9
-  tsx: 4.23.12
-  rolldown: 1.2.6
-",
-  "vitest.config.ts": "import { defineConfig } from 'vitest/config';
-
-export default defineConfig({
-  test: {
-    projects: [
-      '**/vite.config.{mjs,js,ts,mts}',
-      '**/vitest.config.{mjs,js,ts,mts}',
-      '!vitest.config.{mjs,js,ts,mts}',
-      '!vite.config.{mjs,js,ts,mts}',
-    ],
-  },
-});
+  tsx: 4.23.13
+  rolldown: 1.2.7
 ",
 }
 `;

@@ -250,12 +250,15 @@ def test_publish_heartbeat_publishes_to_own_topic():
   - packages/*
   - packages/common/*
 catalog:
+  '@types/node': 26.4.1
   vite: 8.2.2
   vitest: 4.1.11
   '@vitest/coverage-v8': 4.1.11
+  jsdom: 29.1.1
+  '@nx/vitest': 23.2.0
   js-yaml: 4.3.2
   '@types/js-yaml': 4.0.9
-  tsx: 4.23.12
+  tsx: 4.23.13
 ",
 }
 `;
