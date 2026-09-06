@@ -198,7 +198,7 @@ Manifests:
 ```
 
 - The `BUCKET_NAME` / `COMPONENT_NAME` / `COMPONENT_VERSION` placeholders are the same ones GDK uses. `<c>-artifact` copies them through to the resolved recipe untouched; a later publishing step substitutes them with the real bucket and key.
-- The `Uri` basename must stay `<component-name>.zip`, because that is the name `<c>-artifact` gives the zip, and Greengrass unarchives it to `{artifacts:decompressedPath}/<component-name>/` — which is where the `Run` script looks for `index.js`, the bundle's output filename. `<c>-artifact` fails with an explicit message if you break that pairing.
+- The `Uri` basename must stay `<component-name>.zip`, because that is the name `<c>-artifact` gives the zip, and Greengrass unarchives it to `{artifacts:decompressedPath}/<component-name>/` — which is where the matching `Run` script looks for `index.js`, the bundle's output filename. `<c>-artifact` fails with an explicit message if you break that pairing. This holds even with `platform: linux-amd64-arm64`: a rolldown bundle is pure JavaScript, so it serves both architectures under the same `<component-name>.zip` name, referenced by two manifests instead of one.
 - The device must have a **modern `node` binary on `PATH`** — the bundle is pure JavaScript with no ABI pinning (unlike Python's interpreter-version trap), but it still needs Node.js 18 or later to run.
 
 ### Component version immutability
@@ -286,7 +286,45 @@ This is `npm install`, not `npm ci` — `npm ci` requires a `package-lock.json` 
 
 ## Supported platforms
 
-The `platform` option only affects the recipe manifest's `Platform` block - the bundle itself is pure JavaScript and is not platform-specific. Multi-architecture manifests (one recipe covering both `linux-amd64` and `linux-arm64`) and Windows cores are deferred, matching `py#greengrass-component`.
+The `platform` option only affects the recipe manifest's `Platform` block - the bundle itself is pure JavaScript and is not platform-specific. Multi-architecture manifests are supported for `linux-amd64` plus `linux-arm64` via `platform: linux-amd64-arm64`. Windows cores, `linux-any` and any third architecture remain deferred, matching `py#greengrass-component`.
+
+<OptionFilter when={{ platform: 'linux-amd64-arm64' }} description="linux-amd64-arm64 writes two manifests over one bundle">
+
+### Multi-architecture components (`platform: linux-amd64-arm64`)
+
+Because the bundle is pure JavaScript, `platform: linux-amd64-arm64` writes **two manifests over the same one artifact** - nothing is vendored per architecture, unlike the Python component:
+
+```yaml
+Manifests:
+  - Platform:
+      os: linux
+      architecture: amd64
+    Artifacts:
+      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<component-name>.zip
+        Unarchive: ZIP
+    Lifecycle:
+      Run: node {artifacts:decompressedPath}/<component-name>/index.js
+  - Platform:
+      os: linux
+      architecture: aarch64
+    Artifacts:
+      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<component-name>.zip
+        Unarchive: ZIP
+    Lifecycle:
+      Run: node {artifacts:decompressedPath}/<component-name>/index.js
+```
+
+<OptionFilter when={{ ipc: true }} description="ipc=true adds the same Install step to every manifest">
+
+With `ipc: true` each manifest also carries the same `Install` line shown under [The `aws-crt` native addon](#the-aws-crt-native-addon) above, repeated identically: the on-device `npm install` resolves `aws-crt` for the device's own architecture, so one bundle plus one on-device install step covers both.
+
+</OptionFilter>
+
+</OptionFilter>
+
+### Changing `platform` after the first run
+
+`platform` shapes only the **first** generation of `recipe.yaml`, whichever value you pick. A later run with a different `platform` — including a run that simply omits the option, since it defaults to `linux-arm64` — is refused, because `recipe.yaml` is user-owned and never rewritten. The error names the platform to re-run with if you did not mean to change it, and otherwise prints the full `Manifests` block the new platform expects (with the `Install` step included when `ipc: true`) to paste in by hand, together with the reminder to bump `ComponentVersion`, since published versions are immutable.
 
 ### Nucleus classic vs nucleus lite
 

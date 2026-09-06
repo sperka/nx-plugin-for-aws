@@ -17,9 +17,9 @@ import { pathToFileURL } from 'node:url';
 import type { Tree } from '@nx/devkit';
 import ts from 'typescript';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import terraformProjectGenerator from '../../terraform/project/generator.js';
 import { declareDependencies } from '../declared-dependencies.js';
 import { createTreeUsingTsSolutionSetup } from '../test.js';
-import terraformProjectGenerator from '../../terraform/project/generator.js';
 import {
   addGreengrassComponentAppConstruct,
   addGreengrassCoreConstructs,
@@ -247,6 +247,57 @@ const writeBuildOutput = (
   writeFileSync(
     join(artifactsDir, componentName, componentVersion, artifactFileName),
     artifactContent,
+  );
+  return { recipesDir, artifactsDir };
+};
+
+/**
+ * Writes a `greengrass-build`-shaped recipe declaring one manifest per
+ * artifact basename in {@link contentsByBasename} (or `manifestsPerArtifact`
+ * manifests per basename, for the TypeScript "one artifact, several
+ * manifests" shape), plus one built file per basename.
+ */
+const writeMultiArtifactBuildOutput = (
+  componentName: string,
+  componentVersion: string,
+  contentsByBasename: Readonly<Record<string, string>>,
+  { manifestsPerArtifact = 1 }: { manifestsPerArtifact?: number } = {},
+): { recipesDir: string; artifactsDir: string } => {
+  const recipesDir = join(tmpDir, componentName, componentVersion, 'recipes');
+  const artifactsDir = join(
+    tmpDir,
+    componentName,
+    componentVersion,
+    'artifacts',
+  );
+  mkdirSync(recipesDir, { recursive: true });
+  mkdirSync(join(artifactsDir, componentName, componentVersion), {
+    recursive: true,
+  });
+
+  const manifestLines: string[] = [];
+  for (const [basename, content] of Object.entries(contentsByBasename)) {
+    writeFileSync(
+      join(artifactsDir, componentName, componentVersion, basename),
+      content,
+    );
+    for (let i = 0; i < manifestsPerArtifact; i++) {
+      manifestLines.push(
+        '  - Artifacts:',
+        `      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/${basename}`,
+      );
+    }
+  }
+
+  writeFileSync(
+    join(recipesDir, `${componentName}-${componentVersion}.yaml`),
+    [
+      'RecipeFormatVersion: 2020-01-25',
+      `ComponentName: ${componentName}`,
+      `ComponentVersion: ${componentVersion}`,
+      'Manifests:',
+      ...manifestLines,
+    ].join('\n'),
   );
   return { recipesDir, artifactsDir };
 };
@@ -493,6 +544,163 @@ describe('GreengrassComponentVersion', () => {
           { recipesDir, artifactsDir, bucket },
         ),
     ).toThrow(/renamed-by-hand\.zip/);
+  });
+
+  it("keys a single-artifact version by that artifact's own sha256", () => {
+    const { recipesDir, artifactsDir } = writeBuildOutput(
+      'com.example.SingleHashTest',
+      '1.0.0',
+      'artifact bytes v1',
+    );
+
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
+      stack,
+      'ArtifactBucket',
+    );
+    new ComponentVersionModule.GreengrassComponentVersion(
+      stack,
+      'ComponentVersion',
+      { recipesDir, artifactsDir, bucket },
+    );
+
+    const resources = assertionsLib.Template.fromStack(stack).toJSON()
+      .Resources as Record<string, any>;
+    const bucketDeploymentResource = Object.values(resources).find(
+      (r: any) => r.Type === 'Custom::CDKBucketDeployment',
+    ) as any;
+
+    // Literal, not a snapshot - a future change to this compatibility hinge
+    // must be a deliberate change to the construct's own formula, and `-u`
+    // is not an acceptable fix for a failure here.
+    const expectedSha256 = sha256Of('artifact bytes v1');
+    expect(bucketDeploymentResource.Properties.DestinationBucketKeyPrefix).toBe(
+      `com.example.SingleHashTest/1.0.0/${expectedSha256}/`,
+    );
+  });
+
+  it('keys a two-artifact version by the sorted name-and-hash digest and uploads both under one prefix', () => {
+    const { recipesDir, artifactsDir } = writeMultiArtifactBuildOutput(
+      'com.example.TwoArtifactTest',
+      '1.0.0',
+      {
+        'my-component-amd64.zip': 'amd64 bytes',
+        'my-component-aarch64.zip': 'aarch64 bytes',
+      },
+    );
+
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
+      stack,
+      'ArtifactBucket',
+    );
+    new ComponentVersionModule.GreengrassComponentVersion(
+      stack,
+      'ComponentVersion',
+      { recipesDir, artifactsDir, bucket },
+    );
+
+    const resources = assertionsLib.Template.fromStack(stack).toJSON()
+      .Resources as Record<string, any>;
+    const bucketDeployments = Object.values(resources).filter(
+      (r: any) => r.Type === 'Custom::CDKBucketDeployment',
+    );
+    // Two artifacts uploaded from one source directory - one BucketDeployment,
+    // not two.
+    expect(bucketDeployments).toHaveLength(1);
+
+    // Recomputed independently of the construct's own implementation: sorted
+    // "<name>:<sha256>" lines joined by "\n", hashed.
+    const hashes: Record<string, string> = {
+      'my-component-aarch64.zip': sha256Of('aarch64 bytes'),
+      'my-component-amd64.zip': sha256Of('amd64 bytes'),
+    };
+    const sortedNames = Object.keys(hashes).sort();
+    const expectedAggregate = createHash('sha256')
+      .update(sortedNames.map((n) => `${n}:${hashes[n]}`).join('\n'))
+      .digest('hex');
+
+    expect(
+      (bucketDeployments[0] as any).Properties.DestinationBucketKeyPrefix,
+    ).toBe(`com.example.TwoArtifactTest/1.0.0/${expectedAggregate}/`);
+
+    const componentVersionResource = Object.values(resources).find(
+      (r: any) => r.Type === 'AWS::GreengrassV2::ComponentVersion',
+    ) as any;
+    const renderedRecipe = (
+      componentVersionResource.Properties.InlineRecipe[
+        'Fn::Join'
+      ][1] as unknown[]
+    )
+      .filter((part): part is string => typeof part === 'string')
+      .join('');
+    const prefix = `/com.example.TwoArtifactTest/1.0.0/${expectedAggregate}/`;
+    expect(renderedRecipe).toContain(`${prefix}my-component-amd64.zip`);
+    expect(renderedRecipe).toContain(`${prefix}my-component-aarch64.zip`);
+  });
+
+  it('throws when the build produced an artifact no manifest references', () => {
+    const { recipesDir, artifactsDir } = writeMultiArtifactBuildOutput(
+      'com.example.Unreferenced',
+      '1.0.0',
+      { 'my-component-amd64.zip': 'amd64 bytes' },
+    );
+    // A stray file the recipe never references - eg an architecture whose
+    // manifest was never added.
+    writeFileSync(
+      join(
+        artifactsDir,
+        'com.example.Unreferenced',
+        '1.0.0',
+        'my-component-aarch64.zip',
+      ),
+      'aarch64 bytes',
+    );
+
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
+      stack,
+      'ArtifactBucket',
+    );
+
+    expect(
+      () =>
+        new ComponentVersionModule.GreengrassComponentVersion(
+          stack,
+          'ComponentVersion',
+          { recipesDir, artifactsDir, bucket },
+        ),
+    ).toThrow(/my-component-aarch64\.zip.*no manifest.*references/s);
+  });
+
+  it('accepts one artifact referenced by two manifests', () => {
+    // The TypeScript multi-arch shape: a single bundle serves both
+    // architectures, so two manifests reference the same basename.
+    const { recipesDir, artifactsDir } = writeMultiArtifactBuildOutput(
+      'com.example.SharedArtifact',
+      '1.0.0',
+      { 'my-component.zip': 'bundle bytes' },
+      { manifestsPerArtifact: 2 },
+    );
+
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
+      stack,
+      'ArtifactBucket',
+    );
+
+    expect(
+      () =>
+        new ComponentVersionModule.GreengrassComponentVersion(
+          stack,
+          'ComponentVersion',
+          { recipesDir, artifactsDir, bucket },
+        ),
+    ).not.toThrow();
   });
 
   it('fails synth when the same version is claimed twice with a different content hash', () => {
@@ -845,9 +1053,7 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
 
     const content = readCore('component-version');
-    expect(content).toContain(
-      'depends_on = [aws_s3_object.artifact]',
-    );
+    expect(content).toContain('depends_on = [aws_s3_object.artifact]');
   });
 
   it('uploads the artifact under a sha256-hashed key prefix, and substitutes only the GDK placeholder Uri', async () => {
@@ -859,24 +1065,59 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     expect(content).toContain(
       'destination_key_prefix = "${local.component_name}/${local.component_version}/${local.sha256}/"',
     );
-    expect(content).toContain('key         = "${local.destination_key_prefix}${local.artifact_basename}"');
+    // for_each over the hash map - key names come from a `fileset`, always
+    // known at plan time.
+    expect(content).toContain('for_each = local.artifact_hashes');
+    expect(content).toContain(
+      'key         = "${local.destination_key_prefix}${each.key}"',
+    );
     expect(content).toContain(
       'placeholder_prefix = "s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/"',
     );
     // Only the placeholder-prefixed Uri is rewritten; every other Uri (and
     // every other field) passes through the `merge(...)` untouched.
-    expect(content).toContain('startswith(artifact.Uri, local.placeholder_prefix)');
+    expect(content).toContain(
+      'startswith(artifact.Uri, local.placeholder_prefix)',
+    );
     expect(content).toContain(': artifact.Uri');
   });
 
-  it('guards against more than one recipe or artifact file, and a recipe/artifact basename mismatch', async () => {
+  it('guards against a missing recipe or artifact, and basename mismatches in both directions', async () => {
     await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
 
     const content = readCore('component-version');
     expect(content).toContain('resource "terraform_data" "guard"');
     expect(content).toContain('length(local.recipe_files) == 1');
-    expect(content).toContain('length(local.artifact_files) == 1');
-    expect(content).toContain('length(local.mismatched_basenames) == 0');
+    expect(content).toContain('length(local.artifact_files) >= 1');
+    expect(content).toContain('length(local.missing_basenames) == 0');
+    expect(content).toContain('length(local.unreferenced_artifacts) == 0');
+  });
+
+  it('keys a single artifact by filesha256 and several by the sorted aggregate', async () => {
+    await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
+
+    const content = readCore('component-version');
+    // Both conditional arms, verbatim - the one-file arm must stay the
+    // artifact's own hash (matching every already-published version's key and
+    // the CDK construct's formula), never routed through the aggregate.
+    expect(content).toContain(
+      'length(local.artifact_basenames) == 1 ? local.artifact_hashes[local.artifact_basenames[0]] :',
+    );
+    expect(content).toContain(
+      'sha256(join("\\n", [for f in local.artifact_basenames : "${f}:${local.artifact_hashes[f]}"]))',
+    );
+    // Terraform is not evaluated here, so also assert the formula is what the
+    // uploaded key and the substituted recipe Uris are actually built from -
+    // otherwise the two arms above could be dead locals.
+    expect(content).toContain(
+      'destination_key_prefix = "${local.component_name}/${local.component_version}/${local.sha256}/"',
+    );
+    expect(content).toContain(
+      'replacement_prefix     = "s3://${var.bucket_name}/${local.destination_key_prefix}"',
+    );
+    // Each object carries its own file's hash, so a change to one artifact
+    // replaces only that object - under a prefix the aggregate moved.
+    expect(content).toContain('source_hash = each.value');
   });
 
   it('deployment requires exactly one of thing_group_name, thing_name or target_arn', async () => {
@@ -884,7 +1125,9 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
 
     const content = readCore('deployment');
     expect(content).toContain('length(local.target_inputs_provided) == 1');
-    expect(content).toContain('requires exactly one of thing_group_name, thing_name or target_arn');
+    expect(content).toContain(
+      'requires exactly one of thing_group_name, thing_name or target_arn',
+    );
   });
 
   it('cross-checks a literal target_arn against the caller identity, region and partition', async () => {
@@ -926,7 +1169,9 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
 
     const content = readCore('artifact-bucket');
-    expect(content).toContain('resource "aws_iam_role_policy" "token_exchange_read"');
+    expect(content).toContain(
+      'resource "aws_iam_role_policy" "token_exchange_read"',
+    );
     expect(content).toContain('Action   = "s3:GetObject"');
     expect(content).toContain(
       'Resource = "${local.bucket_arn}/${var.token_exchange_key_prefix}"',
@@ -1013,7 +1258,8 @@ describe('terraform app modules', () => {
         deploymentPoliciesLiteral: undefined,
         deploymentPoliciesLiteralTf: undefined,
         libraryImportPath: '@proj/my-deployment',
-        componentsJsonPathFromRoot: 'packages/my-deployment/src/components.json',
+        componentsJsonPathFromRoot:
+          'packages/my-deployment/src/components.json',
       },
       declaration,
     );
@@ -1027,7 +1273,9 @@ describe('terraform app modules', () => {
 
     const deploymentContent = tree.read(deploymentPath, 'utf-8')!;
     expect(deploymentContent).toContain('thing_group_name = "my-things"');
-    expect(deploymentContent).toContain('packages/my-deployment/src/components.json');
+    expect(deploymentContent).toContain(
+      'packages/my-deployment/src/components.json',
+    );
     // Neither module block references the other - the caller wires the
     // ordering itself with `depends_on` on the `deployment` module block.
     expect(deploymentContent).not.toContain('module "artifact_bucket"');
@@ -1058,7 +1306,8 @@ describe('terraform app modules', () => {
         deploymentPoliciesLiteral: `{ failureHandlingPolicy: 'DO_NOTHING' }`,
         deploymentPoliciesLiteralTf: `{ failure_handling_policy = "DO_NOTHING" }`,
         libraryImportPath: '@proj/my-deployment',
-        componentsJsonPathFromRoot: 'packages/my-deployment/src/components.json',
+        componentsJsonPathFromRoot:
+          'packages/my-deployment/src/components.json',
       },
       declaration,
     );

@@ -5,6 +5,7 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -71,12 +72,16 @@ interface RecipeUtilsModule {
   loadRecipe: (recipePath: string) => Record<string, unknown>;
   validateRecipe: (
     recipe: Record<string, unknown>,
-    componentDirName: string,
+    artifactBaseNames: readonly string[],
   ) => {
     componentName: string;
     componentVersion: string;
     recipe: Record<string, unknown>;
   };
+  validateManifestArchitectures: (
+    recipe: Record<string, unknown>,
+    baseNameByArchitecture: Readonly<Record<string, string>>,
+  ) => void;
   readResolvedRecipe: (recipesDir: string) => {
     componentName: string;
     componentVersion: string;
@@ -115,6 +120,7 @@ function readZipEntries(buf: Buffer): { name: string; data: Buffer }[] {
 describe('greengrass recipe-utils.ts', () => {
   let loadRecipe: RecipeUtilsModule['loadRecipe'];
   let validateRecipe: RecipeUtilsModule['validateRecipe'];
+  let validateManifestArchitectures: RecipeUtilsModule['validateManifestArchitectures'];
   let readResolvedRecipe: RecipeUtilsModule['readResolvedRecipe'];
   let tmpDir: string;
 
@@ -124,6 +130,7 @@ describe('greengrass recipe-utils.ts', () => {
     );
     loadRecipe = mod.loadRecipe;
     validateRecipe = mod.validateRecipe;
+    validateManifestArchitectures = mod.validateManifestArchitectures;
     readResolvedRecipe = mod.readResolvedRecipe;
   });
 
@@ -159,28 +166,28 @@ describe('greengrass recipe-utils.ts', () => {
   describe('validateRecipe', () => {
     it('should accept a valid recipe and resolve its name and version', () => {
       const recipe = validRecipe();
-      const resolved = validateRecipe(recipe, 'my-component');
+      const resolved = validateRecipe(recipe, ['my-component']);
       expect(resolved.componentName).toBe('com.example.MyComponent');
       expect(resolved.componentVersion).toBe('1.0.0');
     });
 
     it('should preserve unknown keys untouched', () => {
       const recipe = { ...validRecipe(), SomeUnknownKey: { nested: true } };
-      const resolved = validateRecipe(recipe, 'my-component');
+      const resolved = validateRecipe(recipe, ['my-component']);
       expect(resolved.recipe.SomeUnknownKey).toEqual({ nested: true });
     });
 
     it('should reject a missing ComponentName', () => {
       const recipe = validRecipe() as Record<string, unknown>;
       delete recipe.ComponentName;
-      expect(() => validateRecipe(recipe, 'my-component')).toThrow(
+      expect(() => validateRecipe(recipe, ['my-component'])).toThrow(
         /ComponentName is required/,
       );
     });
 
     it('should reject illegal ComponentName characters', () => {
       const recipe = { ...validRecipe(), ComponentName: 'com/example!bad' };
-      expect(() => validateRecipe(recipe, 'my-component')).toThrow(
+      expect(() => validateRecipe(recipe, ['my-component'])).toThrow(
         /may only contain letters, numbers/,
       );
     });
@@ -190,21 +197,21 @@ describe('greengrass recipe-utils.ts', () => {
         ...validRecipe(),
         ComponentName: 'aws.greengrass.MyComponent',
       };
-      expect(() => validateRecipe(recipe, 'my-component')).toThrow(
+      expect(() => validateRecipe(recipe, ['my-component'])).toThrow(
         /reserved prefix/,
       );
     });
 
     it('should reject a ComponentName over 128 characters', () => {
       const recipe = { ...validRecipe(), ComponentName: 'a'.repeat(129) };
-      expect(() => validateRecipe(recipe, 'my-component')).toThrow(
+      expect(() => validateRecipe(recipe, ['my-component'])).toThrow(
         /at most 128 characters/,
       );
     });
 
     it('should reject a non-semver ComponentVersion', () => {
       const recipe = { ...validRecipe(), ComponentVersion: 'v1.0' };
-      expect(() => validateRecipe(recipe, 'my-component')).toThrow(
+      expect(() => validateRecipe(recipe, ['my-component'])).toThrow(
         /valid semver version/,
       );
     });
@@ -220,7 +227,7 @@ describe('greengrass recipe-utils.ts', () => {
           },
         ],
       };
-      expect(() => validateRecipe(recipe, 'my-component')).toThrow(
+      expect(() => validateRecipe(recipe, ['my-component'])).toThrow(
         /Run script path must match the artifact zip base name/,
       );
     });
@@ -247,7 +254,7 @@ describe('greengrass recipe-utils.ts', () => {
           },
         ],
       };
-      expect(() => validateRecipe(recipe, 'my-component')).toThrow(
+      expect(() => validateRecipe(recipe, ['my-component'])).toThrow(
         /Run script path must match the artifact zip base name/,
       );
     });
@@ -270,7 +277,7 @@ describe('greengrass recipe-utils.ts', () => {
           },
         ],
       };
-      expect(() => validateRecipe(recipe, 'my-component')).not.toThrow();
+      expect(() => validateRecipe(recipe, ['my-component'])).not.toThrow();
     });
 
     it('should reject a recipe declaring no artifact for the component zip', () => {
@@ -282,7 +289,7 @@ describe('greengrass recipe-utils.ts', () => {
           },
         },
       ];
-      expect(() => validateRecipe(recipe, 'my-component')).toThrow(
+      expect(() => validateRecipe(recipe, ['my-component'])).toThrow(
         /No manifest declares an artifact whose Uri ends in "\/my-component\.zip"/,
       );
     });
@@ -301,7 +308,7 @@ describe('greengrass recipe-utils.ts', () => {
           },
         },
       ];
-      expect(() => validateRecipe(recipe, 'my-component')).toThrow(
+      expect(() => validateRecipe(recipe, ['my-component'])).toThrow(
         /No manifest declares an artifact whose Uri ends in/,
       );
     });
@@ -320,14 +327,14 @@ describe('greengrass recipe-utils.ts', () => {
           },
         },
       ];
-      expect(() => validateRecipe(recipe, 'my-component')).not.toThrow();
+      expect(() => validateRecipe(recipe, ['my-component'])).not.toThrow();
     });
 
     it('should collect every violation in one error', () => {
       const recipe = { ComponentName: 'aws.greengrass.bad name!' };
       let thrown: Error | undefined;
       try {
-        validateRecipe(recipe, 'my-component');
+        validateRecipe(recipe, ['my-component']);
       } catch (e) {
         thrown = e as Error;
       }
@@ -337,6 +344,211 @@ describe('greengrass recipe-utils.ts', () => {
       expect(thrown?.message).toMatch(/ComponentVersion is required/);
       expect(thrown?.message).toMatch(/Run script path must match/);
       expect(thrown?.message).toMatch(/No manifest declares an artifact/);
+    });
+
+    it('should accept a recipe declaring and referencing every base name', () => {
+      const recipe = {
+        ...validRecipe(),
+        Manifests: [
+          {
+            Platform: { os: 'linux', architecture: 'amd64' },
+            Artifacts: [
+              {
+                Uri: 's3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component-amd64.zip',
+                Unarchive: 'ZIP',
+              },
+            ],
+            Lifecycle: {
+              Run: 'python3 {artifacts:decompressedPath}/my-component-amd64/main.py',
+            },
+          },
+          {
+            Platform: { os: 'linux', architecture: 'aarch64' },
+            Artifacts: [
+              {
+                Uri: 's3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component-aarch64.zip',
+                Unarchive: 'ZIP',
+              },
+            ],
+            Lifecycle: {
+              Run: 'python3 {artifacts:decompressedPath}/my-component-aarch64/main.py',
+            },
+          },
+        ],
+      };
+      expect(() =>
+        validateRecipe(recipe, ['my-component-amd64', 'my-component-aarch64']),
+      ).not.toThrow();
+    });
+
+    it('should reject a base name no lifecycle script references', () => {
+      const recipe = {
+        ...validRecipe(),
+        Manifests: [
+          {
+            Artifacts: [
+              {
+                Uri: 's3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component-amd64.zip',
+                Unarchive: 'ZIP',
+              },
+            ],
+            Lifecycle: {
+              Run: 'python3 {artifacts:decompressedPath}/my-component-amd64/main.py',
+            },
+          },
+        ],
+      };
+      expect(() =>
+        validateRecipe(recipe, ['my-component-amd64', 'my-component-aarch64']),
+      ).toThrow(
+        /No lifecycle script references "\{artifacts:decompressedPath\}\/my-component-aarch64\/"/,
+      );
+    });
+
+    it('should reject a base name no manifest declares as an artifact', () => {
+      const recipe = {
+        ...validRecipe(),
+        Manifests: [
+          {
+            Artifacts: [
+              {
+                Uri: 's3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component-amd64.zip',
+                Unarchive: 'ZIP',
+              },
+            ],
+            Lifecycle: {
+              Run: 'python3 {artifacts:decompressedPath}/my-component-amd64/main.py\npython3 {artifacts:decompressedPath}/my-component-aarch64/main.py',
+            },
+          },
+        ],
+      };
+      expect(() =>
+        validateRecipe(recipe, ['my-component-amd64', 'my-component-aarch64']),
+      ).toThrow(
+        /No manifest declares an artifact whose Uri ends in "\/my-component-aarch64\.zip"/,
+      );
+    });
+  });
+
+  describe('validateManifestArchitectures', () => {
+    const BASE_NAMES = {
+      amd64: 'my-component-amd64',
+      aarch64: 'my-component-aarch64',
+    };
+
+    /** One manifest, with independently chosen artifact and Run base names. */
+    const manifest = (
+      architecture: string,
+      artifactBaseName: string,
+      runBaseName: string = artifactBaseName,
+    ) => ({
+      Platform: { os: 'linux', architecture },
+      Artifacts: [
+        {
+          Uri: `s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/${artifactBaseName}.zip`,
+          Unarchive: 'ZIP',
+        },
+      ],
+      Lifecycle: {
+        Run: `python3 {artifacts:decompressedPath}/${runBaseName}/main.py`,
+      },
+    });
+
+    it('should accept manifests each paired with their own architecture', () => {
+      const recipe = {
+        ...validRecipe(),
+        Manifests: [
+          manifest('amd64', 'my-component-amd64'),
+          manifest('aarch64', 'my-component-aarch64'),
+        ],
+      };
+      expect(() =>
+        validateManifestArchitectures(recipe, BASE_NAMES),
+      ).not.toThrow();
+    });
+
+    it('should reject two manifests whose artifacts and Run paths are swapped', () => {
+      // Both base names are still declared and referenced somewhere, so
+      // validateRecipe passes - only the per-manifest pairing catches this.
+      const recipe = {
+        ...validRecipe(),
+        Manifests: [
+          manifest('amd64', 'my-component-aarch64'),
+          manifest('aarch64', 'my-component-amd64'),
+        ],
+      };
+      expect(() =>
+        validateRecipe(recipe, ['my-component-amd64', 'my-component-aarch64']),
+      ).not.toThrow();
+
+      let thrown: Error | undefined;
+      try {
+        validateManifestArchitectures(recipe, BASE_NAMES);
+      } catch (e) {
+        thrown = e as Error;
+      }
+      expect(thrown?.message).toMatch(
+        /Manifest 1 declares "architecture: amd64", so its own artifact Uri must end in "\/my-component-amd64\.zip"/,
+      );
+      expect(thrown?.message).toMatch(
+        /Manifest 2 declares "architecture: aarch64", so its own artifact Uri must end in "\/my-component-aarch64\.zip"/,
+      );
+    });
+
+    it("should reject a manifest whose lifecycle runs another architecture's directory", () => {
+      const recipe = {
+        ...validRecipe(),
+        Manifests: [
+          manifest('amd64', 'my-component-amd64', 'my-component-aarch64'),
+          manifest('aarch64', 'my-component-aarch64'),
+        ],
+      };
+      expect(() => validateManifestArchitectures(recipe, BASE_NAMES)).toThrow(
+        /Manifest 1 declares "architecture: amd64", so its lifecycle must reference "\{artifacts:decompressedPath\}\/my-component-amd64\/"/,
+      );
+    });
+
+    it('should accept a manifest whose lifecycle lives at the recipe top level', () => {
+      const recipe = {
+        ...validRecipe(),
+        Lifecycle: {
+          Run: 'python3 {artifacts:decompressedPath}/my-component-amd64/main.py',
+        },
+        Manifests: [
+          {
+            Platform: { os: 'linux', architecture: 'amd64' },
+            Artifacts: [
+              {
+                Uri: 's3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component-amd64.zip',
+                Unarchive: 'ZIP',
+              },
+            ],
+          },
+        ],
+      };
+      expect(() =>
+        validateManifestArchitectures(recipe, { amd64: 'my-component-amd64' }),
+      ).not.toThrow();
+    });
+
+    it('should ignore manifests this build does not target', () => {
+      const recipe = {
+        ...validRecipe(),
+        Manifests: [
+          manifest('amd64', 'my-component-amd64'),
+          // A hand-added manifest for an architecture this toolchain neither
+          // vendors nor names, plus one with no architecture at all.
+          manifest('armv7l', 'my-component-armv7l'),
+          {
+            Platform: { os: 'linux' },
+            Artifacts: [{ Uri: 's3://bucket/anything.zip' }],
+            Lifecycle: { Run: 'python3 anything.py' },
+          },
+        ],
+      };
+      expect(() =>
+        validateManifestArchitectures(recipe, { amd64: 'my-component-amd64' }),
+      ).not.toThrow();
     });
   });
 
@@ -476,9 +688,41 @@ describe('greengrass zip-writer.ts', () => {
   });
 });
 
+const multiArchRecipe = () =>
+  [
+    'ComponentName: com.example.MyComponent',
+    'ComponentVersion: 1.0.0',
+    'Manifests:',
+    '  - Platform:',
+    '      os: linux',
+    '      architecture: amd64',
+    '    Artifacts:',
+    '      - Uri: s3://bucket/my-component-amd64.zip',
+    '        Unarchive: ZIP',
+    '    Lifecycle:',
+    '      Run: python3 {artifacts:decompressedPath}/my-component-amd64/main.py',
+    '  - Platform:',
+    '      os: linux',
+    '      architecture: aarch64',
+    '    Artifacts:',
+    '      - Uri: s3://bucket/my-component-aarch64.zip',
+    '        Unarchive: ZIP',
+    '    Lifecycle:',
+    '      Run: python3 {artifacts:decompressedPath}/my-component-aarch64/main.py',
+    '',
+  ].join('\n');
+
 describe('greengrass build-artifact.ts', () => {
   let tmpDir: string;
   let scriptsDir: string;
+  let writeZip: ZipWriterModule['writeZip'];
+
+  beforeAll(async () => {
+    const mod = await importVendedModule<ZipWriterModule>(
+      'zip-writer.ts.template',
+    );
+    writeZip = mod.writeZip;
+  });
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'greengrass-build-artifact-'));
@@ -841,5 +1085,320 @@ describe('greengrass build-artifact.ts', () => {
       ),
     );
     expect(entries.map((entry) => entry.name)).toEqual(['main.py']);
+  });
+
+  it("should write one zip per architecture holding only that architecture's vendored files", () => {
+    const projectRoot = join(tmpDir, 'project');
+    const componentDir = join(projectRoot, 'greengrass', 'my-component');
+    const distDir = join(tmpDir, 'dist');
+    const vendorDir = join(distDir, 'vendor');
+    mkdirSync(componentDir, { recursive: true });
+    mkdirSync(join(vendorDir, 'amd64'), { recursive: true });
+    mkdirSync(join(vendorDir, 'aarch64'), { recursive: true });
+    writeFileSync(join(componentDir, 'main.py'), 'print("hello")\n');
+    writeFileSync(join(vendorDir, 'requirements.txt'), 'dependency==1.0\n');
+    writeFileSync(
+      join(vendorDir, 'amd64', 'dependency.py'),
+      'ARCH = "amd64"\n',
+    );
+    writeFileSync(
+      join(vendorDir, 'aarch64', 'dependency.py'),
+      'ARCH = "aarch64"\n',
+    );
+    writeFileSync(join(componentDir, 'recipe.yaml'), multiArchRecipe());
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(scriptsDir, 'build-artifact.mjs'),
+        projectRoot,
+        'my-component',
+        distDir,
+        '--platforms=amd64,aarch64',
+      ],
+      { encoding: 'utf-8' },
+    );
+    expect(result.status, result.stderr).toBe(0);
+
+    const artifactsDir = join(
+      distDir,
+      'greengrass-build',
+      'artifacts',
+      'com.example.MyComponent',
+      '1.0.0',
+    );
+    const amd64Entries = readZipEntries(
+      readFileSync(join(artifactsDir, 'my-component-amd64.zip')),
+    );
+    const aarch64Entries = readZipEntries(
+      readFileSync(join(artifactsDir, 'my-component-aarch64.zip')),
+    );
+
+    expect(amd64Entries.map((e) => e.name).sort()).toEqual([
+      'dependency.py',
+      'main.py',
+    ]);
+    expect(aarch64Entries.map((e) => e.name).sort()).toEqual([
+      'dependency.py',
+      'main.py',
+    ]);
+    expect(
+      amd64Entries.find((e) => e.name === 'dependency.py')?.data.toString(),
+    ).toBe('ARCH = "amd64"\n');
+    expect(
+      aarch64Entries.find((e) => e.name === 'dependency.py')?.data.toString(),
+    ).toBe('ARCH = "aarch64"\n');
+    // requirements.txt lives one level above every arch directory, so it is
+    // excluded structurally - neither zip holds it, nor the other
+    // architecture's own vendored file.
+    expect(amd64Entries.map((e) => e.name)).not.toContain('requirements.txt');
+    expect(aarch64Entries.map((e) => e.name)).not.toContain('requirements.txt');
+  });
+
+  it('should produce byte-identical multi-architecture zips across two runs', () => {
+    const projectRoot = join(tmpDir, 'project');
+    const componentDir = join(projectRoot, 'greengrass', 'my-component');
+    const distDir1 = join(tmpDir, 'dist1');
+    const distDir2 = join(tmpDir, 'dist2');
+    mkdirSync(componentDir, { recursive: true });
+    writeFileSync(join(componentDir, 'main.py'), 'print("hello")\n');
+    writeFileSync(join(componentDir, 'recipe.yaml'), multiArchRecipe());
+
+    for (const distDir of [distDir1, distDir2]) {
+      mkdirSync(join(distDir, 'vendor', 'amd64'), { recursive: true });
+      mkdirSync(join(distDir, 'vendor', 'aarch64'), { recursive: true });
+      writeFileSync(
+        join(distDir, 'vendor', 'amd64', 'dependency.py'),
+        'ARCH = "amd64"\n',
+      );
+      writeFileSync(
+        join(distDir, 'vendor', 'aarch64', 'dependency.py'),
+        'ARCH = "aarch64"\n',
+      );
+      const result = spawnSync(
+        process.execPath,
+        [
+          join(scriptsDir, 'build-artifact.mjs'),
+          projectRoot,
+          'my-component',
+          distDir,
+          '--platforms=amd64,aarch64',
+        ],
+        { encoding: 'utf-8' },
+      );
+      expect(result.status, result.stderr).toBe(0);
+    }
+
+    const artifactPath = (distDir: string, arch: string) =>
+      join(
+        distDir,
+        'greengrass-build',
+        'artifacts',
+        'com.example.MyComponent',
+        '1.0.0',
+        `my-component-${arch}.zip`,
+      );
+    expect(
+      readFileSync(artifactPath(distDir1, 'amd64')).equals(
+        readFileSync(artifactPath(distDir2, 'amd64')),
+      ),
+    ).toBe(true);
+    expect(
+      readFileSync(artifactPath(distDir1, 'aarch64')).equals(
+        readFileSync(artifactPath(distDir2, 'aarch64')),
+      ),
+    ).toBe(true);
+  });
+
+  it('should keep the single-platform zip byte-identical when --platforms is absent', () => {
+    const projectRoot = join(tmpDir, 'project');
+    const componentDir = join(projectRoot, 'greengrass', 'my-component');
+    const distDir = join(tmpDir, 'dist');
+    mkdirSync(componentDir, { recursive: true });
+    const mainPyContents = 'print("hello")\n';
+    writeFileSync(join(componentDir, 'main.py'), mainPyContents);
+    writeFileSync(
+      join(componentDir, 'recipe.yaml'),
+      [
+        'ComponentName: com.example.MyComponent',
+        'ComponentVersion: 1.0.0',
+        'Manifests:',
+        '  - Artifacts:',
+        '      - Uri: s3://bucket/my-component.zip',
+        '        Unarchive: ZIP',
+        '    Lifecycle:',
+        '      Run: python3 {artifacts:decompressedPath}/my-component/main.py',
+        '',
+      ].join('\n'),
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(scriptsDir, 'build-artifact.mjs'),
+        projectRoot,
+        'my-component',
+        distDir,
+      ],
+      { encoding: 'utf-8' },
+    );
+    expect(result.status, result.stderr).toBe(0);
+
+    const actual = readFileSync(
+      join(
+        distDir,
+        'greengrass-build',
+        'artifacts',
+        'com.example.MyComponent',
+        '1.0.0',
+        'my-component.zip',
+      ),
+    );
+
+    // Independently reproduced with the real vended `writeZip`, never a
+    // snapshot: a change that alters these bytes must be a deliberate change
+    // to zip-writer.ts's own behaviour, and `-u` is not an acceptable fix for
+    // a failure here.
+    const expectedZipPath = join(tmpDir, 'expected.zip');
+    writeZip(
+      [{ name: 'main.py', data: Buffer.from(mainPyContents) }],
+      expectedZipPath,
+    );
+    const expected = readFileSync(expectedZipPath);
+
+    expect(actual.equals(expected)).toBe(true);
+  });
+
+  it('should refuse --platforms together with a bundle-dir', () => {
+    const projectRoot = join(tmpDir, 'project');
+    const bundleDir = join(tmpDir, 'bundle');
+    const distDir = join(tmpDir, 'dist');
+    mkdirSync(bundleDir, { recursive: true });
+    writeFileSync(join(bundleDir, 'index.js'), 'console.log("bundled");\n');
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(scriptsDir, 'build-artifact.mjs'),
+        projectRoot,
+        'my-component',
+        distDir,
+        bundleDir,
+        '--platforms=amd64,aarch64',
+      ],
+      { encoding: 'utf-8' },
+    );
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      '--platforms cannot be combined with a bundle-dir',
+    );
+  });
+
+  it('should fail with an actionable message when a per-architecture vendor directory is missing', () => {
+    const projectRoot = join(tmpDir, 'project');
+    const componentDir = join(projectRoot, 'greengrass', 'my-component');
+    const distDir = join(tmpDir, 'dist');
+    // aarch64 vendor dir deliberately missing.
+    mkdirSync(join(distDir, 'vendor', 'amd64'), { recursive: true });
+    mkdirSync(componentDir, { recursive: true });
+    writeFileSync(join(componentDir, 'main.py'), 'print("hello")\n');
+    writeFileSync(join(componentDir, 'recipe.yaml'), multiArchRecipe());
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(scriptsDir, 'build-artifact.mjs'),
+        projectRoot,
+        'my-component',
+        distDir,
+        '--platforms=amd64,aarch64',
+      ],
+      { encoding: 'utf-8' },
+    );
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      'Missing vendored dependencies for "aarch64"',
+    );
+    expect(result.stderr).toContain(
+      'run the component\'s "-vendor" target first',
+    );
+  });
+
+  it("should refuse a multi-architecture recipe whose manifests carry each other's artifact", () => {
+    const projectRoot = join(tmpDir, 'project');
+    const componentDir = join(projectRoot, 'greengrass', 'my-component');
+    const distDir = join(tmpDir, 'dist');
+    mkdirSync(join(distDir, 'vendor', 'amd64'), { recursive: true });
+    mkdirSync(join(distDir, 'vendor', 'aarch64'), { recursive: true });
+    mkdirSync(componentDir, { recursive: true });
+    writeFileSync(join(componentDir, 'main.py'), 'print("hello")\n');
+    // Every base name is declared and referenced, just under the wrong
+    // manifest - which would send amd64 wheels to an aarch64 device.
+    writeFileSync(
+      join(componentDir, 'recipe.yaml'),
+      multiArchRecipe()
+        .replace('my-component-amd64.zip', 'SWAP')
+        .replace('my-component-aarch64.zip', 'my-component-amd64.zip')
+        .replace('SWAP', 'my-component-aarch64.zip')
+        .replace('my-component-amd64/main.py', 'SWAP')
+        .replace('my-component-aarch64/main.py', 'my-component-amd64/main.py')
+        .replace('SWAP', 'my-component-aarch64/main.py'),
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(scriptsDir, 'build-artifact.mjs'),
+        projectRoot,
+        'my-component',
+        distDir,
+        '--platforms=amd64,aarch64',
+      ],
+      { encoding: 'utf-8' },
+    );
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      'Manifest 1 declares "architecture: amd64"',
+    );
+    expect(result.stderr).toContain(
+      'Manifest 2 declares "architecture: aarch64"',
+    );
+    expect(existsSync(join(distDir, 'greengrass-build'))).toBe(false);
+  });
+
+  it('should accept --platforms before the positional arguments', () => {
+    const projectRoot = join(tmpDir, 'project');
+    const componentDir = join(projectRoot, 'greengrass', 'my-component');
+    const distDir = join(tmpDir, 'dist');
+    mkdirSync(join(distDir, 'vendor', 'amd64'), { recursive: true });
+    mkdirSync(join(distDir, 'vendor', 'aarch64'), { recursive: true });
+    mkdirSync(componentDir, { recursive: true });
+    writeFileSync(join(componentDir, 'main.py'), 'print("hello")\n');
+    writeFileSync(join(componentDir, 'recipe.yaml'), multiArchRecipe());
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(scriptsDir, 'build-artifact.mjs'),
+        '--platforms=amd64,aarch64',
+        projectRoot,
+        'my-component',
+        distDir,
+      ],
+      { encoding: 'utf-8' },
+    );
+    expect(result.status, result.stderr).toBe(0);
+
+    const artifactsDir = join(
+      distDir,
+      'greengrass-build',
+      'artifacts',
+      'com.example.MyComponent',
+      '1.0.0',
+    );
+    expect(readdirSync(artifactsDir).sort()).toEqual([
+      'my-component-aarch64.zip',
+      'my-component-amd64.zip',
+    ]);
   });
 });

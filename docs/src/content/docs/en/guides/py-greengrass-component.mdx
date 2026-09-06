@@ -51,7 +51,7 @@ The generator wires four targets onto the host project, prefixed with the compon
 
 | Target             | Purpose                                                                          | Cached | Depends on    |
 | ------------------ | --------------------------------------------------------------------------------- | ------ | ------------- |
-| `<c>-vendor`       | Exports and vendors your project's Python dependencies for the target platform    | Yes    | `compile`     |
+| `<c>-vendor`       | Exports and vendors your project's Python dependencies for each target platform (one directory per architecture when both are selected) | Yes    | `compile`     |
 | `<c>-artifact`     | Zips the component's source and vendored dependencies into a GDK-shaped layout    | Yes    | `<c>-vendor`  |
 | `<c>-deploy-local`  | Creates a local deployment via `greengrass-cli` — runs **on** the core device      | No     | `<c>-artifact` |
 | `<c>-logs`         | Tails the component's log file — runs **on** the core device                      | No     | -              |
@@ -65,7 +65,7 @@ The generator wires four targets onto the host project, prefixed with the compon
 This target uses [`uv export`](https://docs.astral.sh/uv/reference/cli/#uv-export) followed by [`uv pip install --only-binary :all:`](https://docs.astral.sh/uv/reference/cli/#uv-pip-install) to download platform-specific wheels for your dependencies, targeting:
 
 - `--python-version`, the lowest `major.minor` in your project's `[project].requires-python` (not the Lambda runtime version — a core device is not a Lambda function)
-- `--python-platform`, derived from the `platform` option (`x86_64-manylinux_2_28` for `linux-amd64`, `aarch64-manylinux_2_28` for `linux-arm64`; the recipe manifest gets the matching Greengrass values `amd64` / `aarch64` — the nucleus matches `aarch64`, not the Docker-style `arm64`)
+- `--python-platform`, derived from the `platform` option (`x86_64-manylinux_2_28` for `linux-amd64`, `aarch64-manylinux_2_28` for `linux-arm64`; the recipe manifest gets the matching Greengrass values `amd64` / `aarch64` — the nucleus matches `aarch64`, not the Docker-style `arm64`). With `platform: linux-amd64-arm64`, both `--python-platform` values run against the one exported `requirements.txt`, each into its own `vendor/<architecture>` directory.
 
 The recipe's `Run` command pins the same interpreter version (`python3.14 main.py` for a `>=3.14` floor), so the vendored wheels and the runtime interpreter always move together. **Your core device must provide that `python3.x` binary on `PATH`.** If you see the component go `BROKEN` with `ImportError: ... undefined symbol: Py_...`, the device ran the artifact with an older interpreter than the wheels were vendored for — align your project's `requires-python` floor with what the device actually has, and regenerate or update the recipe's `Run` line to match.
 
@@ -78,6 +78,8 @@ The same flag means the host project must not depend on other **workspace Python
 <NxCommands commands={['run <project>:<component-name>-artifact']} />
 
 This packages `greengrass/<component-name>/` (excluding `recipe.yaml` and `gdk-config.json`) plus the vendored dependencies into a zip, and writes the resolved recipe alongside it:
+
+<OptionFilter not when={{ platform: 'linux-amd64-arm64' }}>
 
 <FileTree>
 
@@ -92,6 +94,32 @@ This packages `greengrass/<component-name>/` (excluding `recipe.yaml` and `gdk-c
           - \<component-name>.zip the deployable artifact
 
 </FileTree>
+
+</OptionFilter>
+
+<OptionFilter when={{ platform: 'linux-amd64-arm64' }}>
+
+With `platform: linux-amd64-arm64`, one zip is built per architecture, each from that architecture's own `vendor/<architecture>` directory:
+
+<FileTree>
+
+- dist/\<project-root>/greengrass/\<component-name>
+  - vendor
+    - requirements.txt shared by both architectures
+    - amd64 vendored dependencies for `linux-amd64`
+    - aarch64 vendored dependencies for `linux-arm64`
+  - greengrass-build
+    - recipes
+      - \<ComponentName>-\<version>.yaml resolved recipe
+    - artifacts
+      - \<ComponentName>
+        - \<version>
+          - \<component-name>-amd64.zip
+          - \<component-name>-aarch64.zip
+
+</FileTree>
+
+</OptionFilter>
 
 This layout is **GDK-shaped, not GDK-compatible**: it matches the directory structure the [Greengrass Development Kit CLI](https://github.com/aws-greengrass/aws-greengrass-gdk-cli) produces, but it is written under Nx's own `dist/`, not the component folder GDK expects. The vended `gdk-config.json` (`build_system: custom`, `custom_build_command` pointing back at this same target) is there as an escape hatch if you also want to run `gdk component build`/`publish` directly — it is not a dependency of anything this generator wires.
 
@@ -182,11 +210,11 @@ Manifests:
 ```
 
 - The `BUCKET_NAME` / `COMPONENT_NAME` / `COMPONENT_VERSION` placeholders are the same ones GDK uses. `<c>-artifact` copies them through to the resolved recipe untouched; a later publishing step substitutes them with the real bucket and key.
-- The `Uri` basename must stay `<component-name>.zip`, because that is the name `<c>-artifact` gives the zip, and Greengrass unarchives it to `{artifacts:decompressedPath}/<component-name>/` — which is where the `Run` script looks for `main.py`. `<c>-artifact` fails with an explicit message if you break that pairing.
+- The `Uri` basename must stay `<component-name>.zip`, or `<component-name>-<architecture>.zip` per manifest when you target both architectures (`platform: linux-amd64-arm64`) — because that is the name `<c>-artifact` gives each zip, and Greengrass unarchives it to `{artifacts:decompressedPath}/<basename>/` — which is where the matching `Run` script looks for `main.py`. `<c>-artifact` fails with an explicit message if you break that pairing.
 
 ### Component version immutability
 
-`ComponentVersion` in `recipe.yaml` is user-owned from the start. Once a version of a component is published to AWS IoT Greengrass, that version's content can never change — publishing again under the same version with different content is rejected. **Bump `ComponentVersion` in `recipe.yaml` whenever you change the component**, before building a new artifact and redeploying via the `GreengrassComponentVersion` construct described in [Infrastructure](#infrastructure) above.
+`ComponentVersion` in `recipe.yaml` is user-owned from the start. Once a version of a component is published to AWS IoT Greengrass, that version's content can never change — publishing again under the same version with different content is rejected. The key prefix a version's artifact is uploaded under is a hash covering **all** of that version's artifacts, so changing either architecture's zip under `platform: linux-amd64-arm64` produces a new prefix just the same as changing the one zip a single-platform component builds. **Bump `ComponentVersion` in `recipe.yaml` whenever you change the component**, before building a new artifact and redeploying via the `GreengrassComponentVersion` construct described in [Infrastructure](#infrastructure) above.
 
 <OptionFilter when={{ ipc: true }} description="ipc=true wires a least-privilege accessControl block">
 
@@ -242,13 +270,55 @@ Both variants structure their logic behind `if __name__ == "__main__":`, so the 
 
 <OptionFilter when={{ ipc: true }} description="Only relevant when ipc=true, since awsiotsdk depends on awscrt">
 
-`awsiotsdk` depends on [`awscrt`](https://github.com/awslabs/aws-crt-python), which ships a native extension built per architecture — there is no pure-Python fallback. This is exactly why `<c>-vendor` takes an explicit `platform` rather than defaulting to whatever your build machine happens to be: `uv pip install --only-binary :all: --python-platform <platform>` downloads the *target* device's wheel, cross-architecture, without needing that architecture's toolchain locally. One artifact still serves only one architecture — regenerate with the other `platform` value (or add a second component) to support both `linux-amd64` and `linux-arm64` cores from the same project.
+`awsiotsdk` depends on [`awscrt`](https://github.com/awslabs/aws-crt-python), which ships a native extension built per architecture — there is no pure-Python fallback. This is exactly why `<c>-vendor` takes an explicit `platform` rather than defaulting to whatever your build machine happens to be: `uv pip install --only-binary :all: --python-platform <platform>` downloads the *target* device's wheel, cross-architecture, without needing that architecture's toolchain locally. See [Supported platforms](#supported-platforms) below for serving both `linux-amd64` and `linux-arm64` cores from the same component.
 
 </OptionFilter>
 
 ## Supported platforms
 
-Only `linux-amd64` and `linux-arm64` core devices are supported today. Multi-architecture manifests (one recipe covering both) and Windows cores are deferred.
+Only `linux-amd64` and `linux-arm64` core devices are supported today. Multi-architecture manifests are supported for `linux-amd64` plus `linux-arm64` via `platform: linux-amd64-arm64`. Windows cores, `linux-any` and any third architecture remain deferred.
+
+<OptionFilter when={{ platform: 'linux-amd64-arm64' }} description="linux-amd64-arm64 builds one zip per architecture">
+
+### Multi-architecture components (`platform: linux-amd64-arm64`)
+
+With `platform: linux-amd64-arm64`, the recipe carries two manifests, one per architecture, each with its own artifact and `Run` path:
+
+```yaml
+Manifests:
+  - Platform:
+      os: linux
+      architecture: amd64
+    Artifacts:
+      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<component-name>-amd64.zip
+        Unarchive: ZIP
+    Lifecycle:
+      Run: python3.14 {artifacts:decompressedPath}/<component-name>-amd64/main.py
+  - Platform:
+      os: linux
+      architecture: aarch64
+    Artifacts:
+      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<component-name>-aarch64.zip
+        Unarchive: ZIP
+    Lifecycle:
+      Run: python3.14 {artifacts:decompressedPath}/<component-name>-aarch64/main.py
+```
+
+The nucleus selects the manifest matching its own `os` and `architecture` — `aarch64`, not the Docker-style `arm64` (see [Vendoring dependencies](#vendoring-dependencies-c-vendor) above).
+
+If a dependency has no manylinux wheel for one architecture, only that architecture's `uv pip install` fails, naming its own `--python-platform` in the error — the other architecture's vendoring is unaffected.
+
+`<c>-artifact` also checks the pairing **per manifest**: a manifest declaring `architecture: amd64` must carry `<component-name>-amd64.zip` and run out of `{artifacts:decompressedPath}/<component-name>-amd64/`. Swapping the two manifests' artifacts would otherwise build fine and only fail on the device, with one architecture's native wheels unpacked on the other.
+
+:::caution[deploy-local and multiple architectures]
+`<c>-deploy-local` passes the whole `--artifactDir` to `greengrass-cli`, which resolves the local core's own architecture from a multi-manifest recipe; deploying to a device whose architecture is not among the ones vendored is not supported.
+:::
+
+</OptionFilter>
+
+### Changing `platform` after the first run
+
+`platform` shapes only the **first** generation of `recipe.yaml`, whichever value you pick. A later run with a different `platform` — including a run that simply omits the option, since it defaults to `linux-arm64` — is refused, because `recipe.yaml` is user-owned and never rewritten. The error names the platform to re-run with if you did not mean to change it, and otherwise prints the full `Manifests` block that the new platform expects (one entry per architecture) to paste in by hand, together with the reminder to bump `ComponentVersion`, since published versions are immutable.
 
 ### Nucleus classic vs nucleus lite
 

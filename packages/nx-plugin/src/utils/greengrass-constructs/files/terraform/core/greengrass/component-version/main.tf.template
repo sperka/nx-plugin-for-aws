@@ -17,7 +17,7 @@ variable "recipes_dir" {
 }
 
 variable "artifacts_dir" {
-  description = "Directory holding the <c>-artifact target's artifact tree (greengrass-build/artifacts), containing exactly one file at <artifacts_dir>/<ComponentName>/<ComponentVersion>/."
+  description = "Directory holding the <c>-artifact target's artifact tree (greengrass-build/artifacts), containing one file per manifest platform at <artifacts_dir>/<ComponentName>/<ComponentVersion>/."
   type        = string
 }
 
@@ -38,10 +38,19 @@ locals {
 
   artifact_dir       = "${var.artifacts_dir}/${local.component_name}/${local.component_version}"
   artifact_files     = try(fileset(local.artifact_dir, "*"), [])
-  artifact_candidate = try(tolist(local.artifact_files)[0], null)
-  artifact_basename  = coalesce(local.artifact_candidate, "__no_artifact_found__")
-  artifact_path      = "${local.artifact_dir}/${local.artifact_basename}"
-  sha256             = try(filesha256(local.artifact_path), "")
+  artifact_basenames = sort(tolist(local.artifact_files))
+  artifact_hashes    = { for f in local.artifact_basenames : f => filesha256("${local.artifact_dir}/${f}") }
+
+  # COMPATIBILITY HINGE - keep the one-file arm exactly as it is. With one
+  # artifact the prefix segment stays that file's own sha256, matching every
+  # already-published version's key and the CDK construct's formula. With more
+  # than one, the aggregate covers all of them: sorted "<name>:<sha256>" lines
+  # joined by "\n", hashed - identical to the construct's aggregate.
+  sha256 = (
+    length(local.artifact_basenames) == 0 ? "" :
+    length(local.artifact_basenames) == 1 ? local.artifact_hashes[local.artifact_basenames[0]] :
+    sha256(join("\n", [for f in local.artifact_basenames : "${f}:${local.artifact_hashes[f]}"]))
+  )
 
   destination_key_prefix = "${local.component_name}/${local.component_version}/${local.sha256}/"
   replacement_prefix     = "s3://${var.bucket_name}/${local.destination_key_prefix}"
@@ -85,7 +94,8 @@ locals {
       if startswith(artifact.Uri, local.placeholder_prefix)
     ]
   ]))
-  mismatched_basenames = [for name in local.substituted_basenames : name if name != local.artifact_basename]
+  missing_basenames      = setsubtract(toset(local.substituted_basenames), toset(local.artifact_basenames))
+  unreferenced_artifacts = setsubtract(toset(local.artifact_basenames), toset(local.substituted_basenames))
 }
 
 # Synth-time-equivalent guard. Terraform has no shared mutable state across
@@ -101,27 +111,37 @@ resource "terraform_data" "guard" {
       error_message = "Expected exactly one resolved recipe in \"${var.recipes_dir}\" - run the component's \"-artifact\" target first. Found ${length(local.recipe_files)}."
     }
     precondition {
-      condition     = length(local.artifact_files) == 1
-      error_message = "Expected exactly one artifact for ${local.component_name}@${local.component_version} in \"${local.artifact_dir}\" - run the component's \"-artifact\" target first. Found ${length(local.artifact_files)}."
+      condition     = length(local.artifact_files) >= 1
+      error_message = "Expected at least one artifact for ${local.component_name}@${local.component_version} in \"${local.artifact_dir}\" - run the component's \"-artifact\" target first. Found ${length(local.artifact_files)}."
     }
     precondition {
-      condition     = length(local.mismatched_basenames) == 0
-      error_message = "\"${local.recipe_path}\" references artifact(s) ${join(", ", local.mismatched_basenames)}, but the only file built for ${local.component_name}@${local.component_version} is \"${local.artifact_basename}\". Make the recipe's artifact URI end in that name."
+      condition     = length(local.missing_basenames) == 0
+      error_message = "\"${local.recipe_path}\" references artifact(s) ${join(", ", local.missing_basenames)}, but the files built for ${local.component_name}@${local.component_version} are ${join(", ", local.artifact_basenames)}. Make each recipe artifact Uri end in one of those names."
+    }
+    precondition {
+      condition     = length(local.unreferenced_artifacts) == 0
+      error_message = "The build produced artifact(s) ${join(", ", local.unreferenced_artifacts)} for ${local.component_name}@${local.component_version} that no manifest references. Add a manifest whose artifact Uri ends in each name, then bump ComponentVersion before re-applying."
     }
   }
 }
 
-# The key carries the artifact's own sha256, so changed content is always a
-# new key and this resource is replaced rather than updated - which DELETES
-# the object at the outgoing key. That diverges from the CDK construct, whose
-# `BucketDeployment` sets `retainOnDelete` and leaves the old object in place;
-# see the note on `awscc_greengrassv2_component_version` below for why this
-# path drops both the outgoing version and its bytes together.
+# The key carries the aggregate sha256 (see local.sha256 above), so changed
+# content is always a new key and this resource is replaced rather than
+# updated - which DELETES the object at the outgoing key. That diverges from
+# the CDK construct, whose `BucketDeployment` sets `retainOnDelete` and leaves
+# the old object in place; see the note on `awscc_greengrassv2_component_version`
+# below for why this path drops both the outgoing version and its bytes
+# together.
+#
+# for_each keys are the artifact file names from a `fileset`, which is always
+# known at plan time - never a value only known after apply.
 resource "aws_s3_object" "artifact" {
+  for_each = local.artifact_hashes
+
   bucket      = var.bucket_name
-  key         = "${local.destination_key_prefix}${local.artifact_basename}"
-  source      = local.artifact_path
-  source_hash = local.sha256
+  key         = "${local.destination_key_prefix}${each.key}"
+  source      = "${local.artifact_dir}/${each.key}"
+  source_hash = each.value
 
   depends_on = [terraform_data.guard]
 

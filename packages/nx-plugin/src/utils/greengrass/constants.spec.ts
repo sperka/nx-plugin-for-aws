@@ -6,9 +6,11 @@ import { describe, expect, it } from 'vitest';
 import {
   GREENGRASS_CONFIG_KEY,
   GREENGRASS_PLATFORM_MAPPINGS,
+  GREENGRASS_PLATFORM_SELECTIONS,
   GREENGRASS_PLATFORMS,
   GREENGRASS_PUBLISHER_CONFIG_KEY,
   RECIPE_FORMAT_VERSION,
+  resolvePlatforms,
 } from './constants.js';
 
 describe('greengrass constants', () => {
@@ -37,5 +39,25 @@ describe('greengrass constants', () => {
   it('should name the default publisher config keys', () => {
     expect(GREENGRASS_CONFIG_KEY).toBe('greengrass');
     expect(GREENGRASS_PUBLISHER_CONFIG_KEY).toBe('publisher');
+  });
+
+  it('should list exactly the three platform selections', () => {
+    expect(GREENGRASS_PLATFORM_SELECTIONS).toEqual([
+      'linux-amd64',
+      'linux-arm64',
+      'linux-amd64-arm64',
+    ]);
+  });
+
+  it('should resolve each single selection to that one platform', () => {
+    expect(resolvePlatforms('linux-amd64')).toEqual(['linux-amd64']);
+    expect(resolvePlatforms('linux-arm64')).toEqual(['linux-arm64']);
+  });
+
+  it('should resolve linux-amd64-arm64 to linux-amd64 then linux-arm64', () => {
+    expect(resolvePlatforms('linux-amd64-arm64')).toEqual([
+      'linux-amd64',
+      'linux-arm64',
+    ]);
   });
 });

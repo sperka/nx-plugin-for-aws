@@ -41,15 +41,16 @@ export function loadRecipe(recipePath: string): GreengrassRecipe {
 
 /**
  * Validates only the recipe fields this vended toolchain consumes:
- * `ComponentName`, `ComponentVersion`, and the `{artifacts:decompressedPath}`
- * reference the local-deploy lifecycle script must carry so that a deployed
- * component can find its own artifact once Greengrass decompresses it.
+ * `ComponentName`, `ComponentVersion`, and, for every entry in
+ * `artifactBaseNames`, the `{artifacts:decompressedPath}` reference the
+ * local-deploy lifecycle script must carry so that a deployed component can
+ * find its own artifact once Greengrass decompresses it.
  *
  * Throws a single `Error` listing every violation when the recipe is invalid.
  */
 export function validateRecipe(
   recipe: GreengrassRecipe,
-  componentDirName: string,
+  artifactBaseNames: readonly string[],
 ): ResolvedComponent {
   const errors: string[] = [];
 
@@ -84,19 +85,20 @@ export function validateRecipe(
     );
   }
 
-  if (!referencesDecompressedComponentDir(recipe, componentDirName)) {
-    errors.push(
-      `No lifecycle script references "${DECOMPRESSED_PATH_TOKEN}/${componentDirName}/" - ` +
-        `the Run script path must match the artifact zip base name ("${componentDirName}.zip")`,
-    );
-  }
-
-  if (!declaresComponentZipArtifact(recipe, componentDirName)) {
-    errors.push(
-      `No manifest declares an artifact whose Uri ends in "/${componentDirName}.zip" - ` +
-        'Greengrass only unarchives a declared artifact, so ' +
-        `"${DECOMPRESSED_PATH_TOKEN}/${componentDirName}/" would never resolve on the device`,
-    );
+  for (const baseName of artifactBaseNames) {
+    if (!referencesDecompressedComponentDir(recipe, baseName)) {
+      errors.push(
+        `No lifecycle script references "${DECOMPRESSED_PATH_TOKEN}/${baseName}/" - ` +
+          `the Run script path must match the artifact zip base name ("${baseName}.zip")`,
+      );
+    }
+    if (!declaresComponentZipArtifact(recipe, baseName)) {
+      errors.push(
+        `No manifest declares an artifact whose Uri ends in "/${baseName}.zip" - ` +
+          'Greengrass only unarchives a declared artifact, so ' +
+          `"${DECOMPRESSED_PATH_TOKEN}/${baseName}/" would never resolve on the device`,
+      );
+    }
   }
 
   if (errors.length > 0) {
@@ -141,32 +143,100 @@ function referencesDecompressedComponentDir(
 /**
  * Whether any manifest declares an artifact whose Uri basename is
  * `<componentDirName>.zip`, which is the name the artifact this toolchain
- * writes actually carries. Case-insensitive on the key so a recipe authored
- * with `URI` (as some AWS samples spell it) still matches.
+ * writes actually carries.
  */
 function declaresComponentZipArtifact(
   recipe: GreengrassRecipe,
   componentDirName: string,
 ): boolean {
-  const suffix = `/${componentDirName}.zip`;
   const manifests = Array.isArray(recipe.Manifests) ? recipe.Manifests : [];
-  return manifests.some((manifest) => {
-    const artifacts = (manifest as { Artifacts?: unknown })?.Artifacts;
-    if (!Array.isArray(artifacts)) {
+  return manifests.some((manifest) =>
+    manifestDeclaresZipArtifact(manifest, componentDirName),
+  );
+}
+
+/**
+ * Whether one manifest declares an artifact whose Uri basename is
+ * `<componentDirName>.zip`. Case-insensitive on the key so a recipe authored
+ * with `URI` (as some AWS samples spell it) still matches.
+ */
+function manifestDeclaresZipArtifact(
+  manifest: unknown,
+  componentDirName: string,
+): boolean {
+  const suffix = `/${componentDirName}.zip`;
+  const artifacts = (manifest as { Artifacts?: unknown })?.Artifacts;
+  if (!Array.isArray(artifacts)) {
+    return false;
+  }
+  return artifacts.some((artifact) => {
+    if (artifact === null || typeof artifact !== 'object') {
       return false;
     }
-    return artifacts.some((artifact) => {
-      if (artifact === null || typeof artifact !== 'object') {
-        return false;
-      }
-      return Object.entries(artifact as Record<string, unknown>).some(
-        ([key, value]) =>
-          key.toLowerCase() === 'uri' &&
-          typeof value === 'string' &&
-          value.endsWith(suffix),
-      );
-    });
+    return Object.entries(artifact as Record<string, unknown>).some(
+      ([key, value]) =>
+        key.toLowerCase() === 'uri' &&
+        typeof value === 'string' &&
+        value.endsWith(suffix),
+    );
   });
+}
+
+/**
+ * Multi-architecture only: checks that every manifest whose
+ * `Platform.architecture` names an architecture this build vendored pairs with
+ * THAT architecture's own artifact, both in its `Artifacts` and in the
+ * lifecycle that unarchives it.
+ *
+ * {@link validateRecipe}'s checks are global - they prove every built zip is
+ * declared and referenced somewhere in the recipe. A recipe that swaps two
+ * manifests' artifacts and Run paths satisfies them, and a swap sends one
+ * architecture's native wheels to the other, which fails only on the device.
+ * A swap is one paste mistake away, because adding a second manifest to an
+ * existing component is a hand edit of a user-owned recipe.
+ *
+ * A manifest with no `Platform.architecture`, or one naming an architecture
+ * this build did not vendor, is left alone: a recipe may carry manifests this
+ * toolchain does not build.
+ */
+export function validateManifestArchitectures(
+  recipe: GreengrassRecipe,
+  baseNameByArchitecture: Readonly<Record<string, string>>,
+): void {
+  const errors: string[] = [];
+  const manifests = Array.isArray(recipe.Manifests) ? recipe.Manifests : [];
+  manifests.forEach((manifest, index) => {
+    const architecture = (
+      manifest as { Platform?: { architecture?: unknown } } | null
+    )?.Platform?.architecture;
+    if (typeof architecture !== 'string') {
+      return;
+    }
+    const baseName = baseNameByArchitecture[architecture];
+    if (!baseName) {
+      return;
+    }
+    if (!manifestDeclaresZipArtifact(manifest, baseName)) {
+      errors.push(
+        `Manifest ${index + 1} declares "architecture: ${architecture}", so its own artifact Uri must end in "/${baseName}.zip" - ` +
+          `that is the zip this build writes for "${architecture}". Manifests must not carry another architecture's artifact`,
+      );
+    }
+    const lifecycle =
+      (manifest as { Lifecycle?: unknown }).Lifecycle ?? recipe.Lifecycle;
+    if (!referencesDecompressedComponentDir(lifecycle, baseName)) {
+      errors.push(
+        `Manifest ${index + 1} declares "architecture: ${architecture}", so its lifecycle must reference ` +
+          `"${DECOMPRESSED_PATH_TOKEN}/${baseName}/" - the directory that architecture's own artifact unarchives to`,
+      );
+    }
+  });
+
+  if (errors.length > 0) {
+    throw new Error(
+      `Invalid recipe:\n${errors.map((e) => `  - ${e}`).join('\n')}`,
+    );
+  }
 }
 
 /**

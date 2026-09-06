@@ -483,6 +483,216 @@ describe('ts#greengrass-component generator', () => {
     });
   });
 
+  describe('multi-architecture (platform: linux-amd64-arm64)', () => {
+    it('should write one manifest per architecture over a single artifact for linux-amd64-arm64', async () => {
+      seedTypeScriptProject(tree);
+
+      await tsGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-amd64-arm64',
+        infra: 'none',
+      });
+
+      const recipe = tree.read(
+        'packages/test-project/greengrass/my-component/recipe.yaml',
+        'utf-8',
+      );
+      expect(recipe).toContain('architecture: amd64');
+      expect(recipe).toContain('architecture: aarch64');
+      // A rolldown bundle is pure JavaScript: ONE artifact serves both
+      // manifests, unlike the Python component's per-architecture zips.
+      expect(recipe).toContain(
+        'Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component.zip',
+      );
+      expect(
+        recipe.match(
+          /Uri: s3:\/\/BUCKET_NAME\/COMPONENT_NAME\/COMPONENT_VERSION\/my-component\.zip/g,
+        ),
+      ).toHaveLength(2);
+      expect(
+        recipe.match(
+          /Run: node \{artifacts:decompressedPath\}\/my-component\/index\.js/g,
+        ),
+      ).toHaveLength(2);
+    });
+
+    it('should render the Install step in every manifest when ipc is true', async () => {
+      seedTypeScriptProject(tree);
+
+      await tsGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-amd64-arm64',
+        ipc: true,
+        infra: 'none',
+      });
+
+      const recipe = tree.read(
+        'packages/test-project/greengrass/my-component/recipe.yaml',
+        'utf-8',
+      );
+      expect(
+        recipe.match(
+          /Install: cd \{artifacts:decompressedPath\}\/my-component && npm install --omit=dev/g,
+        ),
+      ).toHaveLength(2);
+    });
+
+    it('should keep the artifact command free of --platforms for a multi-architecture typescript component', async () => {
+      seedTypeScriptProject(tree);
+
+      await tsGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-amd64-arm64',
+        infra: 'none',
+      });
+
+      const projectConfig = JSON.parse(
+        tree.read('packages/test-project/project.json', 'utf-8'),
+      );
+      expect(
+        projectConfig.targets['my-component-artifact'].options.command,
+      ).not.toContain('--platforms');
+    });
+
+    it('should not trip the pre-bundle staleness guard for a multi-architecture typescript component', async () => {
+      seedTypeScriptProject(tree);
+      // A build-artifact.ts that already supports bundle-dir (so the ordinary
+      // ts#greengrass-component guard is satisfied) but predates --platforms -
+      // this generator never passes --platforms, so it must not care.
+      tree.write(
+        'packages/common/scripts/src/greengrass/build-artifact.ts',
+        '// Usage: build-artifact.ts <project-root> <component-dir> <dist> [bundle-dir]\n',
+      );
+
+      await expect(
+        tsGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          platform: 'linux-amd64-arm64',
+          infra: 'none',
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it('should throw when re-run with a different platform than the one recorded in metadata', async () => {
+      seedTypeScriptProject(tree);
+
+      await tsGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-arm64',
+        infra: 'none',
+      });
+
+      await expect(
+        tsGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          platform: 'linux-amd64-arm64',
+          infra: 'none',
+        }),
+      ).rejects.toThrow(/cannot change it to/);
+    });
+
+    it('should name the recorded platform to re-run with, since omitting the option is not neutral', async () => {
+      seedTypeScriptProject(tree);
+
+      await tsGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-amd64',
+        infra: 'none',
+      });
+
+      // No `platform` at all: the option defaults to linux-arm64, so a re-run
+      // that meant to change nothing asks to change the platform.
+      await expect(
+        tsGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          infra: 'none',
+        }),
+      ).rejects.toThrow(/re-run with --platform=linux-amd64/);
+    });
+
+    it('should include the ipc Install step in the manifest block it tells the user to paste', async () => {
+      seedTypeScriptProject(tree);
+
+      await tsGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-arm64',
+        ipc: true,
+        infra: 'none',
+      });
+
+      // The Install step is part of a manifest's Lifecycle, so a preview
+      // without it would drop the external SDK's on-device install.
+      await expect(
+        tsGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          platform: 'linux-amd64-arm64',
+          ipc: true,
+          infra: 'none',
+        }),
+      ).rejects.toThrow(
+        /Install: cd \{artifacts:decompressedPath\}\/my-component && npm install --omit=dev/,
+      );
+    });
+
+    it('should omit the Install step from the pasted manifest block when ipc is false', async () => {
+      seedTypeScriptProject(tree);
+
+      await tsGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-arm64',
+        infra: 'none',
+      });
+
+      await expect(
+        tsGreengrassComponentGenerator(tree, {
+          project: 'test-project',
+          name: 'my-component',
+          platform: 'linux-amd64-arm64',
+          infra: 'none',
+        }),
+      ).rejects.toThrow(/Lifecycle:\n {6}Run: node/);
+    });
+
+    it('should match snapshot for a multi-architecture component', async () => {
+      seedTypeScriptProject(tree);
+
+      await tsGreengrassComponentGenerator(tree, {
+        project: 'test-project',
+        name: 'my-component',
+        platform: 'linux-amd64-arm64',
+        infra: 'none',
+      });
+
+      const changes = sortObjectKeys(
+        tree
+          .listChanges()
+          .filter(
+            (f) =>
+              f.path.endsWith('.ts') ||
+              f.path.endsWith('.yaml') ||
+              f.path.endsWith('gdk-config.json') ||
+              f.path.endsWith('project.json'),
+          )
+          .reduce((acc, curr) => {
+            acc[curr.path] = tree.read(curr.path, 'utf-8');
+            return acc;
+          }, {}),
+      );
+      expect(changes).toMatchSnapshot('multi-arch-snapshot');
+    });
+  });
+
   it('should reject a componentName using the reserved aws.greengrass. prefix', async () => {
     seedTypeScriptProject(tree);
 
@@ -800,9 +1010,15 @@ describe('ts#greengrass-component generator', () => {
         'packages/common/terraform/src/app/greengrass-component/my-component/my-component.tf';
       expect(tree.exists(modulePath)).toBe(true);
       const module = tree.read(modulePath, 'utf-8');
-      expect(module).toContain('source = "../../../core/greengrass/component-version"');
+      expect(module).toContain(
+        'source = "../../../core/greengrass/component-version"',
+      );
 
-      for (const dir of ['artifact-bucket', 'component-version', 'deployment']) {
+      for (const dir of [
+        'artifact-bucket',
+        'component-version',
+        'deployment',
+      ]) {
         expect(
           tree.exists(
             `packages/common/terraform/src/core/greengrass/${dir}/main.tf`,

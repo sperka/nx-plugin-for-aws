@@ -554,8 +554,12 @@ export const runGeneratorMatrix = async (
     `generate @aws/nx-plugin:py#project --name=py-greengrass-project --projectType=application --no-interactive${deferFlag}`,
     opts,
   );
+  // --platform=linux-amd64-arm64 covers the two-artifact path (multiple
+  // manifests, multiple built files, the aggregate sha256 key prefix); the
+  // ts#greengrass-component component below stays single-arch on purpose so
+  // the one-artifact key-prefix hinge keeps its CI coverage too.
   await runCLI(
-    `generate @aws/nx-plugin:py#greengrass-component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --no-interactive${deferFlag}`,
+    `generate @aws/nx-plugin:py#greengrass-component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --platform=linux-amd64-arm64 --no-interactive${deferFlag}`,
     opts,
   );
   await runCLI(

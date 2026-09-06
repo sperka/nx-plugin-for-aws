@@ -16,13 +16,15 @@ ComponentConfiguration:
             - <%- componentName %>/heartbeat
 <%_ } _%>
 Manifests:
+<%_ manifests.forEach((m) => { _%>
   - Platform:
-      os: <%- manifestOs %>
-      architecture: <%- manifestArchitecture %>
+      os: <%- m.os %>
+      architecture: <%- m.architecture %>
     Artifacts:
       # Placeholders are substituted at publish time. The basename must stay
-      # <%- componentDirName %>.zip, which is what the Run script below unarchives to.
-      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<%- componentDirName %>.zip
+      # <%- m.artifactBaseName %>.zip, which is what the Run script below unarchives to.
+      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<%- m.artifactBaseName %>.zip
         Unarchive: ZIP
     Lifecycle:
-      Run: python<%- pythonFloor %> {artifacts:decompressedPath}/<%- componentDirName %>/main.py
+      Run: python<%- pythonFloor %> {artifacts:decompressedPath}/<%- m.artifactBaseName %>/main.py
+<%_ }); _%>

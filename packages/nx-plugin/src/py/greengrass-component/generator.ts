@@ -18,10 +18,12 @@ import {
   ownedElsewhere,
 } from '../../utils/declared-dependencies.js';
 import { formatFilesInSubtree } from '../../utils/format.js';
+import { FS_DEPENDENCIES, FsCommands } from '../../utils/fs.js';
 import {
   GREENGRASS_PLATFORM_MAPPINGS,
-  type GreengrassPlatform,
+  type GreengrassPlatformSelection,
   RECIPE_FORMAT_VERSION,
+  resolvePlatforms,
 } from '../../utils/greengrass/constants.js';
 import {
   assertValidComponentName,
@@ -66,13 +68,14 @@ import type { PyGreengrassComponentGeneratorSchema } from './schema.js';
 export interface GreengrassComponentMetadata {
   readonly componentName: string;
   readonly componentVersion: string;
-  readonly platform: GreengrassPlatform;
+  readonly platform: GreengrassPlatformSelection;
   readonly ipc: boolean;
   readonly iac?: string;
 }
 
 export const DEPENDENCIES = declareDependencies<GreengrassComponentMetadata>()({
   ts: [
+    ...ownedElsewhere(FS_DEPENDENCIES),
     ...ownedElsewhere(SHARED_GREENGRASS_SCRIPTS_DEPENDENCIES),
     ...ownedElsewhere(SHARED_CONSTRUCTS_DEPENDENCIES),
     ...ownedElsewhere(GREENGRASS_CONSTRUCTS_DEPENDENCIES),
@@ -165,9 +168,31 @@ export const pyGreengrassComponentGenerator = async (
 
   const publisher = options.publisher ?? resolveGreengrassPublisher(tree);
   const ipc = options.ipc ?? true;
-  const platform: GreengrassPlatform = options.platform ?? 'linux-arm64';
-  const { uvPlatform, manifestPlatform } =
-    GREENGRASS_PLATFORM_MAPPINGS[platform];
+  const platform: GreengrassPlatformSelection =
+    options.platform ?? 'linux-arm64';
+  const platforms = resolvePlatforms(platform);
+  const isMultiPlatform = platforms.length > 1;
+  const distDir = `dist/{projectRoot}/greengrass/${componentDirName}`;
+  const distDirVendor = `${distDir}/vendor`;
+  // One entry per recipe manifest. Every per-architecture name - the vendor
+  // subdirectory, the zip base name and the manifest `architecture` value -
+  // is derived from the SAME mapping entry, so they cannot drift apart.
+  const manifests = platforms.map((p) => {
+    const { uvPlatform, manifestPlatform } = GREENGRASS_PLATFORM_MAPPINGS[p];
+    return {
+      uvPlatform,
+      os: manifestPlatform.os,
+      architecture: manifestPlatform.architecture,
+      // Single platform keeps today's flat names exactly: `<c>.zip` and
+      // `vendor/`. See work item 12's compatibility hinge.
+      artifactBaseName: isMultiPlatform
+        ? `${componentDirName}-${manifestPlatform.architecture}`
+        : componentDirName,
+      vendorDir: isMultiPlatform
+        ? `${distDirVendor}/${manifestPlatform.architecture}`
+        : distDirVendor,
+    };
+  });
 
   const infra = options.infra ?? 'component-version';
   const iac =
@@ -199,7 +224,12 @@ export const pyGreengrassComponentGenerator = async (
   // refuse outright.
   const existingComponentMetadata = (
     projectConfig.metadata as {
-      components?: { generator?: string; name?: string; iac?: string }[];
+      components?: {
+        generator?: string;
+        name?: string;
+        iac?: string;
+        platform?: string;
+      }[];
     }
   )?.components?.find(
     (c) =>
@@ -209,6 +239,21 @@ export const pyGreengrassComponentGenerator = async (
   if (existingComponentMetadata?.iac && infra === 'none') {
     throw new Error(
       `This project already has a Greengrass component named "${componentDirName}" with infrastructure provisioned (iac=${existingComponentMetadata.iac}). Re-running with --infra=none would leave that infrastructure orphaned - remove it manually first, or keep --infra=component-version.`,
+    );
+  }
+
+  if (
+    existingComponentMetadata?.platform &&
+    existingComponentMetadata.platform !== platform
+  ) {
+    const manifestPreview = manifests
+      .map(
+        (m) =>
+          `  - Platform:\n      os: ${m.os}\n      architecture: ${m.architecture}\n    Artifacts:\n      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/${m.artifactBaseName}.zip\n        Unarchive: ZIP\n    Lifecycle:\n      Run: python${pythonFloor} {artifacts:decompressedPath}/${m.artifactBaseName}/main.py`,
+      )
+      .join('\n');
+    throw new Error(
+      `This project already has a Greengrass component named "${componentDirName}" generated for platform "${existingComponentMetadata.platform}". recipe.yaml is user-owned and is never rewritten, so this run cannot change it to "${platform}" - the targets would then build artifacts the recipe does not declare. If you did not mean to change the platform, re-run with --platform=${existingComponentMetadata.platform} (this option has a default, so leaving it off asks for "${platform}"). To change it on purpose, edit ${joinPathFragments(componentDir, 'recipe.yaml')} by hand so its Manifests match, bump ComponentVersion (published versions are immutable), and set platform to "${platform}" in this project's project.json metadata.components entry. The manifests "${platform}" expects are:\n${manifestPreview}`,
     );
   }
 
@@ -224,8 +269,7 @@ export const pyGreengrassComponentGenerator = async (
     componentDescription: `${componentName} Greengrass component, generated by py#greengrass-component.`,
     publisher,
     ipc,
-    manifestOs: manifestPlatform.os,
-    manifestArchitecture: manifestPlatform.architecture,
+    manifests,
     // The recipe Run command pins the same interpreter the wheels were
     // vendored for; a bare `python3` can resolve to an older device default
     // whose ABI the vendored native wheels do not support.
@@ -262,29 +306,60 @@ export const pyGreengrassComponentGenerator = async (
     { overwriteStrategy: OverwriteStrategy.KeepExisting },
   );
 
+  // Checked BEFORE vending: the scripts are created once and never
+  // overwritten, so a workspace whose Greengrass scripts predate
+  // multi-architecture support keeps its old copy - which ignores the trailing
+  // --platforms flag and would ship ONE zip under a two-manifest recipe, a
+  // failure that only surfaces on a device.
+  if (isMultiPlatform) {
+    const existingBuildArtifactScript = tree.read(
+      joinPathFragments(GREENGRASS_SCRIPTS_DIR, 'build-artifact.ts'),
+      'utf-8',
+    );
+    if (
+      existingBuildArtifactScript &&
+      !existingBuildArtifactScript.includes('--platforms')
+    ) {
+      throw new Error(
+        `The vended Greengrass build scripts in ${GREENGRASS_SCRIPTS_DIR} were generated by an older plugin version and do not support multi-architecture components. Delete the files in that directory and re-run this generator to refresh them (re-apply any patches of your own afterwards, and bump ComponentVersion before re-deploying any component whose artifact bytes change).`,
+      );
+    }
+  }
+
   await sharedGreengrassScriptsGenerator(tree, DEPENDENCIES);
 
   const vendorTarget = `${componentDirName}-vendor`;
   const artifactTarget = `${componentDirName}-artifact`;
   const deployLocalTarget = `${componentDirName}-deploy-local`;
   const logsTarget = `${componentDirName}-logs`;
-  const distDir = `dist/{projectRoot}/greengrass/${componentDirName}`;
 
   projectConfig.targets ??= {};
+
+  const fs = new FsCommands(tree, DEPENDENCIES);
 
   projectConfig.targets[vendorTarget] = normalizeTargetKeyOrder({
     cache: true,
     // The vendor dir holds only exported dependencies, never test files.
     inputs: ['production', '^production'],
-    outputs: [`{workspaceRoot}/${distDir}/vendor`],
+    outputs: [`{workspaceRoot}/${distDirVendor}`],
     executor: 'nx:run-commands',
     dependsOn: ['compile'],
     options: {
       commands: [
-        `uv export --frozen --no-dev --no-editable --no-emit-project --project {projectRoot} --package ${projectConfig.name} -o ${distDir}/vendor/requirements.txt`,
+        // `uv pip install --target` adds to whatever is already there and
+        // never prunes, so without this a dropped dependency - or the other
+        // platform's `vendor/<architecture>` directory after a deliberate
+        // platform change - would still be packaged into the next artifact.
+        // Artifact bytes must depend only on the current source.
+        fs.rm(distDirVendor),
+        fs.mkdir(distDirVendor),
+        `uv export --frozen --no-dev --no-editable --no-emit-project --project {projectRoot} --package ${projectConfig.name} -o ${distDirVendor}/requirements.txt`,
         // `--only-binary :all:` is required: without it an sdist can build a
         // host-architecture binary into a cross-architecture artifact.
-        `uv pip install -n --no-deps --no-installer-metadata --no-compile-bytecode --only-binary :all: --python-platform ${uvPlatform} --python-version ${pythonFloor} --target ${distDir}/vendor -r ${distDir}/vendor/requirements.txt`,
+        ...manifests.map(
+          (m) =>
+            `uv pip install -n --no-deps --no-installer-metadata --no-compile-bytecode --only-binary :all: --python-platform ${m.uvPlatform} --python-version ${pythonFloor} --target ${m.vendorDir} -r ${distDirVendor}/requirements.txt`,
+        ),
       ],
       parallel: false,
     },
@@ -303,7 +378,11 @@ export const pyGreengrassComponentGenerator = async (
     executor: 'nx:run-commands',
     dependsOn: [vendorTarget],
     options: {
-      command: `tsx ${GREENGRASS_SCRIPTS_DIR}/build-artifact.ts {projectRoot} ${componentDirName} ${distDir}`,
+      command: `tsx ${GREENGRASS_SCRIPTS_DIR}/build-artifact.ts {projectRoot} ${componentDirName} ${distDir}${
+        isMultiPlatform
+          ? ` --platforms=${manifests.map((m) => m.architecture).join(',')}`
+          : ''
+      }`,
     },
   });
   addArtifactDependencyToTargets(projectConfig, artifactTarget);

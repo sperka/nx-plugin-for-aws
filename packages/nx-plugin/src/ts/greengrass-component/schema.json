@@ -44,11 +44,11 @@
     },
     "platform": {
       "type": "string",
-      "description": "The core device platform to write into the recipe manifest. The bundle itself is pure JavaScript and is not platform-specific.",
-      "enum": ["linux-amd64", "linux-arm64"],
+      "description": "The core device platform(s) to target. linux-amd64-arm64 writes one recipe manifest per architecture so a single component version serves both.",
+      "enum": ["linux-amd64", "linux-arm64", "linux-amd64-arm64"],
       "default": "linux-arm64",
       "x-priority": "important",
-      "x-prompt": "Which core device platform would you like to target?"
+      "x-prompt": "Which core device platform(s) would you like to target?"
     },
     "infra": {
       "type": "string",
