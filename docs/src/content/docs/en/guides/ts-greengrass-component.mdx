@@ -282,6 +282,12 @@ Lifecycle:
 
 This is `npm install`, not `npm ci` — `npm ci` requires a `package-lock.json` this generator does not vend. `npm install` works from `package.json` alone, at the cost of resolving the dependency tree fresh on every deployment. **This step needs network access and a working `npm` on the device.** If your fleet has neither, keep `ipc: false` or pre-provision the dependency another way.
 
+:::danger[`ipc: true` is not yet verified on a device]
+AWS documents the decompressed artifact folder as **read-only**: "the AWS IoT Greengrass Core software doesn't allow components to edit artifact files in the artifacts folder". The `Install` step above writes `node_modules` into exactly that folder, so it is expected to fail for a component running as the default component user - it would only succeed for one configured to run as root. `ipc: false` is unaffected, is the default, and is the path that has been exercised on real hardware.
+
+Until this is fixed (the install and the run need to move to `{work:path}`), treat `ipc: true` as unverified: prefer `ipc: false`, or vendor the dependency into the artifact yourself.
+:::
+
 </OptionFilter>
 
 ## Supported platforms
