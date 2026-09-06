@@ -175,7 +175,9 @@ Manifests:
       `'com.example.MyComponent': { componentVersion: '1.0.0' }`,
     );
     expect(
-      JSON.parse(tree.read('packages/my-deployment/src/components.json', 'utf-8')!),
+      JSON.parse(
+        tree.read('packages/my-deployment/src/components.json', 'utf-8')!,
+      ),
     ).toEqual({ 'com.example.MyComponent': { component_version: '1.0.0' } });
 
     // Re-running is a no-op on both files, not a duplicate entry.
@@ -185,7 +187,9 @@ Manifests:
       targetComponent: greengrassComponent() as any,
     });
     expect(
-      JSON.parse(tree.read('packages/my-deployment/src/components.json', 'utf-8')!),
+      JSON.parse(
+        tree.read('packages/my-deployment/src/components.json', 'utf-8')!,
+      ),
     ).toEqual({ 'com.example.MyComponent': { component_version: '1.0.0' } });
   });
 
@@ -199,9 +203,9 @@ Manifests:
       targetComponent: greengrassComponent() as any,
     });
 
-    expect(
-      tree.exists('packages/my-deployment/src/components.json'),
-    ).toBe(false);
+    expect(tree.exists('packages/my-deployment/src/components.json')).toBe(
+      false,
+    );
   });
 
   it('refuses a terraform deployment whose src/components.json is missing', async () => {
@@ -274,9 +278,7 @@ Manifests:
         'com.example.MyComponent': { component_version: '1.0.0' },
       }),
     );
-    const warn = vi
-      .spyOn(logger, 'warn')
-      .mockImplementation(() => undefined);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
 
     await greengrassDeploymentComponentConnectionGenerator(tree, {
       sourceProject: `@proj/${deployment}`,

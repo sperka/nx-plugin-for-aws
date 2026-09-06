@@ -98,10 +98,19 @@ export class GreengrassArtifactBucket extends Construct {
 
   /**
    * Grant `s3:GetObject`, scoped to `keyPrefix`, to `grantee` - the shape the
-   * `tokenExchangeRoleArn` deployment option needs: a Greengrass core device's
-   * token exchange role reads whichever component versions are deployed to
-   * it, so the practical scope is the whole bucket unless the caller knows a
-   * narrower prefix ahead of time.
+   * `tokenExchangeRoleArn` deployment option needs.
+   *
+   * Defaults to the whole bucket (`'*'`) rather than a narrower prefix: a
+   * Greengrass core device's token exchange role reads whichever component
+   * versions get deployed to it, and that set lives in this deployment's own
+   * `components` map, which can gain an entry after this grant is created -
+   * there is no generation-time input this default could derive a narrower
+   * prefix from. Pass `keyPrefix` when every component this role's device(s)
+   * will ever fetch is known to share one (e.g. one Nx workspace's own
+   * component namespace). The `tokenExchangeKeyPrefix` generator option bakes
+   * it into the generated app construct at generation time; that construct is
+   * then left alone on a re-run, so an existing deployment narrows its grant
+   * by editing the `grantReadTo` call there.
    *
    * Deliberately a single action rather than `bucket.grantRead()`'s broader
    * set (which also adds `s3:GetBucket*` / KMS actions where relevant) - the

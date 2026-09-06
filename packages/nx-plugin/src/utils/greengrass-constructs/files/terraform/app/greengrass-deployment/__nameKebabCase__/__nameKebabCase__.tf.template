@@ -27,19 +27,25 @@ locals {
 # artifact bucket lives in the sibling `<%- nameKebabCase %>-artifact-bucket`
 # module - see that module's file for why it is not bundled here.
 #
-# Re-running the generator re-syncs this file to its current options - hand
-# edits here do not survive a re-run. Depend this module on every component
-# module it references in `components` (`depends_on = [module.<component>]`
-# on this module block in your own root module), mirroring the CDK
-# construct's `.dependOn()` call - otherwise the deployment can reach devices
-# before a referenced component version exists in the registry.
+# Created once and left alone afterwards, so edits here survive a re-run -
+# which also means a re-run with different options does NOT re-sync this file.
+# Change an option (the deployment target, its policies) right here.
+#
+# Depend this module on every component module it references in `components`
+# (`depends_on = [module.<component>]` on this module block in your own root
+# module), mirroring the CDK construct's `.dependOn()` call - otherwise the
+# deployment can reach devices before a referenced component version exists
+# in the registry.
 module "deployment" {
   source = "../../../core/greengrass/deployment"
 
   <%- targetPropLineTf %>
-<% if (parentTargetArn) { %>  parent_target_arn = "<%- parentTargetArn %>"
-<% } %><% if (deploymentPoliciesLiteralTf) { %>  deployment_policies = <%- deploymentPoliciesLiteralTf %>
-<% } %>  components = local.components
+<% if (parentTargetArn) { %>
+  parent_target_arn = "<%- parentTargetArn %>"
+<% } %><% if (deploymentPoliciesLiteralTf) { %>
+  deployment_policies = <%- deploymentPoliciesLiteralTf %>
+<% } %>
+  components = local.components
 }
 
 output "target_arn" {

@@ -56,6 +56,10 @@
       "type": "string",
       "description": "ARN of the core device(s) token exchange role to grant prefix-scoped s3:GetObject on the artifact bucket. When omitted, the guide documents the policy to attach by hand."
     },
+    "tokenExchangeKeyPrefix": {
+      "type": "string",
+      "description": "Key prefix (glob) to narrow the tokenExchangeRoleArn grant to, e.g. \"com.myscope.*\". Defaults to the whole bucket (\"*\") - a core device reads whichever component versions get deployed to it, and that set is not knowable at generation time. Only used when tokenExchangeRoleArn is set."
+    },
     "artifactBucket": {
       "type": "string",
       "default": "create",

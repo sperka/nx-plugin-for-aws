@@ -4,13 +4,32 @@ terraform {
       source  = "hashicorp/aws"
       version = "<%- awsProviderVersion %>"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "<%- randomProviderVersion %>"
+    }
   }
 }
 
 variable "bucket_name" {
-  description = "Physical name for a newly created bucket. Leave unset (null) to let AWS generate one. Ignored when existing_bucket_name is set."
+  description = "Physical name for a newly created bucket. Leave unset (null) to derive one from bucket_name_prefix instead. Ignored when existing_bucket_name is set."
   type        = string
   default     = null
+}
+
+variable "bucket_name_prefix" {
+  description = "Prefix for the bucket name generated when bucket_name is left unset - typically the owning deployment's own name, so the created bucket carries workspace/deployment identity instead of an opaque AWS-generated name. Ignored when bucket_name or existing_bucket_name is set."
+  type        = string
+  default     = "greengrass-artifacts"
+
+  # This value is interpolated straight into a bucket name, so an invalid
+  # prefix would otherwise surface as an opaque S3 InvalidBucketName at apply
+  # time. The generator's own default always satisfies this; a hand-edited one
+  # need not.
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", var.bucket_name_prefix))
+    error_message = "bucket_name_prefix must be lowercase letters, digits and hyphens only, starting and ending with a letter or digit - it becomes the leading segment of an S3 bucket name."
+  }
 }
 
 variable "existing_bucket_name" {
@@ -26,6 +45,12 @@ variable "token_exchange_role_arn" {
 }
 
 variable "token_exchange_key_prefix" {
+  # Default "*": a core device's token exchange role reads whichever
+  # component versions get deployed to it, and that set is not knowable here -
+  # it lives in a sibling `greengrass-deployment` module's `components` map,
+  # which can gain a new component after this bucket module last ran. Narrow
+  # it only when every component this role's device(s) will ever fetch shares
+  # a prefix (e.g. one Nx workspace's own component namespace).
   description = "Key prefix (glob) the token exchange role grant is scoped to. Only used when token_exchange_role_arn is set."
   type        = string
   default     = "*"
@@ -38,9 +63,21 @@ variable "tags" {
 }
 
 locals {
-  creating    = var.existing_bucket_name == null
-  bucket_name = local.creating ? aws_s3_bucket.bucket[0].id : var.existing_bucket_name
-  bucket_arn  = local.creating ? aws_s3_bucket.bucket[0].arn : data.aws_s3_bucket.existing[0].arn
+  creating        = var.existing_bucket_name == null
+  generating_name = local.creating && var.bucket_name == null
+  bucket_name     = local.creating ? aws_s3_bucket.bucket[0].id : var.existing_bucket_name
+  bucket_arn      = local.creating ? aws_s3_bucket.bucket[0].arn : data.aws_s3_bucket.existing[0].arn
+
+  # S3 bucket names are globally unique and capped at 63 characters. The
+  # random suffix is what actually guarantees uniqueness; truncating the
+  # prefix leaves room for it plus the account/region segments that make a
+  # generated name recognisable during manual cleanup (see the `bucket`
+  # attribute below for why a name is generated at all). `substr` returns
+  # whatever the prefix holds when it is shorter than 20 characters, and
+  # `trimsuffix` keeps a truncation that lands on a hyphen from doubling the
+  # separator. The name is stable across applies because `random_string` keeps
+  # its result in state.
+  generated_bucket_name = local.generating_name ? "${trimsuffix(substr(var.bucket_name_prefix, 0, 20), "-")}-${data.aws_caller_identity.current[0].account_id}-${data.aws_region.current[0].region}-${random_string.bucket_suffix[0].result}" : null
 
   # `aws_iam_role_policy.role` takes the role's name, not its ARN - derived
   # from the last "/"-delimited segment of the ARN this module is only ever
@@ -52,6 +89,23 @@ locals {
 data "aws_s3_bucket" "existing" {
   count  = local.creating ? 0 : 1
   bucket = var.existing_bucket_name
+}
+
+# Only read when a name must be generated, so importing a bucket or passing an
+# explicit bucket_name never needs caller-identity/region permissions.
+data "aws_caller_identity" "current" {
+  count = local.generating_name ? 1 : 0
+}
+
+data "aws_region" "current" {
+  count = local.generating_name ? 1 : 0
+}
+
+resource "random_string" "bucket_suffix" {
+  count   = local.generating_name ? 1 : 0
+  length  = 8
+  special = false
+  upper   = false
 }
 
 # ONE explicit Greengrass component artifact repository per account and
@@ -70,7 +124,7 @@ resource "aws_s3_bucket" "bucket" {
   #checkov:skip=CKV2_AWS_62:Event notifications not required for an artifact repository nothing subscribes to
   #checkov:skip=CKV_AWS_144:Cross-region replication not required - component artifacts are published once per region they are deployed into
   #checkov:skip=CKV_AWS_145:AES256 (S3-managed) encryption is sufficient for published component artifacts
-  bucket = var.bucket_name
+  bucket = coalesce(var.bucket_name, local.generated_bucket_name)
 
   tags = merge(var.tags, { "greengrass-artifact-repository" = "true" })
 
@@ -167,10 +221,31 @@ resource "aws_iam_role_policy" "token_exchange_read" {
   })
 }
 
+# Both outputs `depends_on` the bucket's own hardening resources, not just the
+# bucket resource itself - otherwise a caller passing this output straight
+# into another module's `bucket_name`/`bucket_arn` input (as the app-level
+# artifact-bucket module does for the component-version module's artifact
+# upload) only orders that consumer after `aws_s3_bucket.bucket`, not after
+# versioning, encryption, the public-access block or the TLS-only policy. A
+# module input variable carries no implicit dependency of its own, so nothing
+# else in the graph would stop an artifact from landing in the bucket before
+# it is hardened.
 output "bucket_name" {
   value = local.bucket_name
+  depends_on = [
+    aws_s3_bucket_versioning.bucket,
+    aws_s3_bucket_server_side_encryption_configuration.bucket,
+    aws_s3_bucket_public_access_block.bucket,
+    aws_s3_bucket_policy.bucket,
+  ]
 }
 
 output "bucket_arn" {
   value = local.bucket_arn
+  depends_on = [
+    aws_s3_bucket_versioning.bucket,
+    aws_s3_bucket_server_side_encryption_configuration.bucket,
+    aws_s3_bucket_public_access_block.bucket,
+    aws_s3_bucket_policy.bucket,
+  ]
 }

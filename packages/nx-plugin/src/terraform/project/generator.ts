@@ -77,21 +77,25 @@ export const TERRAFORM_PROJECT_GENERATOR_INFO: NxGeneratorInfo =
  * it. Writing from the base target would rewrite the `default` input the hash is
  * computed over, so the target could never cache-hit.
  *
- * Scoped to the project's own `src` rather than `-recursive`, so it checks the
- * files the vended templates cover. `-diff` names what to fix when it fails.
+ * `-recursive`: vended module trees (e.g. `common/terraform/src/core/...` and
+ * `.../app/...`) hold their `.tf` files in nested directories, not directly
+ * under `{projectRoot}/src` - a library project like `common/terraform` has no
+ * top-level `.tf` file at all. Without `-recursive` this target inspects an
+ * empty file set for such a project and passes trivially, never having
+ * checked a single vended module. `-diff` names what to fix when it fails.
  */
 export const TERRAFORM_FORMAT_TARGET: TargetConfiguration = {
   executor: 'nx:run-commands',
   cache: true,
   inputs: ['default'],
   options: {
-    command: 'terraform fmt -check -diff',
+    command: 'terraform fmt -check -diff -recursive',
     forwardAllArgs: true,
     cwd: '{projectRoot}/src',
   },
   configurations: {
     fix: {
-      command: 'terraform fmt',
+      command: 'terraform fmt -recursive',
     },
     'skip-lint': {
       // Cross-platform no-op (`true` is not available on Windows cmd).

@@ -61,9 +61,9 @@ export interface MyDeploymentProps {
  * for "MyDeployment": a dedicated artifact bucket and
  * a deployment targeting a new thing group ("my-things").
  *
- * Re-running the generator re-syncs this file to its current options - hand
- * edits here do not survive a re-run. Add your own constructs alongside it in
- * your infra stack instead.
+ * Created once and left alone afterwards, so edits here survive a re-run -
+ * which also means a re-run with different options does NOT re-sync this file.
+ * Change an option (a target, \`tokenExchangeKeyPrefix\`) right here.
  */
 export class MyDeployment extends Construct {
   public readonly artifactBucket: GreengrassArtifactBucket;

@@ -20,9 +20,9 @@ export interface <%- nameClassName %>Props {
  * for "<%- name %>": a dedicated artifact bucket<% if (artifactBucketImported) { %> (imported)<% } %> and
  * a deployment targeting <%- targetDescription %>.
  *
- * Re-running the generator re-syncs this file to its current options - hand
- * edits here do not survive a re-run. Add your own constructs alongside it in
- * your infra stack instead.
+ * Created once and left alone afterwards, so edits here survive a re-run -
+ * which also means a re-run with different options does NOT re-sync this file.
+ * Change an option (a target, `tokenExchangeKeyPrefix`) right here.
  */
 export class <%- nameClassName %> extends Construct {
   public readonly artifactBucket: GreengrassArtifactBucket;
@@ -41,10 +41,21 @@ export class <%- nameClassName %> extends Construct {
 <% } %><% if (deploymentPoliciesLiteral) { %>      deploymentPolicies: <%- deploymentPoliciesLiteral %>,
 <% } %>      components: props.components,
     });
-<% if (tokenExchangeRoleArn) { %>
+<% if (tokenExchangeRoleArn && tokenExchangeKeyPrefix) { %>
+    // Grants the device-side token exchange role read access to the
+    // "<%- tokenExchangeKeyPrefix %>" prefix of this bucket.
+    this.artifactBucket.grantReadTo(
+      Role.fromRoleArn(this, 'TokenExchangeRole', '<%- tokenExchangeRoleArn %>', {
+        mutable: true,
+      }),
+      '<%- tokenExchangeKeyPrefix %>',
+    );
+<% } %><% if (tokenExchangeRoleArn && !tokenExchangeKeyPrefix) { %>
     // Grants the device-side token exchange role read access to every
-    // component version this bucket ever holds, so newly deployed components
-    // don't need a fresh grant each time.
+    // component version this bucket ever holds - the set of components
+    // deployed to this device is not knowable here, since it lives in this
+    // deployment's own components map, which can gain an entry after this
+    // stack last synthesised. Pass tokenExchangeKeyPrefix to narrow it.
     this.artifactBucket.grantReadTo(
       Role.fromRoleArn(this, 'TokenExchangeRole', '<%- tokenExchangeRoleArn %>', {
         mutable: true,

@@ -14,6 +14,7 @@ export interface GreengrassDeploymentGeneratorSchema {
   targetArn?: string;
   parentTargetArn?: string;
   tokenExchangeRoleArn?: string;
+  tokenExchangeKeyPrefix?: string;
   artifactBucket: string;
   deploymentPolicy: 'default' | 'no-rollback' | 'rollback';
   nucleus: 'classic' | 'lite' | 'none';

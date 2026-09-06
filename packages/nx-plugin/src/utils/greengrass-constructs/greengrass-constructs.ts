@@ -89,6 +89,17 @@ const APP_GREENGRASS_COMPONENT_TERRAFORM_DIR = joinPathFragments(
   'app',
   'greengrass-component',
 );
+// `terraform test` (the terraform#project `test` target) only discovers test
+// files directly in the root configuration directory or in a `tests`
+// subdirectory of it - never in an arbitrarily nested one - so these are
+// vended at `src/tests`, a sibling of `core` and `app`, rather than inside
+// `core/greengrass` alongside the modules they test.
+const TESTS_TERRAFORM_DIR = joinPathFragments(
+  PACKAGES_DIR,
+  SHARED_TERRAFORM_DIR,
+  'src',
+  'tests',
+);
 
 /** Registers `projectName`'s artifact target on the shared iac project the caller vended into. */
 const addArtifactProjectToSharedTargets = (
@@ -142,6 +153,15 @@ export const addGreengrassCoreConstructs = async <
       ),
       CORE_GREENGRASS_TERRAFORM_DIR,
       terraformProviderVersions(),
+      { overwriteStrategy: OverwriteStrategy.Overwrite },
+    );
+    // Credential-free `terraform test` coverage for the modules above (mocked
+    // providers, no AWS calls) - see the test file's own header comment.
+    generateFiles(
+      tree,
+      joinPathFragments(import.meta.dirname, 'files', 'terraform', 'tests'),
+      TESTS_TERRAFORM_DIR,
+      {},
       { overwriteStrategy: OverwriteStrategy.Overwrite },
     );
     return;
@@ -204,6 +224,8 @@ export interface AddGreengrassDeploymentAppConstructOptions {
   readonly targetDescription: string;
   readonly parentTargetArn?: string;
   readonly tokenExchangeRoleArn?: string;
+  /** Narrows the tokenExchangeRoleArn grant. Defaults to the whole bucket ("*") when unset. */
+  readonly tokenExchangeKeyPrefix?: string;
   readonly artifactBucketImported: boolean;
   readonly artifactBucketName?: string;
   /** Pre-rendered `DeploymentPoliciesProperty` object literal, or undefined to omit the prop entirely. */
@@ -353,7 +375,11 @@ export const addGreengrassComponentAppConstruct = async <
       options,
       { overwriteStrategy: OverwriteStrategy.KeepExisting },
     );
-    addArtifactProjectToSharedTargets(tree, 'terraform', options.hostProjectName);
+    addArtifactProjectToSharedTargets(
+      tree,
+      'terraform',
+      options.hostProjectName,
+    );
     return;
   }
 
