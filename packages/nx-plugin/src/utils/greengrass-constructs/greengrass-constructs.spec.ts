@@ -1165,6 +1165,65 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     expect(content).not.toContain('merge(manifest, {');
   });
 
+  it('encodes the inline recipe as JSON, never as YAML', async () => {
+    await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
+
+    const content = readCore('component-version');
+    // CreateComponentVersion picks its parser from the document's first byte.
+    // `yamlencode` always quotes mapping keys, so its first byte is `"`, the
+    // service parses the YAML body as JSON, and every apply fails with
+    // `Invalid recipe format; line: 1, column: 1` - verified against the real
+    // API. This assertion is the only thing standing between that regression
+    // and every Terraform user's first deploy.
+    expect(content).toContain(
+      'inline_recipe = jsonencode(local.substituted_recipe)',
+    );
+    // The call form, not the bare word: the comment above that line names
+    // `yamlencode` precisely so nobody reintroduces it.
+    expect(content).not.toContain('yamlencode(');
+  });
+
+  it('suppresses the checkov secret check on a literal token exchange role arn', async () => {
+    await addGreengrassDeploymentAppConstruct(
+      tree,
+      {
+        iac: 'terraform',
+        name: 'MyDeployment',
+        nameClassName: 'MyDeployment',
+        nameKebabCase: 'my-deployment',
+        targetPropLine: `thingGroupName: 'my-things',`,
+        targetPropLineTf: `thing_group_name = "my-things"`,
+        targetDescription: 'a new thing group ("my-things")',
+        parentTargetArn: undefined,
+        tokenExchangeRoleArn: 'arn:aws:iam::123456789012:role/GreengrassTes',
+        artifactBucketImported: false,
+        artifactBucketName: undefined,
+        deploymentPoliciesLiteral: undefined,
+        deploymentPoliciesLiteralTf: undefined,
+        libraryImportPath: '@proj/my-deployment',
+        componentsJsonPathFromRoot:
+          'packages/my-deployment/src/components.json',
+      },
+      declaration,
+    );
+
+    const content = tree.read(
+      'packages/common/terraform/src/app/greengrass-deployment/my-deployment-artifact-bucket/my-deployment-artifact-bucket.tf',
+      'utf-8',
+    );
+    // checkov's entropy detector fires on any assignment whose name contains
+    // "token", so a documented option would otherwise fail the generated
+    // workspace's own `build` target on its first run. Only a comment on the
+    // line immediately above the assignment suppresses it.
+    expect(content).toContain('#checkov:skip=CKV_SECRET_6');
+    const lines = content.split('\n');
+    const assignment = lines.findIndex((l) =>
+      l.includes('token_exchange_role_arn ='),
+    );
+    expect(assignment).toBeGreaterThan(0);
+    expect(lines[assignment - 1]).toContain('#checkov:skip=CKV_SECRET_6');
+  });
+
   it('grants s3:GetObject, scoped to the given prefix, when a token exchange role is configured', async () => {
     await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
 

@@ -6,12 +6,16 @@
 # bundling both concerns in one module would force a dependency cycle the
 # moment a caller wires that ordering with `depends_on`.
 #
-# Re-running the generator re-syncs this file to its current options - hand
-# edits here do not survive a re-run.
+# Created once and left alone afterwards, so edits here survive a re-run. Pass
+# the artifact-bucket module's other variables (a fixed `bucket_name`, a
+# narrower `token_exchange_key_prefix`) right here.
 module "artifact_bucket" {
   source = "../../../core/greengrass/artifact-bucket"
 <% if (artifactBucketImported) { %>  existing_bucket_name = "<%- artifactBucketName %>"
-<% } %><% if (tokenExchangeRoleArn) { %>  token_exchange_role_arn = "<%- tokenExchangeRoleArn %>"
+<% } %><% if (tokenExchangeRoleArn) { %>  # checkov flags any assignment whose name contains "token" as a possible
+  # secret. An IAM role ARN is an identifier, not a credential.
+  #checkov:skip=CKV_SECRET_6:An IAM role ARN is not a secret
+  token_exchange_role_arn = "<%- tokenExchangeRoleArn %>"
 <% } %>}
 
 output "bucket_name" {
