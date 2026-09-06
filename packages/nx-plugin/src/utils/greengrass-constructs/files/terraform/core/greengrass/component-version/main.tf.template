@@ -159,7 +159,13 @@ resource "aws_s3_object" "artifact" {
 # a same-version rebuild with different bytes fails at apply time rather than
 # silently corrupting an already-published version.
 resource "awscc_greengrassv2_component_version" "this" {
-  inline_recipe = yamlencode(local.substituted_recipe)
+  # JSON, never `yamlencode`: CreateComponentVersion picks its parser from the
+  # document's first byte, and `yamlencode` always quotes mapping keys, so its
+  # first byte is `"` - the service then parses the YAML body as JSON and fails
+  # with `Invalid recipe format; line: 1, column: 1` for every recipe. A recipe
+  # may be JSON, and Terraform has no unquoted-key YAML encoder, so this is the
+  # only shape that works. Verified against the real API on 2026-09-06.
+  inline_recipe = jsonencode(local.substituted_recipe)
 
   # Referencing `var.bucket_name` inside `inline_recipe` does not make
   # Terraform wait for the upload - an explicit `depends_on` on the object
