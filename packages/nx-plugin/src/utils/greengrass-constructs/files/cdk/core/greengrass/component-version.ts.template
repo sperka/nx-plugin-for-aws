@@ -119,6 +119,56 @@ const assertNoSynthTimeVersionDrift = (
 };
 
 /**
+ * Longest `destinationKeyPrefix` `BucketDeployment` accepts before throwing
+ * at synth time - measured, not documented, against aws-cdk-lib 2.268.0
+ * (`node_modules/aws-cdk-lib/aws-s3-deployment/lib/bucket-deployment.js`).
+ * That constructor tags the destination bucket with a key
+ * `aws-cdk:cr-owned:<destinationKeyPrefix>:<8 hex chars>` (the literal is 16
+ * characters, the two colons add 2, and the construct-address suffix is
+ * always exactly 8 - none of that varies with this prefix), then throws once
+ * the tag key exceeds 128 characters. Solving for the prefix:
+ * 128 - 16 - 2 - 8 = 102. Synthesizing `BucketDeployment` directly at prefix
+ * lengths 100-105 against this exact aws-cdk-lib version confirms it: 102
+ * passes, 103 throws - even though CDK's own thrown message claims
+ * "<=104 characters" (off by 2). This guard uses the measured 102, not the
+ * quoted 104, so it never lets through a prefix CDK's own check would still
+ * reject.
+ */
+const MAX_DESTINATION_KEY_PREFIX_LENGTH = 102;
+
+/**
+ * Synth-time guard against a `destinationKeyPrefix` too long for
+ * `BucketDeployment` to accept (see {@link MAX_DESTINATION_KEY_PREFIX_LENGTH}).
+ * Greengrass's own `CreateComponentVersion` allows a `ComponentName` up to
+ * 128 characters - well past what this prefix can carry once its fixed
+ * 64-character content hash and three "/" separators are accounted for - and
+ * the generator's own validator enforces only that service limit, so this
+ * must fail before `BucketDeployment` does, naming the actual culprit
+ * (`ComponentName` / `ComponentVersion`) instead of CDK's generic, and
+ * numerically wrong, tag-key error.
+ */
+const assertArtifactKeyPrefixFits = (
+  componentName: string,
+  componentVersion: string,
+  destinationKeyPrefix: string,
+): void => {
+  if (destinationKeyPrefix.length <= MAX_DESTINATION_KEY_PREFIX_LENGTH) {
+    return;
+  }
+  const overBy =
+    destinationKeyPrefix.length - MAX_DESTINATION_KEY_PREFIX_LENGTH;
+  throw new Error(
+    `ComponentName "${componentName}" (${componentName.length} characters) and ` +
+      `ComponentVersion "${componentVersion}" (${componentVersion.length} characters) ` +
+      `produce an artifact key prefix "${destinationKeyPrefix}" that is ${destinationKeyPrefix.length} ` +
+      `characters long, exceeding the ${MAX_DESTINATION_KEY_PREFIX_LENGTH} character limit CDK's ` +
+      `BucketDeployment enforces on it (the prefix always carries a fixed 64-character content hash ` +
+      `plus three "/" separators, on top of ComponentName and ComponentVersion). Shorten ` +
+      `ComponentName, ComponentVersion, or both by at least ${overBy} character(s).`,
+  );
+};
+
+/**
  * Publishes one Greengrass component version: reads the resolved recipe and
  * artifact a component's `<c>-artifact` target wrote, uploads the artifact to
  * the shared {@link GreengrassArtifactBucket}, and emits an
@@ -197,6 +247,12 @@ export class GreengrassComponentVersion extends Construct {
     );
 
     const destinationKeyPrefix = `${componentName}/${componentVersion}/${sha256}/`;
+
+    assertArtifactKeyPrefixFits(
+      componentName,
+      componentVersion,
+      destinationKeyPrefix,
+    );
 
     // The source is the DIRECTORY holding the artifact, not the artifact
     // itself. `BucketDeployment` unpacks its source asset and syncs the

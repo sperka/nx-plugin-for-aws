@@ -798,6 +798,93 @@ describe('GreengrassComponentVersion', () => {
         ),
     ).toThrow(/Expected exactly one/);
   });
+
+  // `destinationKeyPrefix` is `<ComponentName>/<ComponentVersion>/<sha256>/`:
+  // the 64-character sha256 plus its three "/" separators leave exactly 35
+  // characters for ComponentName and ComponentVersion combined before
+  // `BucketDeployment` itself throws (measured against aws-cdk-lib 2.268.0;
+  // see the comment on `MAX_DESTINATION_KEY_PREFIX_LENGTH` in
+  // `component-version.ts.template`). "1.0.0" is 5 characters, so a
+  // 30-character ComponentName sits exactly at the limit and a
+  // 31-character one is exactly one character over.
+  const componentNameOfLength = (length: number): string =>
+    `com.example.${'X'.repeat(length - 'com.example.'.length)}`;
+
+  it('accepts a ComponentName that puts the artifact key prefix exactly at the length limit', () => {
+    const componentName = componentNameOfLength(30);
+    const { recipesDir, artifactsDir } = writeBuildOutput(
+      componentName,
+      '1.0.0',
+      'artifact bytes at limit',
+    );
+
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
+      stack,
+      'ArtifactBucket',
+    );
+
+    expect(
+      () =>
+        new ComponentVersionModule.GreengrassComponentVersion(
+          stack,
+          'ComponentVersion',
+          { recipesDir, artifactsDir, bucket },
+        ),
+    ).not.toThrow();
+
+    const resources = assertionsLib.Template.fromStack(stack).toJSON()
+      .Resources as Record<string, any>;
+    const bucketDeploymentResource = Object.values(resources).find(
+      (r: any) => r.Type === 'Custom::CDKBucketDeployment',
+    ) as any;
+    const destinationKeyPrefix =
+      bucketDeploymentResource.Properties.DestinationBucketKeyPrefix;
+    expect(destinationKeyPrefix).toHaveLength(102);
+    // Unchanged formula - a name that already fit keeps the exact key an
+    // already-published artifact would have been uploaded under.
+    expect(destinationKeyPrefix).toBe(
+      `${componentName}/1.0.0/${sha256Of('artifact bytes at limit')}/`,
+    );
+  });
+
+  it('throws an actionable error naming the limit and the offending length when ComponentName pushes the artifact key prefix past it', () => {
+    const componentName = componentNameOfLength(31);
+    const { recipesDir, artifactsDir } = writeBuildOutput(
+      componentName,
+      '1.0.0',
+      'artifact bytes over limit',
+    );
+
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
+      stack,
+      'ArtifactBucket',
+    );
+
+    let thrown: Error | undefined;
+    try {
+      new ComponentVersionModule.GreengrassComponentVersion(
+        stack,
+        'ComponentVersion',
+        { recipesDir, artifactsDir, bucket },
+      );
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    // Names the ComponentName and ComponentVersion driving the overflow, the
+    // resulting prefix length (103), and the limit it exceeds (102) - not a
+    // bare `BucketDeployment` tag-key error.
+    expect(thrown).toBeDefined();
+    const message = thrown?.message ?? '';
+    expect(message).toContain(`ComponentName "${componentName}"`);
+    expect(message).toContain('ComponentVersion "1.0.0"');
+    expect(message).toContain('103');
+    expect(message).toContain('exceeding the 102 character limit');
+  });
 });
 
 describe('GreengrassDeployment', () => {
