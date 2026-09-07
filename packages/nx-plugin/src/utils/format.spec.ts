@@ -552,6 +552,9 @@ describe('format utils', () => {
       // tree.root, so import sorting is still applied.
       const nestedRoot = path.join(workspaceDir, 'nested-workspace');
       mkdirSync(nestedRoot);
+      // Nx's native WorkspaceContext deadlocks when a workspace root yields
+      // zero files, so keep one file on disk in the nested root.
+      writeFileSync(path.join(nestedRoot, '.gitkeep'), '');
       tree.root = nestedRoot;
       writeFileSync(
         path.join(workspaceDir, 'ruff.toml'),
