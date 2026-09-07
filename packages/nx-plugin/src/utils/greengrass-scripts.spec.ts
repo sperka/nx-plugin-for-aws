@@ -1430,3 +1430,341 @@ describe('greengrass build-artifact.ts', () => {
     ]);
   });
 });
+
+describe('greengrass deploy-local.ts', () => {
+  const COMPONENT_NAME = 'com.example.MyComponent';
+  const COMPONENT_VERSION = '1.0.0';
+
+  let tmpDir: string;
+  let scriptsDir: string;
+  let greengrassRoot: string;
+  let distDir: string;
+
+  // Stands in for greengrass-cli, which only exists on a core device.
+  // `deployment create` exits with the code in the `submit-status` fixture.
+  // `component list` answers its Nth call with the Nth `list-<n>` fixture and
+  // repeats `list-last` after those run out, so one shell script covers a
+  // component whose state CHANGES between checks without a mock inside the
+  // script under test.
+  const writeFakeCli = (): void => {
+    const binDir = join(greengrassRoot, 'bin');
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(
+      join(binDir, 'greengrass-cli'),
+      [
+        '#!/bin/sh',
+        `FIXTURES="${join(greengrassRoot, 'fixtures')}"`,
+        'if [ "$1" = "deployment" ]; then',
+        '  echo "Local deployment submitted!"',
+        '  exit "$(cat "$FIXTURES/submit-status")"',
+        'fi',
+        'if [ "$1" = "component" ]; then',
+        '  COUNT=$(cat "$FIXTURES/list-count" 2>/dev/null || echo 0)',
+        '  COUNT=$((COUNT + 1))',
+        '  echo "$COUNT" > "$FIXTURES/list-count"',
+        '  FILE="$FIXTURES/list-$COUNT"',
+        '  if [ ! -f "$FILE" ]; then FILE="$FIXTURES/list-last"; fi',
+        '  cat "$FILE"',
+        '  exit 0',
+        'fi',
+        'exit 64',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+  };
+
+  // The script's FIRST `component list` call is its pre-submit snapshot, so
+  // `listOutputs[0]` is the device state before the deployment and the rest are
+  // what the poll loop sees.
+  const writeFixtures = ({
+    submitStatus = 0,
+    listOutputs = [''],
+    componentLog,
+  }: {
+    submitStatus?: number;
+    listOutputs?: string[];
+    componentLog?: string;
+  }): void => {
+    const fixturesDir = join(greengrassRoot, 'fixtures');
+    mkdirSync(fixturesDir, { recursive: true });
+    writeFileSync(join(fixturesDir, 'submit-status'), `${submitStatus}\n`);
+    for (const [index, output] of listOutputs.entries()) {
+      writeFileSync(join(fixturesDir, `list-${index + 1}`), output);
+    }
+    writeFileSync(
+      join(fixturesDir, 'list-last'),
+      listOutputs[listOutputs.length - 1],
+    );
+    if (componentLog !== undefined) {
+      mkdirSync(join(greengrassRoot, 'logs'), { recursive: true });
+      writeFileSync(
+        join(greengrassRoot, 'logs', `${COMPONENT_NAME}.log`),
+        componentLog,
+      );
+    }
+  };
+
+  // The shape `greengrass-cli component list` prints: one indented block per
+  // component, with no documented layout.
+  const listOutputFor = (version: string, state: string): string =>
+    [
+      'Components currently running in Greengrass:',
+      'Component Name: aws.greengrass.Cli',
+      '    Version: 2.18.3',
+      '    State: RUNNING',
+      `Component Name: ${COMPONENT_NAME}`,
+      `    Version: ${version}`,
+      `    State: ${state}`,
+      '    Configuration: {"accessControl":{}}',
+      '',
+    ].join('\n');
+
+  /** The device before this deployment: a previous version, running. */
+  const PREVIOUS_VERSION_RUNNING = listOutputFor('0.9.0', 'RUNNING');
+
+  const runDeployLocal = (
+    timeoutSeconds?: number | string,
+  ): ReturnType<typeof spawnSync> =>
+    spawnSync(
+      process.execPath,
+      [join(scriptsDir, 'deploy-local.mjs'), distDir],
+      {
+        encoding: 'utf-8',
+        env: {
+          ...process.env,
+          GREENGRASS_ROOT: greengrassRoot,
+          ...(timeoutSeconds === undefined
+            ? {}
+            : {
+                GREENGRASS_DEPLOY_TIMEOUT_SECONDS: String(timeoutSeconds),
+              }),
+        },
+      },
+    );
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'greengrass-deploy-local-'));
+    scriptsDir = mkdtempSync(
+      join(import.meta.dirname, '.tmp-greengrass-deploy-local-'),
+    );
+    writeFileSync(
+      join(scriptsDir, 'recipe-utils.mjs'),
+      transpileTemplate('recipe-utils.ts.template'),
+    );
+    writeFileSync(
+      join(scriptsDir, 'deploy-local.mjs'),
+      transpileTemplate('deploy-local.ts.template').replaceAll(
+        './recipe-utils.js',
+        './recipe-utils.mjs',
+      ),
+    );
+
+    greengrassRoot = join(tmpDir, 'greengrass', 'v2');
+    distDir = join(tmpDir, 'dist');
+    const recipesDir = join(distDir, 'greengrass-build', 'recipes');
+    mkdirSync(recipesDir, { recursive: true });
+    writeFileSync(
+      join(recipesDir, `${COMPONENT_NAME}-${COMPONENT_VERSION}.yaml`),
+      [
+        'RecipeFormatVersion: 2020-01-25',
+        `ComponentName: ${COMPONENT_NAME}`,
+        `ComponentVersion: ${COMPONENT_VERSION}`,
+        'Manifests:',
+        '  - Artifacts:',
+        '      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component.zip',
+        '',
+      ].join('\n'),
+    );
+    writeFakeCli();
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(scriptsDir, { recursive: true, force: true });
+  });
+
+  it('should exit 0 once the component holds RUNNING at the version just deployed', () => {
+    writeFixtures({
+      listOutputs: [
+        PREVIOUS_VERSION_RUNNING,
+        listOutputFor(COMPONENT_VERSION, 'RUNNING'),
+      ],
+    });
+
+    const result = runDeployLocal();
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toContain(
+      `${COMPONENT_NAME}=${COMPONENT_VERSION} is RUNNING`,
+    );
+    // The device was on 0.9.0, so the state read is unambiguously this
+    // deployment's and the same-version caveat must not be printed.
+    expect(result.stderr).not.toContain('already reports');
+  }, 30000);
+
+  it('should exit non-zero and print the component log tail when the component is BROKEN', () => {
+    writeFixtures({
+      listOutputs: [
+        PREVIOUS_VERSION_RUNNING,
+        listOutputFor(COMPONENT_VERSION, 'BROKEN'),
+      ],
+      componentLog: [
+        'first log line',
+        'Traceback...',
+        'ValueError: nope',
+        '',
+      ].join('\n'),
+    });
+
+    const result = runDeployLocal();
+
+    // A local deployment reporting success is exactly the case this catches -
+    // the fake CLI exits 0 on `deployment create` here.
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      `${COMPONENT_NAME}=${COMPONENT_VERSION} is BROKEN`,
+    );
+    expect(result.stderr).toContain('ValueError: nope');
+  }, 30000);
+
+  it('should exit non-zero when the component reaches RUNNING and then dies', () => {
+    // The nucleus reports RUNNING as soon as it starts the process, so a
+    // component that crashes seconds in passes any single-sample check.
+    writeFixtures({
+      listOutputs: [
+        PREVIOUS_VERSION_RUNNING,
+        listOutputFor(COMPONENT_VERSION, 'RUNNING'),
+        listOutputFor(COMPONENT_VERSION, 'BROKEN'),
+      ],
+      componentLog: ['started', 'ConnectionRefusedError: ipc', ''].join('\n'),
+    });
+
+    const result = runDeployLocal();
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      `${COMPONENT_NAME}=${COMPONENT_VERSION} is BROKEN`,
+    );
+    expect(result.stderr).toContain('ConnectionRefusedError: ipc');
+  }, 30000);
+
+  it('should print the sudo-rs remedy when the component log carries its signature', () => {
+    writeFixtures({
+      listOutputs: [
+        PREVIOUS_VERSION_RUNNING,
+        listOutputFor(COMPONENT_VERSION, 'BROKEN'),
+      ],
+      componentLog: [
+        "sudo: preserving the entire environment is not supported, '-E' is ignored",
+        "KeyError: 'AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT'",
+        '',
+      ].join('\n'),
+    });
+
+    const result = runDeployLocal();
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      'sudo update-alternatives --set sudo /usr/bin/sudo.ws',
+    );
+    expect(result.stderr).toContain('sudo systemctl restart greengrass');
+  }, 30000);
+
+  it('should exit non-zero naming the last state when the component never settles', () => {
+    writeFixtures({
+      listOutputs: [
+        PREVIOUS_VERSION_RUNNING,
+        listOutputFor(COMPONENT_VERSION, 'STARTING'),
+      ],
+    });
+
+    const result = runDeployLocal(1);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('did not settle within 1s');
+    expect(result.stderr).toContain('last reported state STARTING');
+  }, 30000);
+
+  it('should not accept a RUNNING entry still carrying the previous version', () => {
+    writeFixtures({ listOutputs: [PREVIOUS_VERSION_RUNNING] });
+
+    const result = runDeployLocal(1);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      'none (the component was not listed at this version)',
+    );
+  }, 30000);
+
+  it('should warn that the state read is ambiguous when the version is already on the device', () => {
+    writeFixtures({
+      listOutputs: [listOutputFor(COMPONENT_VERSION, 'RUNNING')],
+    });
+
+    const result = runDeployLocal();
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toContain(
+      `This device already reports ${COMPONENT_NAME}=${COMPONENT_VERSION}`,
+    );
+    expect(result.stderr).toContain('bump ComponentVersion in recipe.yaml');
+  }, 30000);
+
+  it.each(['Infinity', '-5', 'soon'])(
+    'should fall back to the default bound rather than honour GREENGRASS_DEPLOY_TIMEOUT_SECONDS=%s',
+    (timeout) => {
+      // Infinity would poll forever, a negative value would skip polling
+      // altogether and report a timeout that never happened.
+      writeFixtures({
+        listOutputs: [
+          PREVIOUS_VERSION_RUNNING,
+          listOutputFor(COMPONENT_VERSION, 'BROKEN'),
+        ],
+      });
+
+      const result = runDeployLocal(timeout);
+
+      expect(result.stderr).toContain(
+        `Ignoring GREENGRASS_DEPLOY_TIMEOUT_SECONDS="${timeout}"`,
+      );
+      expect(result.stderr).toContain('Waiting 120s instead');
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        `${COMPONENT_NAME}=${COMPONENT_VERSION} is BROKEN`,
+      );
+    },
+    30000,
+  );
+
+  it('should give up rather than hang when greengrass-cli never returns', () => {
+    writeFixtures({});
+    // A wedged nucleus: the CLI starts and never answers. Every subprocess has
+    // to be bounded, or no timeout on the poll loop can bound the target.
+    writeFileSync(
+      join(greengrassRoot, 'bin', 'greengrass-cli'),
+      '#!/bin/sh\nexec sleep 60\n',
+      { mode: 0o755 },
+    );
+
+    const startedAt = Date.now();
+    const result = runDeployLocal(2);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('did not return within 2s');
+    expect(Date.now() - startedAt).toBeLessThan(20000);
+  }, 30000);
+
+  it('should fail without polling when greengrass-cli rejects the deployment', () => {
+    writeFixtures({
+      submitStatus: 3,
+      listOutputs: [listOutputFor(COMPONENT_VERSION, 'RUNNING')],
+    });
+
+    const result = runDeployLocal();
+
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain('greengrass-cli exited with 3');
+    expect(result.stderr).not.toContain('Waiting up to');
+  });
+});
