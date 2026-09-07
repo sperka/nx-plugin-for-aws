@@ -113,6 +113,12 @@ deployment.dependOn(myComponent);
 
 Without this call, referencing the component in `components` at synth time does not make CloudFormation wait for the `ComponentVersion` to exist - `dependOn` is what orders the two resources.
 
+The `import { components } from '@my-scope/my-deployment'` line above is a cross-project import you write yourself, so neither this generator nor `greengrass-deployment` declares it for you - they don't know which project holds your stack. Run the sync generators once after adding it:
+
+<NxCommands commands={['sync']} />
+
+The plugin's `ts#sync` generator declares `@my-scope/my-deployment` in your infra project's `package.json` (`workspace:*` where the package manager supports the workspace protocol, `*` on npm and yarn classic), and `@nx/js:typescript-sync` adds the TypeScript project reference. Until then Nx reports `The workspace is out of sync` before a build runs. See <Link path="guides/typescript-project#importing-your-library-code-in-other-projects">Importing your Library Code in Other Projects</Link> for the full flow.
+
 On Terraform, the same ordering is a `depends_on` on the deployment module block in your own root module:
 
 ```hcl title="packages/infra/src/main.tf" {8}

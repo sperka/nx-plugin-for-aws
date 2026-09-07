@@ -9,6 +9,7 @@ import Link from '@components/link.astro';
 import RunGenerator from '@components/run-generator.astro';
 import GeneratorParameters from '@components/generator-parameters.astro';
 import Infrastructure from '@components/infrastructure.astro';
+import NxCommands from '@components/nx-commands.astro';
 import Snippet from '@components/snippet.astro';
 import OptionFilter from '@components/option-filter.astro';
 
@@ -124,6 +125,12 @@ deployment.dependOn(myComponent);
 ```
 
 `common/constructs` stays independent of any specific deployment's own library - the wiring happens once, in your infra stack, not inside the vended construct.
+
+The `import { components } from '@my-scope/my-deployment'` line is a cross-project import you write yourself, so the generator does not declare it - it does not know which project holds your stack. Run the sync generators once after adding it:
+
+<NxCommands commands={['sync']} />
+
+The plugin's `ts#sync` generator declares `@my-scope/my-deployment` in your infra project's `package.json` (`workspace:*` where the package manager supports the workspace protocol, `*` on npm and yarn classic), and `@nx/js:typescript-sync` adds the TypeScript project reference. Until then Nx reports `The workspace is out of sync` before a build runs. See <Link path="guides/typescript-project#importing-your-library-code-in-other-projects">Importing your Library Code in Other Projects</Link> for the full flow.
 
 </Fragment>
 <Fragment slot="terraform">
