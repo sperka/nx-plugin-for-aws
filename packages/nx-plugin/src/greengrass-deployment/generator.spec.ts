@@ -2,7 +2,7 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-import { logger, type Tree } from '@nx/devkit';
+import { logger, readJson, type Tree, writeJson } from '@nx/devkit';
 import { expectHasMetricTags } from '../utils/metrics.spec.js';
 import { readProjectConfigurationUnqualified } from '../utils/nx.js';
 import { createTreeUsingTsSolutionSetup } from '../utils/test.js';
@@ -126,6 +126,35 @@ describe('greengrass-deployment generator', () => {
     expect(tree.read(componentsPath, 'utf-8')).toContain(
       'export const userAddition = true;',
     );
+  });
+
+  it('should leave the consuming project to declare the deployment library', async () => {
+    const infraManifest = {
+      name: '@proj/infra',
+      version: '0.0.0',
+      private: true,
+      dependencies: { tslib: 'catalog:' },
+    };
+    writeJson(tree, 'packages/infra/package.json', infraManifest);
+
+    await greengrassDeploymentGenerator(tree, defaultOptions);
+
+    // The vended construct takes `components` as a prop, so no generated file
+    // imports the deployment library. `ts#sync` declares it once the user
+    // writes that import in their own stack - a generator that declared it
+    // here would have to guess which project holds the stack.
+    const construct = tree.read(
+      'packages/common/constructs/src/app/greengrass/my-deployment.ts',
+      'utf-8',
+    );
+    expect(construct).toContain('export class MyDeployment');
+    expect(construct).not.toContain("from '@proj/my-deployment'");
+    expect(readJson(tree, 'packages/infra/package.json')).toEqual(
+      infraManifest,
+    );
+    expect(
+      readJson(tree, 'packages/common/constructs/package.json').dependencies,
+    ).not.toHaveProperty('@proj/my-deployment');
   });
 
   it('should escalate from infra=none to infra=deployment', async () => {
