@@ -56,7 +56,7 @@ TypeScript source is never packaged directly - the deployable content is a singl
 | `bundle`           | Bundles every entrypoint in the project (Lambda functions, MCP servers, this component, ...) into single-file, `node`-platform output | Yes    | `compile`  |
 | `<c>-vendor`       | ipc: true only - copies this build's aws-crt addon next to the bundle output      | Yes    | `bundle`   |
 | `<c>-artifact`     | Zips the component's bundle output (staged output, when ipc: true) into a GDK-shaped layout | Yes    | `<c>-vendor` when ipc: true, else `bundle` |
-| `<c>-deploy-local` | Creates a local deployment via `greengrass-cli` — runs **on** the core device      | No     | `<c>-artifact` |
+| `<c>-deploy-local` | Creates a local deployment via `greengrass-cli`, then verifies the component started — runs **on** the core device | No     | `<c>-artifact` |
 | `<c>-logs`         | Tails the component's log file — runs **on** the core device                      | No     | -          |
 
 `<c>-artifact` is also wired onto the project's `build` and `assemble` targets, so a normal build always produces a fresh artifact.
@@ -168,7 +168,11 @@ module "my_deployment" {
 
 <NxCommands commands={['run <project>:<component-name>-deploy-local']} />
 
-Creates one local deployment (`greengrass-cli deployment create --recipeDir ... --artifactDir ... --merge <ComponentName>=<version>`) and exits — it does not tail or watch the deployment. Local deployments resolve the recipe's `s3://` placeholder artifact from `--artifactDir` by component name and version; this generator is experimental while that flow is being verified across nucleus versions.
+Creates one local deployment (`greengrass-cli deployment create --recipeDir ... --artifactDir ... --merge <ComponentName>=<version>`), then polls `greengrass-cli component list` until the component settles. It exits 0 once the component holds `RUNNING` (or `FINISHED`) across three checks two seconds apart, and non-zero on `BROKEN` or `ERRORED`, or when the component has not settled within 120 seconds (`GREENGRASS_DEPLOY_TIMEOUT_SECONDS` changes that bound) — printing the state it reached and the last 40 lines of the component's log. Three checks rather than one because the nucleus reports `RUNNING` as soon as it starts the process, so a component that crashes a few seconds in is `RUNNING` at the first check. `FINISHED` passes, for a component deliberately made one-shot, but is called out: a generated component subscribes to IPC and runs until it is stopped, so `FINISHED` usually means it exited immediately. That check exists because a deployment can report success while the component is broken, see <Link path="guides/greengrass-deployment#a-successful-deployment-is-not-a-running-component">A Successful Deployment Is Not a Running Component</Link>.
+
+Bump `ComponentVersion` before re-deploying: the CLI reports no instance identity, so on a re-deploy of a version already on the device the state read can be the outgoing instance's. The target warns when it sees that case rather than claiming a verdict it cannot support.
+
+Local deployments resolve the recipe's `s3://` placeholder artifact from `--artifactDir` by component name and version; this generator is experimental while that flow is being verified across nucleus versions.
 
 <NxCommands commands={['run <project>:<component-name>-logs']} />
 
@@ -181,6 +185,8 @@ Both targets read `GREENGRASS_ROOT` from the environment, defaulting to `/greeng
 The component targets in `project.json` and `gdk-config.json` are framework-owned and re-synced to the current definition on every generator run, so manual edits to them do not survive a re-run. The vended scripts under `packages/common/scripts/src/greengrass/` - including `vendor-crt-addon.ts`, vended only when `ipc: true` - are created once and never overwritten, so your patches survive. Delete those files and re-run the generator to pick up their current versions.
 
 Because those scripts never refresh on their own, this generator checks them up front: in a workspace whose Greengrass scripts were vended by a plugin version that predates bundled (TypeScript) components, it refuses to generate and tells you to delete and re-vend them — otherwise the `<c>-artifact` target would fail later with an unexplained `Nothing to package`.
+
+The post-deployment verification described above is not enforced that way: a workspace vended before it keeps a `deploy-local.ts` that only submits the deployment and reports `greengrass-cli`'s own exit status. That still deploys correctly, so refusing to generate over it would be disproportionate — the generator warns instead, naming the file. Take the new check by deleting `packages/common/scripts/src/greengrass/` and re-running the generator (re-apply any patches of your own afterwards).
 
 ## Recipe ownership
 
@@ -225,6 +231,8 @@ ComponentConfiguration:
 ```
 
 Depending on `aws-iot-device-sdk-v2` alone does not authorize IPC operations — Greengrass enforces this `accessControl` policy independently, so widen `operations`/`resources` here as your component needs to publish or subscribe to more topics.
+
+On a core device whose `sudo` is `sudo-rs` — the default on Ubuntu 25.10 and later — no IPC component can start at all, whatever this policy allows. See <Link path="guides/greengrass-deployment#ipc-components-fail-on-a-sudo-rs-device">IPC Components Fail on a sudo-rs Device</Link> for the one-line fix on the device.
 
 </OptionFilter>
 

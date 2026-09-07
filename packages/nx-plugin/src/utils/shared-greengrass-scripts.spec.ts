@@ -2,7 +2,7 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-import { readJson, type Tree } from '@nx/devkit';
+import { logger, readJson, type Tree } from '@nx/devkit';
 import { declareDependencies } from './declared-dependencies.js';
 import {
   SHARED_GREENGRASS_SCRIPTS_DEPENDENCIES,
@@ -124,5 +124,52 @@ describe('sharedGreengrassScriptsGenerator', () => {
         'utf-8',
       ),
     ).toEqual(customized);
+  });
+
+  // KeepExisting means a workspace vended before the post-deployment state
+  // check keeps a deploy-local.ts that reports greengrass-cli's exit status and
+  // nothing about the component. Reported rather than refused: unlike a stale
+  // build-artifact.ts, it still deploys correctly.
+  const DEPLOY_LOCAL_PATH =
+    'packages/common/scripts/src/greengrass/deploy-local.ts';
+
+  it('should warn when the workspace keeps a deploy-local.ts that does not verify the component', async () => {
+    await sharedGreengrassScriptsGenerator(tree, declaration);
+    tree.write(
+      DEPLOY_LOCAL_PATH,
+      [
+        "import { spawnSync } from 'node:child_process';",
+        '// submits the deployment and exits, as vended before the check',
+        'process.exit(0);',
+        '',
+      ].join('\n'),
+    );
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    await sharedGreengrassScriptsGenerator(tree, declaration);
+
+    const message = warn.mock.calls.map(([first]) => String(first)).join('\n');
+    warn.mockRestore();
+    expect(message).toContain(DEPLOY_LOCAL_PATH);
+    expect(message).toContain('BROKEN');
+    expect(message).toContain('packages/common/scripts/src/greengrass');
+  });
+
+  it('should not warn about deploy-local.ts on a fresh workspace, or one already carrying the check', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    // Nothing vended yet: there is no stale copy to complain about.
+    await sharedGreengrassScriptsGenerator(tree, declaration);
+    // Vended, then customized while keeping the check.
+    const current = tree.read(DEPLOY_LOCAL_PATH, 'utf-8') ?? '';
+    expect(current).toContain('GREENGRASS_DEPLOY_TIMEOUT_SECONDS');
+    tree.write(DEPLOY_LOCAL_PATH, `// user customisation\n${current}`);
+    await sharedGreengrassScriptsGenerator(tree, declaration);
+
+    const calls = warn.mock.calls.map(([first]) => String(first));
+    warn.mockRestore();
+    expect(
+      calls.filter((message) => message.includes('deploy-local.ts')),
+    ).toEqual([]);
   });
 });
