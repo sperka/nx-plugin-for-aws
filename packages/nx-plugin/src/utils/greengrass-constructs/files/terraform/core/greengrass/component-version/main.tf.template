@@ -172,6 +172,21 @@ resource "aws_s3_object" "artifact" {
 # a same-version rebuild with different bytes fails at apply time rather than
 # silently corrupting an already-published version.
 resource "awscc_greengrassv2_component_version" "this" {
+  # No size guard here, unlike the CDK construct's `assertInlineRecipeFits`.
+  # `CreateComponentVersion` caps this document at 16384 bytes (measured
+  # against the real API on 2026-09-07 - Service Quotas reports 8192 and is
+  # wrong), and a `precondition` on `terraform_data.guard` could express that
+  # check. It would buy nothing on the vended wiring. This string embeds
+  # `var.bucket_name`, which comes from the artifact-bucket module's
+  # `bucket_name` output, itself derived from a `random_string` suffix that is
+  # unknown until apply on a fresh workspace. Terraform defers a precondition
+  # whose condition is unknown at plan time to apply - the same apply in which
+  # `CreateComponentVersion` already returns `Invalid Input: Size of the recipe
+  # size can't exceed 16KB`. Terraform also has no byte-length function
+  # (`length()` counts characters), so the check could not be exact on a
+  # non-ASCII recipe. The CDK guard earns its code because synth is genuinely
+  # earlier, offline and exactly measurable. Neither property holds here.
+  #
   # JSON, never `yamlencode`: CreateComponentVersion picks its parser from the
   # document's first byte, and `yamlencode` always quotes mapping keys, so its
   # first byte is `"` - the service then parses the YAML body as JSON and fails

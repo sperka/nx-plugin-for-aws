@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Tree } from '@nx/devkit';
+import yaml from 'js-yaml';
 import ts from 'typescript';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import terraformProjectGenerator from '../../terraform/project/generator.js';
@@ -306,6 +307,72 @@ const writeMultiArtifactBuildOutput = (
     ].join('\n'),
   );
   return { recipesDir, artifactsDir };
+};
+
+/**
+ * A recipe whose `ComponentConfiguration.DefaultConfiguration` carries a plain
+ * scalar of `paddingChars` repeats of `paddingChar`, for the recipe-size
+ * guard's boundary tests. js-yaml emits such a scalar verbatim and never folds
+ * it at `lineWidth: -1`, so the padding is a linear dial on the serialized
+ * recipe's size - one byte per character for `a`, three for a character like
+ * `あ`.
+ */
+const paddedRecipeSource = (
+  componentName: string,
+  componentVersion: string,
+  paddingChars: number,
+  paddingChar = 'a',
+): string =>
+  [
+    'RecipeFormatVersion: 2020-01-25',
+    `ComponentName: ${componentName}`,
+    `ComponentVersion: ${componentVersion}`,
+    'ComponentConfiguration:',
+    '  DefaultConfiguration:',
+    `    pad: ${paddingChar.repeat(paddingChars)}`,
+    'Manifests:',
+    '  - Artifacts:',
+    '      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component.zip',
+  ].join('\n');
+
+/**
+ * Writes a `greengrass-build`-shaped recipe and artifact pair around
+ * {@link paddedRecipeSource}. Returns the recipe source too, so a test can
+ * recompute the expected dump.
+ */
+const writePaddedBuildOutput = (
+  componentName: string,
+  componentVersion: string,
+  artifactContent: string,
+  configurationPaddingChars: number,
+  paddingChar = 'a',
+): { recipesDir: string; artifactsDir: string; recipeSource: string } => {
+  const recipesDir = join(tmpDir, componentName, componentVersion, 'recipes');
+  const artifactsDir = join(
+    tmpDir,
+    componentName,
+    componentVersion,
+    'artifacts',
+  );
+  mkdirSync(recipesDir, { recursive: true });
+  mkdirSync(join(artifactsDir, componentName, componentVersion), {
+    recursive: true,
+  });
+  const recipeSource = paddedRecipeSource(
+    componentName,
+    componentVersion,
+    configurationPaddingChars,
+    paddingChar,
+  );
+  writeFileSync(
+    join(recipesDir, `${componentName}-${componentVersion}.yaml`),
+    recipeSource,
+  );
+  writeFileSync(
+    join(artifactsDir, componentName, componentVersion, 'my-component.zip'),
+    artifactContent,
+  );
+  return { recipesDir, artifactsDir, recipeSource };
 };
 
 describe('recipe.ts (readRecipeSummary / substituteArtifactUris)', () => {
@@ -884,6 +951,264 @@ describe('GreengrassComponentVersion', () => {
     expect(message).toContain('ComponentVersion "1.0.0"');
     expect(message).toContain('103');
     expect(message).toContain('exceeding the 102 character limit');
+  });
+
+  // `CreateComponentVersion` caps `InlineRecipe` at 16384 bytes (see
+  // `MAX_INLINE_RECIPE_BYTES` in `component-version.ts.template`). The exact
+  // boundary is derived, never hardcoded: synth once with a one-character
+  // padding, measure the resulting dump, then pad the difference. So a change
+  // in js-yaml's output shape moves the fixture instead of silently making the
+  // test measure the wrong side of the limit.
+  //
+  // `existingBucketName` keeps `bucketName` a literal, so `InlineRecipe` is a
+  // plain string rather than the `Fn::Join` a created bucket's unresolved
+  // token produces - the measured size is then independent of CDK's token
+  // counter, and so of test order.
+  const RECIPE_SIZE_ARTIFACT_CONTENT = 'recipe size artifact bytes';
+
+  const synthInlineRecipe = (
+    componentName: string,
+    configurationPaddingChars: number,
+  ): { inlineRecipe: string; recipeSource: string } => {
+    const { recipesDir, artifactsDir, recipeSource } = writePaddedBuildOutput(
+      componentName,
+      '1.0.0',
+      RECIPE_SIZE_ARTIFACT_CONTENT,
+      configurationPaddingChars,
+    );
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
+      stack,
+      'ArtifactBucket',
+      { existingBucketName: 'test-bucket' },
+    );
+    const componentVersion =
+      new ComponentVersionModule.GreengrassComponentVersion(
+        stack,
+        'ComponentVersion',
+        { recipesDir, artifactsDir, bucket },
+      );
+    const resources = assertionsLib.Template.fromStack(stack).toJSON()
+      .Resources as Record<string, any>;
+    const inlineRecipe = resources[
+      stack.getLogicalId(componentVersion.cfnComponentVersion)
+    ].Properties.InlineRecipe as string;
+    return { inlineRecipe, recipeSource };
+  };
+
+  const paddingForDumpedBytes = (
+    componentName: string,
+    targetBytes: number,
+  ): number => {
+    const probeBytes = Buffer.byteLength(
+      synthInlineRecipe(componentName, 1).inlineRecipe,
+      'utf-8',
+    );
+    return 1 + (targetBytes - probeBytes);
+  };
+
+  it('accepts a recipe whose serialized size sits exactly at the InlineRecipe limit, and publishes it byte for byte', () => {
+    const componentName = 'com.example.RecipeSizeAtLimit';
+    const padding = paddingForDumpedBytes(componentName, 16 * 1024);
+
+    const { inlineRecipe, recipeSource } = synthInlineRecipe(
+      componentName,
+      padding,
+    );
+
+    expect(Buffer.byteLength(inlineRecipe, 'utf-8')).toBe(16384);
+    // The guard measures, it never rewrites: what reaches `InlineRecipe` is
+    // still exactly `yaml.dump(<recipe with substituted Uris>, { lineWidth: -1 })`.
+    const { raw } = RecipeModule.readRecipeSummary(recipeSource, 'recipe.yaml');
+    RecipeModule.substituteArtifactUris(raw, {
+      bucketName: 'test-bucket',
+      componentName,
+      componentVersion: '1.0.0',
+      sha256: sha256Of(RECIPE_SIZE_ARTIFACT_CONTENT),
+    });
+    expect(inlineRecipe).toBe(yaml.dump(raw, { lineWidth: -1 }));
+  });
+
+  it('throws an actionable error naming the size, the limit and the likely causes when the recipe is one byte over', () => {
+    const componentName = 'com.example.RecipeSizeOver';
+    const padding = paddingForDumpedBytes(componentName, 16 * 1024) + 1;
+    const { recipesDir, artifactsDir } = writePaddedBuildOutput(
+      componentName,
+      '1.0.0',
+      RECIPE_SIZE_ARTIFACT_CONTENT,
+      padding,
+    );
+
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
+      stack,
+      'ArtifactBucket',
+      { existingBucketName: 'test-bucket' },
+    );
+
+    let thrown: Error | undefined;
+    try {
+      new ComponentVersionModule.GreengrassComponentVersion(
+        stack,
+        'ComponentVersion',
+        { recipesDir, artifactsDir, bucket },
+      );
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown).toBeDefined();
+    const message = thrown?.message ?? '';
+    expect(message).toContain(`${componentName}@1.0.0`);
+    expect(message).toContain('16385 bytes');
+    expect(message).toContain('exceeding the 16384 byte limit');
+    expect(message).toContain('by 1 byte(s)');
+    // Names both realistic budget consumers, so the reader knows where to look.
+    expect(message).toContain('ComponentConfiguration.DefaultConfiguration');
+    expect(message).toContain('platform: linux-amd64-arm64');
+  });
+
+  it('measures the recipe in bytes, not characters', () => {
+    // The service counts the serialized document's bytes. 6000 three-byte
+    // characters make this recipe about 18 KB on the wire while its character
+    // count stays around 6 KB, so a check written as `.length` would let it
+    // through.
+    const componentName = 'com.example.RecipeSizeBytes';
+    const { recipesDir, artifactsDir, recipeSource } = writePaddedBuildOutput(
+      componentName,
+      '1.0.0',
+      RECIPE_SIZE_ARTIFACT_CONTENT,
+      6000,
+      'あ',
+    );
+    expect(recipeSource.length).toBeLessThan(16384);
+    expect(Buffer.byteLength(recipeSource, 'utf-8')).toBeGreaterThan(16384);
+
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
+      stack,
+      'ArtifactBucket',
+      { existingBucketName: 'test-bucket' },
+    );
+
+    expect(
+      () =>
+        new ComponentVersionModule.GreengrassComponentVersion(
+          stack,
+          'ComponentVersion',
+          { recipesDir, artifactsDir, bucket },
+        ),
+    ).toThrow(/exceeding the 16384 byte limit/);
+  });
+
+  // An imported bucket name can be a CloudFormation parameter, whose token
+  // text is longer than the shortest name it can resolve to - so the measured
+  // recipe can be larger than the submitted one. These two tests pin the
+  // guard's answer on both sides of that band. The padding is solved against a
+  // dump computed with the SAME token instance the construct will embed, since
+  // the token's own text length depends on a process-wide counter.
+  const dumpFor = (recipeSource: string, bucketName: string): string => {
+    const { componentName, raw } = RecipeModule.readRecipeSummary(
+      recipeSource,
+      'recipe.yaml',
+    );
+    RecipeModule.substituteArtifactUris(raw, {
+      bucketName,
+      componentName,
+      componentVersion: '1.0.0',
+      sha256: sha256Of(RECIPE_SIZE_ARTIFACT_CONTENT),
+    });
+    return yaml.dump(raw, { lineWidth: -1 });
+  };
+
+  const paddingForTokenizedBytes = (
+    componentName: string,
+    bucketName: string,
+    targetBytes: number,
+  ): number => {
+    const probeBytes = Buffer.byteLength(
+      dumpFor(paddedRecipeSource(componentName, '1.0.0', 1), bucketName),
+      'utf-8',
+    );
+    return 1 + (targetBytes - probeBytes);
+  };
+
+  const synthWithTokenizedBucket = (
+    componentName: string,
+    overLimitBy: number,
+  ): { thrown: Error | undefined; dumpedBytes: number } => {
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const bucketName = new cdkLib.CfnParameter(stack, 'BucketName', {
+      type: 'String',
+    }).valueAsString;
+    expect(cdkLib.Token.isUnresolved(bucketName)).toBe(true);
+
+    const padding = paddingForTokenizedBytes(
+      componentName,
+      bucketName,
+      16 * 1024 + overLimitBy,
+    );
+    const { recipesDir, artifactsDir, recipeSource } = writePaddedBuildOutput(
+      componentName,
+      '1.0.0',
+      RECIPE_SIZE_ARTIFACT_CONTENT,
+      padding,
+    );
+    const dumpedBytes = Buffer.byteLength(
+      dumpFor(recipeSource, bucketName),
+      'utf-8',
+    );
+    expect(dumpedBytes).toBe(16 * 1024 + overLimitBy);
+
+    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
+      stack,
+      'ArtifactBucket',
+      { existingBucketName: bucketName },
+    );
+    let thrown: Error | undefined;
+    try {
+      new ComponentVersionModule.GreengrassComponentVersion(
+        stack,
+        'ComponentVersion',
+        { recipesDir, artifactsDir, bucket },
+      );
+    } catch (error) {
+      thrown = error as Error;
+    }
+    return { thrown, dumpedBytes };
+  };
+
+  it('does not reject a tokenized-bucket recipe whose size the token could still bring under the limit', () => {
+    // A `${Token[TOKEN.n]}` placeholder stands in for a name of 3 to 63
+    // characters. Four bytes over the cap as measured is under it once the
+    // token resolves to a short name, and the service would accept it.
+    const { thrown } = synthWithTokenizedBucket(
+      'com.example.RecipeSizeTokNear',
+      4,
+    );
+
+    expect(thrown).toBeUndefined();
+  });
+
+  it('rejects a tokenized-bucket recipe too large for even the shortest bucket name', () => {
+    const { thrown } = synthWithTokenizedBucket(
+      'com.example.RecipeSizeTokOver',
+      4096,
+    );
+
+    expect(thrown).toBeDefined();
+    const message = thrown?.message ?? '';
+    expect(message).toContain('com.example.RecipeSizeTokOver@1.0.0');
+    expect(message).toContain(`${16 * 1024 + 4096} bytes`);
+    // Says which number the verdict rests on, since it is not the measured one.
+    expect(message).toContain(
+      "do not depend on the artifact bucket's name (still an unresolved token",
+    );
+    expect(message).toContain('exceeding the 16384 byte limit');
   });
 });
 
