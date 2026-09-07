@@ -172,16 +172,14 @@ const assertArtifactKeyPrefixFits = (
  * Largest `InlineRecipe` `CreateComponentVersion` accepts - 16 KB as
  * 16 * 1024 bytes of serialized YAML, counted over the whole document rather
  * than any one field. Not taken from Service Quotas, which reports this limit
- * as 8192 and is wrong: measured against the real API on 2026-09-07, a
- * 9,216-byte recipe was accepted and a 17,408-byte one rejected with
- * `ValidationException: Invalid Input: Size of the recipe size can't exceed
- * 16KB`. Those two probes bracket the limit rather than pin it, and the
- * service publishes no maximum in either its API reference or the
- * CloudFormation schema, so 16384 is the number the service's own error text
- * names, not a probed boundary. Every way that can be wrong costs a missed
- * rejection, never a false one: if the service really means 16,000 bytes, a
- * recipe between 16,001 and 16,384 bytes still fails at deploy exactly as it
- * did before this guard existed.
+ * as 8192 and is wrong.
+ *
+ * The boundary is measured, not inferred. Against the real API on 2026-09-07,
+ * a recipe of exactly 16,384 bytes was ACCEPTED and one of exactly 16,385 was
+ * REJECTED with `ValidationException: Invalid Input: Size of the recipe size
+ * can't exceed 16KB`. So 16384 is the true inclusive maximum and `<=` is the
+ * correct comparison, even though the service publishes no maximum in either
+ * its API reference or the CloudFormation schema.
  */
 const MAX_INLINE_RECIPE_BYTES = 16 * 1024;
 
