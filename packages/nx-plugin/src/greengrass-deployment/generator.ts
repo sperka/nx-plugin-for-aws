@@ -264,7 +264,7 @@ export const greengrassDeploymentGenerator = async (
     // Terraform silently deploying no components at all.
     if (componentsTsExisted && !componentsJsonExisted) {
       logger.warn(
-        `Created an empty ${componentsJsonPathFromRoot} next to an existing components.ts. Terraform deploys what that JSON file holds, so re-add every component already listed in components.ts - run 'greengrass-deployment#component-connection' again for each, or copy the entries across by hand (snake_case, e.g. { "com.example.MyComponent": { "component_version": "1.0.0" } }).`,
+        `Created an empty ${componentsJsonPathFromRoot} next to an existing components.ts. Terraform deploys what that JSON file holds, so re-add every component already listed in components.ts - run 'nx g @aws/nx-plugin:connection --sourceProject=${fullyQualifiedName} --targetProject=<component project>' again for each, or copy the entries across by hand (snake_case, e.g. { "com.example.MyComponent": { "component_version": "1.0.0" } }).`,
       );
     }
   }

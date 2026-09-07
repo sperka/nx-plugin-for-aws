@@ -229,6 +229,35 @@ describe('greengrass-deployment generator', () => {
     ).toBe('{}\n');
   });
 
+  it('should name a runnable generator when it recreates a deleted components.json', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const terraformOptions: GreengrassDeploymentGeneratorSchema = {
+      ...defaultOptions,
+      iac: 'terraform',
+    };
+
+    await greengrassDeploymentGenerator(tree, terraformOptions);
+    tree.delete('packages/my-deployment/src/components.json');
+    await greengrassDeploymentGenerator(tree, terraformOptions);
+
+    expect(
+      tree.read('packages/my-deployment/src/components.json', 'utf-8'),
+    ).toBe('{}\n');
+
+    const warning = warn.mock.calls.flat().join('\n');
+    expect(warning).toContain(
+      'Created an empty packages/my-deployment/src/components.json',
+    );
+    // Every connection generator is hidden and reachable only through
+    // 'connection', so naming the hidden id gives the user a command that
+    // cannot run.
+    expect(warning).toContain(
+      "run 'nx g @aws/nx-plugin:connection --sourceProject=@proj/my-deployment --targetProject=<component project>'",
+    );
+    expect(warning).not.toContain('greengrass-deployment#component-connection');
+    warn.mockRestore();
+  });
+
   it('should create an independent project for a different name', async () => {
     await greengrassDeploymentGenerator(tree, defaultOptions);
     await greengrassDeploymentGenerator(tree, {

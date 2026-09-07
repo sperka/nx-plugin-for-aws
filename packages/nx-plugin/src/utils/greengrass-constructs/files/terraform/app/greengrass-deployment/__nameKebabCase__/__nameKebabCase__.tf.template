@@ -1,5 +1,5 @@
 variable "components" {
-  description = "Components to deploy, keyed by ComponentName. Populated from <%- componentsJsonPathFromRoot %> by default, which the greengrass-deployment#component-connection generator keeps in sync - pass a value here only to override that file."
+  description = "Components to deploy, keyed by ComponentName. Populated from <%- componentsJsonPathFromRoot %> by default, which the 'connection' generator keeps in sync - pass a value here only to override that file."
   type = map(object({
     component_version = optional(string)
     configuration_update = optional(object({
