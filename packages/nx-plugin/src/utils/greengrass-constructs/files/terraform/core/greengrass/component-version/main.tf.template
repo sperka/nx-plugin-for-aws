@@ -56,6 +56,15 @@ locals {
     sha256(join("\n", [for f in local.artifact_basenames : "${f}:${local.artifact_hashes[f]}"]))
   )
 
+  # No length guard needed here, unlike the CDK construct's
+  # `assertArtifactKeyPrefixFits`: that guard exists because `BucketDeployment`
+  # tags its destination bucket with a key derived from this prefix and throws
+  # once that tag key exceeds 128 characters (aws-cdk-lib 2.268.0), capping
+  # this prefix at 102 characters. `aws_s3_object.artifact` below is a plain
+  # object PUT with no such tag - the only ceiling on its `key` is S3's own
+  # 1024-byte object key limit, which even a maximum-length 128-character
+  # `ComponentName` plus this fixed 64-character hash and its separators
+  # cannot approach.
   destination_key_prefix = "${local.component_name}/${local.component_version}/${local.sha256}/"
   replacement_prefix     = "s3://${var.bucket_name}/${local.destination_key_prefix}"
 
