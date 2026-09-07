@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { RemovalPolicy } from 'aws-cdk-lib';
+import { RemovalPolicy, Token } from 'aws-cdk-lib';
 import { CfnComponentVersion } from 'aws-cdk-lib/aws-greengrassv2';
 import { BucketDeployment, Source } from 'aws-cdk-lib/aws-s3-deployment';
 import { Construct } from 'constructs';
@@ -169,6 +169,87 @@ const assertArtifactKeyPrefixFits = (
 };
 
 /**
+ * Largest `InlineRecipe` `CreateComponentVersion` accepts - 16 KB as
+ * 16 * 1024 bytes of serialized YAML, counted over the whole document rather
+ * than any one field. Not taken from Service Quotas, which reports this limit
+ * as 8192 and is wrong: measured against the real API on 2026-09-07, a
+ * 9,216-byte recipe was accepted and a 17,408-byte one rejected with
+ * `ValidationException: Invalid Input: Size of the recipe size can't exceed
+ * 16KB`. Those two probes bracket the limit rather than pin it, and the
+ * service publishes no maximum in either its API reference or the
+ * CloudFormation schema, so 16384 is the number the service's own error text
+ * names, not a probed boundary. Every way that can be wrong costs a missed
+ * rejection, never a false one: if the service really means 16,000 bytes, a
+ * recipe between 16,001 and 16,384 bytes still fails at deploy exactly as it
+ * did before this guard existed.
+ */
+const MAX_INLINE_RECIPE_BYTES = 16 * 1024;
+
+/** Shortest bucket name S3 accepts, and so the shortest a token can become. */
+const MIN_S3_BUCKET_NAME_LENGTH = 3;
+
+/**
+ * Synth-time guard against a recipe too large for `CreateComponentVersion`
+ * (see {@link MAX_INLINE_RECIPE_BYTES}). The serialized document is already
+ * fully materialized at synth, so this failure has no reason to wait for a
+ * deploy: without it, a 20-minute CloudFormation round trip ends in a
+ * `ValidationException` that names neither the component nor the fields that
+ * consumed the budget.
+ *
+ * Rejects only what is too large whatever the artifact bucket turns out to be
+ * called. `substituteArtifactUris` embeds `bucket.bucketName`, which is
+ * typically an unresolved CDK token (`${Token[TOKEN.n]}`, around 19
+ * characters) standing in for a name of 3 to 63 characters, so the measured
+ * size is not the submitted size: a created bucket's generated name makes the
+ * document up to 44 bytes LONGER per substituted artifact URI (up to ~88 bytes
+ * with one manifest per architecture), and an imported name taken from a
+ * `CfnParameter` can make it shorter. A hard synth failure must not fire on a
+ * recipe the service would accept, so the comparison uses the shortest length
+ * the token can resolve to. The consequence is a band of about 16 bytes per
+ * URI just above the cap that this cannot reject, on top of the ~88 bytes just
+ * below it that it cannot catch - both are the deploy-time failure this guard
+ * does not replace.
+ */
+const assertInlineRecipeFits = (
+  componentName: string,
+  componentVersion: string,
+  recipePath: string,
+  inlineRecipe: string,
+  bucketName: string,
+): void => {
+  const bytes = Buffer.byteLength(inlineRecipe, 'utf-8');
+  const minimumBytes = Token.isUnresolved(bucketName)
+    ? Buffer.byteLength(
+        inlineRecipe
+          .split(bucketName)
+          .join('x'.repeat(MIN_S3_BUCKET_NAME_LENGTH)),
+        'utf-8',
+      )
+    : bytes;
+  if (minimumBytes <= MAX_INLINE_RECIPE_BYTES) {
+    return;
+  }
+  const overBy = minimumBytes - MAX_INLINE_RECIPE_BYTES;
+  const sizeClause =
+    minimumBytes === bytes
+      ? `serializes to ${bytes} bytes`
+      : `serializes to ${bytes} bytes, of which ${minimumBytes} do not depend on the artifact ` +
+        `bucket's name (still an unresolved token here, so this counts it as the ` +
+        `${MIN_S3_BUCKET_NAME_LENGTH}-character minimum S3 allows)`;
+  throw new Error(
+    `The resolved recipe for ${componentName}@${componentVersion} ("${recipePath}") ${sizeClause}, ` +
+      `exceeding the ${MAX_INLINE_RECIPE_BYTES} byte limit CreateComponentVersion ` +
+      `enforces on InlineRecipe, by ${overBy} byte(s). The whole recipe crosses the API as one ` +
+      `document, so the total counts rather than any one field. Two things realistically consume ` +
+      `that budget: a large ComponentConfiguration.DefaultConfiguration block, which is yours to ` +
+      `author and which nothing here bounds, and one manifest per architecture under ` +
+      `"platform: linux-amd64-arm64". Shrink DefaultConfiguration (move bulk configuration into ` +
+      `an artifact the component reads at runtime) by at least ${overBy} byte(s), or split the ` +
+      `component so each architecture publishes its own single-manifest version.`,
+  );
+};
+
+/**
  * Publishes one Greengrass component version: reads the resolved recipe and
  * artifact a component's `<c>-artifact` target wrote, uploads the artifact to
  * the shared {@link GreengrassArtifactBucket}, and emits an
@@ -315,8 +396,19 @@ export class GreengrassComponentVersion extends Construct {
       );
     }
 
+    // Serialized once and measured, so the string the guard sizes is byte for
+    // byte the string submitted as `InlineRecipe`.
+    const inlineRecipe = yaml.dump(raw, { lineWidth: -1 });
+    assertInlineRecipeFits(
+      componentName,
+      componentVersion,
+      recipePath,
+      inlineRecipe,
+      props.bucket.bucket.bucketName,
+    );
+
     this.cfnComponentVersion = new CfnComponentVersion(this, 'Resource', {
-      inlineRecipe: yaml.dump(raw, { lineWidth: -1 }),
+      inlineRecipe,
     });
 
     // CloudFormation does not infer this dependency from the token embedded
