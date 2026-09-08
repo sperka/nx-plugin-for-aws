@@ -37,13 +37,14 @@ The generator adds the following files to your project:
 - greengrass
   - \<component-name>
     - recipe.yaml the component recipe — user-owned from first generation onward
-    - gdk-config.json a [GDK](https://github.com/aws-greengrass/aws-greengrass-gdk-cli)-shaped build config — framework-owned
 - src
   - greengrass
     - \<component-name>
       - main.ts the component entrypoint — user-owned from first generation onward
 
 </FileTree>
+
+With `--gdkConfig`, the generator also vends `gdk-config.json`, a GDK-shaped build config for running the GDK CLI by hand.
 
 Unlike `py#greengrass-component`, the entrypoint lives under your project's own `src/` tree (not beside `recipe.yaml`), so it compiles, lints and type-checks as part of the project's normal TypeScript targets.
 
@@ -107,7 +108,7 @@ This zips the bundle output - plus, when `ipc: true`, the vendored addon `<c>-ve
 
 </FileTree>
 
-This layout is **GDK-shaped, not GDK-compatible**: it matches the directory structure the [Greengrass Development Kit CLI](https://github.com/aws-greengrass/aws-greengrass-gdk-cli) produces, but it is written under Nx's own `dist/`, not the component folder GDK expects. The vended `gdk-config.json` (`build_system: custom`, `custom_build_command` pointing back at this same target) is there as an escape hatch if you also want to run `gdk component build`/`publish` directly - it is not a dependency of anything this generator wires.
+This layout is **GDK-shaped, not GDK-compatible**: it matches the directory structure the [Greengrass Development Kit CLI](https://github.com/aws-greengrass/aws-greengrass-gdk-cli) produces, but it is written under Nx's own `dist/`, not the component folder GDK expects. With `--gdkConfig`, the generator vends `gdk-config.json` (`build_system: custom`, `custom_build_command` pointing back at this same target) so you can run `gdk component build` or `gdk component publish` directly. The plugin does not read it.
 
 ## Infrastructure
 
@@ -182,7 +183,7 @@ Both targets read `GREENGRASS_ROOT` from the environment, defaulting to `/greeng
 
 ## File ownership
 
-The component targets in `project.json` and `gdk-config.json` are framework-owned and re-synced to the current definition on every generator run, so manual edits to them do not survive a re-run. The vended scripts under `packages/common/scripts/src/greengrass/` - including `vendor-crt-addon.ts`, vended only when `ipc: true` - are created once and never overwritten, so your patches survive. Delete those files and re-run the generator to pick up their current versions.
+The component targets in `project.json` are framework-owned and re-synced to the current definition on every generator run. With `--gdkConfig`, `gdk-config.json` is also framework-owned and re-synced. A run without `--gdkConfig` removes it. The vended scripts under `packages/common/scripts/src/greengrass/` - including `vendor-crt-addon.ts`, vended only when `ipc: true` - are created once and never overwritten, so your patches survive. Delete those files and re-run the generator to pick up their current versions.
 
 Because those scripts never refresh on their own, this generator checks them up front: in a workspace whose Greengrass scripts were vended by a plugin version that predates bundled (TypeScript) components, it refuses to generate and tells you to delete and re-vend them — otherwise the `<c>-artifact` target would fail later with an unexplained `Nothing to package`.
 
@@ -221,7 +222,7 @@ The version resolves from the highest version already published in the account a
 
 In this mode, the artifact key is `<ComponentName>/<sha256>/<file>`. The deployment must receive the resolved version. Follow the <Link path="guides/greengrass-deployment#automatic-versioning">automatic versioning deployment guidance</Link> when you connect this component to a deployment.
 
-`<c>-deploy-local` resolves the sentinel on the device instead of against the cloud registry. It takes the highest strict version among the installed version and the version directories under `<GREENGRASS_ROOT>/packages/artifacts/<ComponentName>/` and `<GREENGRASS_ROOT>/packages/artifacts-unarchived/<ComponentName>/`, then bumps it. A store that is missing or unreadable is skipped with one log line. GDK understands only `NEXT_PATCH`. A `gdk-config.json` file carrying `NEXT_MINOR` or `NEXT_MAJOR` is invalid for GDK. The plugin never invokes GDK.
+`<c>-deploy-local` resolves the sentinel on the device instead of against the cloud registry. It takes the highest strict version among the installed version and the version directories under `<GREENGRASS_ROOT>/packages/artifacts/<ComponentName>/` and `<GREENGRASS_ROOT>/packages/artifacts-unarchived/<ComponentName>/`, then bumps it. A store that is missing or unreadable is skipped with one log line. With `--gdkConfig`, GDK understands only `NEXT_PATCH`; a `gdk-config.json` file carrying `NEXT_MINOR` or `NEXT_MAJOR` is invalid for GDK. The plugin never invokes GDK.
 
 ### Component version immutability
 

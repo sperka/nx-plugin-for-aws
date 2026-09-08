@@ -6,6 +6,7 @@ import {
   type GeneratorCallback,
   generateFiles,
   joinPathFragments,
+  logger,
   OverwriteStrategy,
   type Tree,
   updateProjectConfiguration,
@@ -70,6 +71,7 @@ export interface GreengrassComponentMetadata {
   readonly componentVersion: string;
   readonly platform: GreengrassPlatformSelection;
   readonly ipc: boolean;
+  readonly gdkConfig: boolean;
   readonly iac?: string;
 }
 
@@ -168,6 +170,7 @@ export const pyGreengrassComponentGenerator = async (
 
   const publisher = options.publisher ?? resolveGreengrassPublisher(tree);
   const ipc = options.ipc ?? true;
+  const gdkConfig = options.gdkConfig ?? false;
   const platform: GreengrassPlatformSelection =
     options.platform ?? 'linux-arm64';
   const platforms = resolvePlatforms(platform);
@@ -213,6 +216,7 @@ export const pyGreengrassComponentGenerator = async (
     componentDirName,
   );
   const mainPath = joinPathFragments(componentDir, 'main.py');
+  const gdkConfigPath = joinPathFragments(componentDir, 'gdk-config.json');
   // Flat under tests/greengrass/, one file per component: pytest imports a test
   // module by basename, so two components sharing a `test_main.py` basename in
   // sibling directories would collide.
@@ -288,15 +292,18 @@ export const pyGreengrassComponentGenerator = async (
     { overwriteStrategy: OverwriteStrategy.KeepExisting },
   );
 
-  // gdk-config.json is framework-owned and fully derived from the options
-  // above, so it converges to the desired state on every run.
-  generateFiles(
-    tree,
-    joinPathFragments(import.meta.dirname, 'files', 'gdk'),
-    componentDir,
-    templateOptions,
-    { overwriteStrategy: OverwriteStrategy.Overwrite },
-  );
+  if (gdkConfig) {
+    generateFiles(
+      tree,
+      joinPathFragments(import.meta.dirname, 'files', 'gdk'),
+      componentDir,
+      templateOptions,
+      { overwriteStrategy: OverwriteStrategy.Overwrite },
+    );
+  } else if (tree.exists(gdkConfigPath)) {
+    tree.delete(gdkConfigPath);
+    logger.info(`Removed ${gdkConfigPath}; pass --gdkConfig to keep it.`);
+  }
 
   generateFiles(
     tree,
@@ -410,6 +417,7 @@ export const pyGreengrassComponentGenerator = async (
     componentVersion,
     platform,
     ipc,
+    gdkConfig,
     ...(iac ? { iac } : {}),
   };
 
@@ -425,13 +433,13 @@ export const pyGreengrassComponentGenerator = async (
   // leaves as it is - including its missing `iac`. Record the resolved one, or
   // the orphan guard would not see the infrastructure this run provisions and a
   // later `--infra none` would silently orphan it.
-  if (iac) {
+  if (iac || existingComponentMetadata) {
     updateComponentGeneratorMetadata(
       tree,
       projectConfig.name,
       PY_GREENGRASS_COMPONENT_GENERATOR_INFO,
       componentDirName,
-      { iac },
+      { gdkConfig, ...(iac ? { iac } : {}) },
     );
   }
 

@@ -42,6 +42,12 @@
       "x-priority": "important",
       "x-prompt": "Would you like to use the Greengrass IPC client to publish/subscribe to local topics? (adds a vendored native addon to the artifact)"
     },
+    "gdkConfig": {
+      "type": "boolean",
+      "description": "Also vend a GDK-shaped gdk-config.json next to recipe.yaml, for running the GDK CLI by hand. The plugin never reads it. GDK understands NEXT_PATCH but not NEXT_MINOR or NEXT_MAJOR.",
+      "default": false,
+      "x-priority": "low"
+    },
     "platform": {
       "type": "string",
       "description": "The core device platform(s) to target. linux-amd64-arm64 writes one recipe manifest per architecture so a single component version serves both.",

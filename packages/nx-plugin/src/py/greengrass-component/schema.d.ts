@@ -12,6 +12,7 @@ export interface PyGreengrassComponentGeneratorSchema {
   readonly componentVersion?: string;
   readonly publisher?: string;
   readonly ipc?: boolean;
+  readonly gdkConfig?: boolean;
   readonly platform?: GreengrassPlatformSelection;
   readonly infra?: 'component-version' | 'none';
   readonly iac?: IacOption;

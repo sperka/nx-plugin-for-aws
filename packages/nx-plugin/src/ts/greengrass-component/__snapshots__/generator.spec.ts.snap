@@ -1326,24 +1326,6 @@ export function writeZip(entries: readonly ZipEntry[], outPath: string): void {
   );
 }
 ",
-  "packages/test-project/greengrass/my-component/gdk-config.json": "{
-  "component": {
-    "com.proj.MyComponent": {
-      "author": "proj",
-      "version": "1.0.0",
-      "build": {
-        "build_system": "custom",
-        "custom_build_command": [
-          "nx",
-          "run",
-          "test-project:my-component-artifact"
-        ]
-      }
-    }
-  },
-  "gdk_version": "1.0.0"
-}
-",
   "packages/test-project/greengrass/my-component/recipe.yaml": "RecipeFormatVersion: '2020-01-25'
 ComponentName: com.proj.MyComponent
 ComponentVersion: 1.0.0
@@ -1390,7 +1372,8 @@ Manifests:
         "componentName": "com.proj.MyComponent",
         "componentVersion": "1.0.0",
         "platform": "linux-amd64-arm64",
-        "ipc": false
+        "ipc": false,
+        "gdkConfig": false
       }
     ]
   },
@@ -2828,24 +2811,6 @@ export function writeZip(entries: readonly ZipEntry[], outPath: string): void {
   );
 }
 ",
-  "packages/test-project/greengrass/my-component/gdk-config.json": "{
-  "component": {
-    "com.proj.MyComponent": {
-      "author": "proj",
-      "version": "1.0.0",
-      "build": {
-        "build_system": "custom",
-        "custom_build_command": [
-          "nx",
-          "run",
-          "test-project:my-component-artifact"
-        ]
-      }
-    }
-  },
-  "gdk_version": "1.0.0"
-}
-",
   "packages/test-project/greengrass/my-component/recipe.yaml": "RecipeFormatVersion: '2020-01-25'
 ComponentName: com.proj.MyComponent
 ComponentVersion: 1.0.0
@@ -2879,7 +2844,8 @@ Manifests:
         "componentName": "com.proj.MyComponent",
         "componentVersion": "1.0.0",
         "platform": "linux-arm64",
-        "ipc": false
+        "ipc": false,
+        "gdkConfig": false
       }
     ]
   },
