@@ -151,6 +151,8 @@ deployment.dependOn(myComponent);
 
 With the default `infra: component-version`, the generator vends `packages/common/terraform/src/app/greengrass-component/<component-name>/`, a module wrapping `core/greengrass/component-version` (backed by the [`hashicorp/awscc`](https://registry.terraform.io/providers/hashicorp/awscc/latest/docs) provider - neither `AWS::GreengrassV2` resource exists in the pinned `hashicorp/aws` provider) with this component's `greengrass-build/recipes` and `greengrass-build/artifacts` paths. It takes the artifact bucket's name as a plain input variable, so wire it into your infra project alongside a <Link path="guides/greengrass-deployment">`greengrass-deployment`</Link> project's artifact bucket module:
 
+The infra project is a `terraform#project --type=application`. Generate it first if the workspace has none. `--name=my-component` names this module's directory `my-component`, and the deployment's own `--name` names the other two - see the <Link path="guides/greengrass-deployment#infrastructure">deployment guide</Link>.
+
 ```hcl title="packages/infra/src/main.tf"
 module "my_deployment_artifact_bucket" {
   source = "../../common/terraform/src/app/greengrass-deployment/my-deployment-artifact-bucket"
@@ -171,6 +173,8 @@ module "my_deployment" {
 ```
 
 `nx run <infra>:build` builds this component's host project - the shared Terraform project's `build`/`assemble` targets depend on it, so the artifact is always freshly built before `terraform apply` publishes the component version.
+
+The first `build` of a fresh workspace fails on `metrics/metrics.tf` formatting, which is a `terraform#project` behaviour. The <Link path="guides/greengrass-deployment#first-build-of-a-fresh-workspace">deployment guide</Link> has the one-time fix.
 
 </Fragment>
 </Infrastructure>
