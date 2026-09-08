@@ -148,6 +148,12 @@ Neither `AWS::GreengrassV2::ComponentVersion` nor `AWS::GreengrassV2::Deployment
       - \<name> A sibling module wrapping `core/greengrass/deployment` with this deployment's options
 </FileTree>
 
+Your root module lives in a Terraform application project. Generate one first if the workspace has none:
+
+<RunGenerator generator="terraform#project" requiredParameters={{ name: 'infra', type: 'application' }} />
+
+The module directories are named after the generator options. `greengrass-deployment --name=my-deployment` vends `app/greengrass-deployment/my-deployment-artifact-bucket/` and `app/greengrass-deployment/my-deployment/`. A component generated with `--name=my-component` vends `app/greengrass-component/my-component/`. The snippet below uses those names. Substitute yours.
+
 The artifact bucket is a **separate module** from the deployment, not a property on it. A component version's module needs the bucket's name before it can be created, and the deployment must be created only after that component version exists - bundling both in one module the way the CDK construct does would force a dependency cycle the moment your root module wires that ordering with `depends_on`. Wire them together yourself:
 
 ```hcl title="packages/infra/src/main.tf"
@@ -181,6 +187,14 @@ The `deployment` module's `components` variable defaults to reading `packages/my
 Pass `components` explicitly to the module block only to override that file with a value it cannot express (for example, `configuration_update.merge` must be pre-encoded with `jsonencode(...)`).
 
 A literal `target_arn` is cross-checked against the current account, region and partition, the same way the CDK construct's `assertArnMatchesStack` checks it against the deploying stack. One difference in *when* it fires: the check reads `aws_caller_identity`, and the `depends_on` above stops Terraform reading that until the component modules exist, so it is deferred from plan to apply. It still fails before the deployment is created, and with a clearer message than the API's. Independently of it, the awscc provider validates the ARN's shape (`arn:<partition>:iot:<region>:<account>:thing|thinggroup/...`) at plan time.
+
+### First Build of a Fresh Workspace
+
+On a freshly generated workspace the first `nx run-many --target build --all` fails in the shared Terraform project's `format` target. `terraform fmt -check` flags `src/metrics/metrics.tf`: the metrics module rewrites its `metric_id` line out of alignment. Run the fix configuration once, then build again:
+
+<NxCommands commands={['run @my-scope/terraform:format --configuration=fix']} />
+
+This comes from `terraform#project`, not from the Greengrass modules, and it affects every Terraform workspace.
 
 ### Bucket Naming
 
