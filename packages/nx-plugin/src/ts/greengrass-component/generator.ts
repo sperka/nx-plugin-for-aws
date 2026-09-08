@@ -6,6 +6,7 @@ import {
   type GeneratorCallback,
   generateFiles,
   joinPathFragments,
+  logger,
   OverwriteStrategy,
   type Tree,
   updateProjectConfiguration,
@@ -72,6 +73,7 @@ export interface GreengrassComponentMetadata {
   readonly componentVersion: string;
   readonly platform: GreengrassPlatformSelection;
   readonly ipc: boolean;
+  readonly gdkConfig: boolean;
   readonly iac?: string;
 }
 
@@ -154,6 +156,7 @@ export const tsGreengrassComponentGenerator = async (
   // `--ipc` is now as self-contained as the Python component, at the cost of
   // about 2 MB of vendored native binary plus an accessControl block.
   const ipc = options.ipc ?? false;
+  const gdkConfig = options.gdkConfig ?? false;
   const platform: GreengrassPlatformSelection =
     options.platform ?? 'linux-arm64';
   const platforms = resolvePlatforms(platform);
@@ -194,6 +197,7 @@ export const tsGreengrassComponentGenerator = async (
     projectConfig,
     mainPath,
   );
+  const gdkConfigPath = joinPathFragments(componentDir, 'gdk-config.json');
 
   // A re-run with the same `--infra none` it already had is a stable no-op
   // (the idempotency contract every generator owes); only a run that would
@@ -283,15 +287,18 @@ export const tsGreengrassComponentGenerator = async (
     { overwriteStrategy: OverwriteStrategy.KeepExisting },
   );
 
-  // gdk-config.json is framework-owned and fully derived from the options
-  // above, so it converges to the desired state on every run.
-  generateFiles(
-    tree,
-    joinPathFragments(import.meta.dirname, 'files', 'gdk'),
-    componentDir,
-    templateOptions,
-    { overwriteStrategy: OverwriteStrategy.Overwrite },
-  );
+  if (gdkConfig) {
+    generateFiles(
+      tree,
+      joinPathFragments(import.meta.dirname, 'files', 'gdk'),
+      componentDir,
+      templateOptions,
+      { overwriteStrategy: OverwriteStrategy.Overwrite },
+    );
+  } else if (tree.exists(gdkConfigPath)) {
+    tree.delete(gdkConfigPath);
+    logger.info(`Removed ${gdkConfigPath}; pass --gdkConfig to keep it.`);
+  }
 
   // Checked BEFORE vending: the scripts are created once and never
   // overwritten, so a workspace whose Greengrass scripts predate bundle
@@ -428,6 +435,7 @@ export const tsGreengrassComponentGenerator = async (
     componentVersion,
     platform,
     ipc,
+    gdkConfig,
     ...(iac ? { iac } : {}),
   };
 
@@ -443,13 +451,13 @@ export const tsGreengrassComponentGenerator = async (
   // leaves as it is - including its missing `iac`. Record the resolved one, or
   // the orphan guard would not see the infrastructure this run provisions and a
   // later `--infra none` would silently orphan it.
-  if (iac) {
+  if (iac || existingComponentMetadata) {
     updateComponentGeneratorMetadata(
       tree,
       projectConfig.name,
       TS_GREENGRASS_COMPONENT_GENERATOR_INFO,
       componentDirName,
-      { iac },
+      { gdkConfig, ...(iac ? { iac } : {}) },
     );
   }
 

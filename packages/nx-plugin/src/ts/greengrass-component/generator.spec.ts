@@ -2,7 +2,12 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-import { addProjectConfiguration, type Tree, updateJson } from '@nx/devkit';
+import {
+  addProjectConfiguration,
+  logger,
+  type Tree,
+  updateJson,
+} from '@nx/devkit';
 import { declareDependencies } from '../../utils/declared-dependencies.js';
 import { expectHasMetricTags } from '../../utils/metrics.spec.js';
 import { sortObjectKeys } from '../../utils/object.js';
@@ -72,7 +77,7 @@ describe('ts#greengrass-component generator', () => {
       tree.exists(
         'packages/test-project/greengrass/my-component/gdk-config.json',
       ),
-    ).toBeTruthy();
+    ).toBeFalsy();
     expect(
       tree.exists('packages/test-project/src/greengrass/my-component/main.ts'),
     ).toBeTruthy();
@@ -575,29 +580,33 @@ describe('ts#greengrass-component generator', () => {
     expect(tree.read(mainPath, 'utf-8')).toBe(customMain);
   });
 
-  it('should converge the framework-owned gdk-config.json while preserving the user-owned recipe', async () => {
+  it('should remove gdk-config.json and log when re-run without --gdkConfig', async () => {
     seedTypeScriptProject(tree);
 
     const options = {
       project: 'test-project',
       name: 'my-component',
       infra: 'none' as const,
+      gdkConfig: true,
     };
     await tsGreengrassComponentGenerator(tree, options);
 
     const gdkPath =
       'packages/test-project/greengrass/my-component/gdk-config.json';
     tree.write(gdkPath, '{ "hand-edited": true }');
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
 
-    await tsGreengrassComponentGenerator(tree, options);
+    await tsGreengrassComponentGenerator(tree, {
+      project: 'test-project',
+      name: 'my-component',
+      infra: 'none',
+    });
 
-    const gdkConfig = JSON.parse(tree.read(gdkPath, 'utf-8'));
-    expect(gdkConfig.component['com.proj.MyComponent'].build.build_system).toBe(
-      'custom',
+    expect(tree.exists(gdkPath)).toBeFalsy();
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledWith(
+      'Removed packages/test-project/greengrass/my-component/gdk-config.json; pass --gdkConfig to keep it.',
     );
-    expect(
-      gdkConfig.component['com.proj.MyComponent'].build.custom_build_command,
-    ).toEqual(['nx', 'run', 'test-project:my-component-artifact']);
   });
 
   it('should leave an existing component untouched when a second, differently-named component is added', async () => {
@@ -655,6 +664,7 @@ describe('ts#greengrass-component generator', () => {
       componentVersion: '2.3.4',
       platform: 'linux-amd64',
       ipc: true,
+      gdkConfig: true,
       infra: 'none',
     });
 
@@ -670,16 +680,18 @@ describe('ts#greengrass-component generator', () => {
       componentVersion: '2.3.4',
       platform: 'linux-amd64',
       ipc: true,
+      gdkConfig: true,
     });
   });
 
-  it('should carry NEXT_PATCH into the recipe, GDK config and metadata', async () => {
+  it('should vend gdk-config.json with NEXT_PATCH when --gdkConfig is set', async () => {
     seedTypeScriptProject(tree);
 
     await tsGreengrassComponentGenerator(tree, {
       project: 'test-project',
       name: 'my-component',
       componentVersion: 'NEXT_PATCH',
+      gdkConfig: true,
       infra: 'none',
     });
 
@@ -909,7 +921,6 @@ describe('ts#greengrass-component generator', () => {
             (f) =>
               f.path.endsWith('.ts') ||
               f.path.endsWith('.yaml') ||
-              f.path.endsWith('gdk-config.json') ||
               f.path.endsWith('project.json'),
           )
           .reduce((acc, curr) => {
@@ -1052,7 +1063,6 @@ describe('ts#greengrass-component generator', () => {
           (f) =>
             f.path.endsWith('.ts') ||
             f.path.endsWith('.yaml') ||
-            f.path.endsWith('gdk-config.json') ||
             f.path.endsWith('project.json'),
         )
         .reduce((acc, curr) => {

@@ -2,24 +2,6 @@
 
 exports[`py#greengrass-component generator > multi-architecture (platform: linux-amd64-arm64) > should match snapshot for a multi-architecture component > multi-arch-snapshot 1`] = `
 {
-  "apps/test_project/greengrass/my-component/gdk-config.json": "{
-  "component": {
-    "com.proj.MyComponent": {
-      "author": "proj",
-      "version": "1.0.0",
-      "build": {
-        "build_system": "custom",
-        "custom_build_command": [
-          "nx",
-          "run",
-          "test-project:my-component-artifact"
-        ]
-      }
-    }
-  },
-  "gdk_version": "1.0.0"
-}
-",
   "apps/test_project/greengrass/my-component/main.py": "import logging
 import time
 
@@ -105,7 +87,8 @@ Manifests:
         "componentName": "com.proj.MyComponent",
         "componentVersion": "1.0.0",
         "platform": "linux-amd64-arm64",
-        "ipc": true
+        "ipc": true,
+        "gdkConfig": false
       }
     ]
   },
@@ -279,24 +262,6 @@ catalog:
 
 exports[`py#greengrass-component generator > should match snapshot > main-snapshot 1`] = `
 {
-  "apps/test_project/greengrass/my-component/gdk-config.json": "{
-  "component": {
-    "com.proj.MyComponent": {
-      "author": "proj",
-      "version": "1.0.0",
-      "build": {
-        "build_system": "custom",
-        "custom_build_command": [
-          "nx",
-          "run",
-          "test-project:my-component-artifact"
-        ]
-      }
-    }
-  },
-  "gdk_version": "1.0.0"
-}
-",
   "apps/test_project/greengrass/my-component/main.py": "import logging
 import time
 
@@ -372,7 +337,8 @@ Manifests:
         "componentName": "com.proj.MyComponent",
         "componentVersion": "1.0.0",
         "platform": "linux-arm64",
-        "ipc": true
+        "ipc": true,
+        "gdkConfig": false
       }
     ]
   },

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { parse } from '@iarna/toml';
-import { type Tree, updateJson } from '@nx/devkit';
+import { logger, type Tree, updateJson } from '@nx/devkit';
 import { declareDependencies } from '../../utils/declared-dependencies.js';
 import { expectHasMetricTags } from '../../utils/metrics.spec.js';
 import type { UVPyprojectToml } from '../../utils/nxlv-python.js';
@@ -66,7 +66,7 @@ describe('py#greengrass-component generator', () => {
     ).toBeTruthy();
     expect(
       tree.exists('apps/test_project/greengrass/my-component/gdk-config.json'),
-    ).toBeTruthy();
+    ).toBeFalsy();
     expect(
       tree.exists('apps/test_project/greengrass/my-component/main.py'),
     ).toBeTruthy();
@@ -371,29 +371,32 @@ describe('py#greengrass-component generator', () => {
     expect(projectConfig.targets['second-component-vendor']).toBeDefined();
   });
 
-  it('should converge the framework-owned gdk-config.json while preserving the user-owned recipe', async () => {
+  it('should remove gdk-config.json and log when re-run without --gdkConfig', async () => {
     seedPythonProject(tree);
 
     const options = {
       project: 'test-project',
       name: 'my-component',
       infra: 'none' as const,
+      gdkConfig: true,
     };
     await pyGreengrassComponentGenerator(tree, options);
 
     const gdkPath = 'apps/test_project/greengrass/my-component/gdk-config.json';
     tree.write(gdkPath, '{ "hand-edited": true }');
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
 
-    await pyGreengrassComponentGenerator(tree, options);
+    await pyGreengrassComponentGenerator(tree, {
+      project: 'test-project',
+      name: 'my-component',
+      infra: 'none',
+    });
 
-    // gdk-config.json is fully derived from the options, so it is regenerated.
-    const gdkConfig = JSON.parse(tree.read(gdkPath, 'utf-8'));
-    expect(gdkConfig.component['com.proj.MyComponent'].build.build_system).toBe(
-      'custom',
+    expect(tree.exists(gdkPath)).toBeFalsy();
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledWith(
+      'Removed apps/test_project/greengrass/my-component/gdk-config.json; pass --gdkConfig to keep it.',
     );
-    expect(
-      gdkConfig.component['com.proj.MyComponent'].build.custom_build_command,
-    ).toEqual(['nx', 'run', 'test-project:my-component-artifact']);
   });
 
   it('should record exact component metadata on project.json', async () => {
@@ -405,6 +408,7 @@ describe('py#greengrass-component generator', () => {
       componentVersion: '2.3.4',
       platform: 'linux-amd64',
       ipc: false,
+      gdkConfig: true,
       infra: 'none',
     });
 
@@ -420,16 +424,18 @@ describe('py#greengrass-component generator', () => {
       componentVersion: '2.3.4',
       platform: 'linux-amd64',
       ipc: false,
+      gdkConfig: true,
     });
   });
 
-  it('should carry NEXT_PATCH into the recipe, GDK config and metadata', async () => {
+  it('should vend gdk-config.json with NEXT_PATCH when --gdkConfig is set', async () => {
     seedPythonProject(tree);
 
     await pyGreengrassComponentGenerator(tree, {
       project: 'test-project',
       name: 'my-component',
       componentVersion: 'NEXT_PATCH',
+      gdkConfig: true,
       infra: 'none',
     });
 
@@ -584,7 +590,6 @@ describe('py#greengrass-component generator', () => {
           (f) =>
             f.path.endsWith('.py') ||
             f.path.endsWith('.yaml') ||
-            f.path.endsWith('gdk-config.json') ||
             f.path.endsWith('project.json'),
         )
         .reduce((acc, curr) => {
@@ -875,6 +880,7 @@ describe('py#greengrass-component generator', () => {
         componentVersion: '2.3.4',
         platform: 'linux-amd64-arm64',
         ipc: false,
+        gdkConfig: false,
       });
     });
 
@@ -928,7 +934,6 @@ describe('py#greengrass-component generator', () => {
             (f) =>
               f.path.endsWith('.py') ||
               f.path.endsWith('.yaml') ||
-              f.path.endsWith('gdk-config.json') ||
               f.path.endsWith('project.json'),
           )
           .reduce((acc, curr) => {
