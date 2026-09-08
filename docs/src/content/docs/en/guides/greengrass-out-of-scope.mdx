@@ -189,6 +189,54 @@ or scope.
 
 ## Tier: not planned, demand-gated
 
+### Scenario: switch a sudo-rs fleet back to classic sudo from the recipe
+
+The deployment guide describes the failure in
+<Link path="guides/greengrass-deployment#ipc-components-fail-on-a-sudo-rs-device">IPC Components Fail on a sudo-rs Device</Link>:
+Ubuntu 25.10 and later select `sudo-rs` as `sudo`, `sudo-rs` ignores `-E`, and the nucleus
+launches every component through `sudo -E`. A recipe cannot change that command line, because
+the nucleus builds it. A recipe can change which binary `/usr/bin/sudo` points to. The
+generators do not vend a step that mutates the host's `sudo`, because that decision belongs to
+whoever owns the device image. When you take that decision for your fleet, add this `Install`
+step to every `Lifecycle` block of the component recipe, next to the generated `Run` step:
+
+```yaml
+Lifecycle:
+  Install:
+    RequiresPrivilege: true
+    Script: |
+      if [ -e /usr/bin/sudo.ws ] && update-alternatives --query sudo >/dev/null 2>&1; then
+        update-alternatives --set sudo /usr/bin/sudo.ws
+      fi
+```
+
+- `RequiresPrivilege: true` runs the step as the user that runs the nucleus, root on a standard
+  install, which `update-alternatives` needs.
+- The recipe reference states that the nucleus runs `Install` when the component installs and
+  again each time the nucleus starts. A device whose alternative was reverted by hand gets it
+  switched back at the next boot.
+- The guard skips devices without a `sudo` alternatives group, where
+  `update-alternatives --query sudo` exits non-zero. On those devices the step does nothing and
+  the component starts as before.
+- The nucleus resolves `sudo` from `PATH` each time it launches a lifecycle step. The `Run`
+  step that follows already goes through classic `sudo`, so the component receives its IPC
+  environment without a nucleus restart.
+
+Verified on an Ubuntu 26.04 LTS x86_64 core device running nucleus 2.18.3 with `sudo-rs`
+selected: the step logged
+`update-alternatives: using /usr/bin/sudo.ws to provide /usr/bin/sudo (sudo) in manual mode`,
+`readlink -f /usr/bin/sudo` then returned `/usr/bin/sudo.ws`, and the `Run` step published its
+first IPC message in the same second. An aarch64 device with classic `sudo` and no alternatives
+group ran the guard and skipped the switch.
+
+Caveats:
+
+- The step changes `sudo` for every user and process on the device, not only for Greengrass.
+- The step assumes Ubuntu's packaging, where the `sudo-ws` package provides `/usr/bin/sudo.ws`
+  and `sudo-rs` provides `/usr/lib/cargo/bin/sudo`. Check both paths on your device image.
+- A recipe change is a new component version. With `NEXT_PATCH` versioning the next deploy
+  publishes it. With a fixed version, bump `ComponentVersion` by hand.
+
 ### Scenario: docker-compose multi-service component
 
 **Worked example: `aws.greengrass.DockerApplicationManager` with a compose file
