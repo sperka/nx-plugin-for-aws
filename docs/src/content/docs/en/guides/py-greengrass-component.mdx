@@ -203,6 +203,8 @@ Both targets read `GREENGRASS_ROOT` from the environment, defaulting to `/greeng
 
 CI cannot prove on-device behaviour. It proves that `CreateComponentVersion` and `CreateDeployment` succeed, not that the component runs. This section is the procedure the author's receipts followed, in order. Every command here appears in one of those receipts.
 
+For the validation tiers and the defects that only real hardware exposed, see <Link path="guides/greengrass-device-validation">Validating on real devices</Link>.
+
 1. **The device as the cloud sees it.** Nucleus version, platform and health in one call. `architecture` is `aarch64` here, never `arm64`; that token is what the recipe manifests must carry.
 
    ```bash

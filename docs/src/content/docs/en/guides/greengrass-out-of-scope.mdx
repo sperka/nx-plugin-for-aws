@@ -1,0 +1,335 @@
+---
+title: Greengrass Beyond the Generators
+description: Worked patterns for supported Greengrass scenarios that the generators do not scaffold
+---
+
+import Link from '@components/link.astro';
+
+The shipped Greengrass generators cover Python and TypeScript components, local deployment
+to a core device, and optional CDK or Terraform component-version infrastructure. The
+`greengrass-deployment` generator provides the deployment resource, its artifact bucket,
+and typed component wiring on CDK and Terraform. Both component generators support
+automatic versioning with `NEXT_PATCH`, `NEXT_MINOR`, and `NEXT_MAJOR`.
+
+This guide covers adjacent scenarios that the generators do not scaffold. The examples
+show how to add those scenarios by hand. The recipes remain user-owned from first
+generation onward.
+
+## Tier framing
+
+- **Permanently out (dead tech)** - the underlying AWS feature is being phased out.
+  Lambda-import components ride on Greengrass V1 machinery, which AWS has announced the
+  end of support for, and they are unsupported on nucleus lite. The migration path is to
+  scaffold a generic component and move the handler code into `main.py`.
+- **Different product surface** - the scenario is a provisioning backend or a fleet
+  management UI built on Greengrass primitives. That is a different deliverable from a
+  component packaging generator. The examples use the native AWS primitives that the
+  generated component output assumes.
+- **Not planned, demand-gated** - the scenario remains supported, but the generators do
+  not scaffold it today. The examples give a recipe or Dockerfile pattern that you can
+  wire into generated output by hand.
+
+---
+
+## Tier: different product surface
+
+### Scenario: device/fleet provisioning + nucleus installation
+
+**Worked example: EC2 / Amazon Linux 2023, native automatic provisioning.**
+
+This matches what the component generators' `<c>-deploy-local` and `<c>-logs` targets
+assume. It uses a nucleus classic install at `/greengrass/v2`, or the path you export in
+`GREENGRASS_ROOT`, with `greengrass-cli` present.
+
+```bash
+# on the EC2 instance (AL2023)
+sudo dnf install -y java-17-amazon-corretto-devel unzip
+
+curl -s -o greengrass-nucleus-latest.zip \
+  https://d2s8p88vqu9w66.cloudfront.net/releases/greengrass-nucleus-latest.zip
+unzip greengrass-nucleus-latest.zip -d GreengrassInstaller
+
+sudo -E java -Droot="/greengrass/v2" -Dlog.store=FILE \
+  -jar ./GreengrassInstaller/lib/Greengrass.jar \
+  --aws-region us-east-1 \
+  --thing-name MyGreengrassCore \
+  --thing-group-name MyGreengrassCoreGroup \
+  --tes-role-name GreengrassV2TokenExchangeRole \
+  --tes-role-alias-name GreengrassV2TokenExchangeRoleAlias \
+  --component-default-user ggc_user:ggc_group \
+  --provision true \
+  --setup-system-service true \
+  --deploy-dev-tools true
+```
+
+Why these flags matter to the generated targets:
+
+- `--deploy-dev-tools true` installs the Greengrass CLI component. `<c>-deploy-local`
+  and `<c>-logs` both call `greengrass-cli` directly. Neither target works on the device
+  without it.
+- `--setup-system-service true` means the nucleus survives a reboot. Otherwise, you must
+  restart it by hand after every EC2 stop/start.
+- `-Droot="/greengrass/v2"` matches the default `GREENGRASS_ROOT`. Keep them in sync.
+  Export `GREENGRASS_ROOT` explicitly if you install elsewhere.
+- `--provision true` is required for `--thing-name`, `--thing-group-name`,
+  `--tes-role-name`, and `--tes-role-alias-name` to take effect. Each is silently ignored
+  without it.
+
+Then sync the workspace to the instance (for example with `rsync`), build the artifact
+there, and run the two device-side targets on the core device:
+
+```bash
+nx run <project>:<component-name>-artifact
+nx run <project>:<component-name>-deploy-local
+nx run <project>:<component-name>-logs
+```
+
+**IAM detail worth calling out.** Automatic provisioning creates
+`GreengrassV2TokenExchangeRole` with the `GreengrassV2TokenExchangeRoleAccess` managed
+policy. That policy has no access to your artifact S3 bucket. If you later publish this
+component instead of only deploying it locally, add `s3:GetObject` on your artifacts
+bucket or prefix to that role yourself. The installer will not do this for you.
+
+**Caveats.**
+
+- Automatic or quick provisioning requires real AWS credentials directly on the device.
+  That is suitable for an EC2 dev/test box. Use manual, AWS IoT fleet, or custom
+  provisioning for a production fleet. None of those flows are covered here or by the
+  generators.
+- Java 8 or later is the actual nucleus requirement. AWS recommends Corretto or OpenJDK
+  **LTS** versions generally. Corretto 17 is a reasonable choice, not a hard
+  requirement. Older devices running Corretto 11 or even 8 remain within spec.
+- This walkthrough is for nucleus **classic**. Nucleus lite has a separate,
+  lighter-weight build and install process. It does not use the `Greengrass.jar`
+  installer shown here.
+- Windows core devices use a different default root and installer invocation. They are
+  out of scope here because the component generators support only `linux-amd64` and
+  `linux-arm64`.
+
+### Scenario: client devices and local shadow
+
+**Worked example: enabling both in a generated component's recipe.**
+
+Add this to `greengrass/<component-name>/recipe.yaml`:
+
+```yaml
+ComponentDependencies:
+  aws.greengrass.clientdevices.Auth:
+    VersionRequirement: ">=2.5.0 <2.6.0"
+  aws.greengrass.clientdevices.mqtt.Moquette:
+    VersionRequirement: ">=2.3.0 <2.4.0"
+  aws.greengrass.ShadowManager:
+    VersionRequirement: ">=2.3.0 <2.4.0"
+
+ComponentConfiguration:
+  DefaultConfiguration:
+    # authorize client devices via aws.greengrass.clientdevices.Auth
+    deviceGroups:
+      formatVersion: "2021-03-05"
+      definitions:
+        MyDeviceGroup:
+          selectionRule: "thingName: MyClientDevice*"
+          policyName: MyClientDeviceGroupPolicy
+      policies:
+        MyClientDeviceGroupPolicy:
+          AllowConnect:
+            statementDescription: "Allow client devices to connect."
+            operations:
+              - "mqtt:connect"
+            resources:
+              - "*"
+          AllowPublishSubscribe:
+            statementDescription: "Allow pub/sub on this component's namespace."
+            operations:
+              - "mqtt:publish"
+              - "mqtt:subscribe"
+            resources:
+              - "mqtt:topic:<ComponentName>/#"
+```
+
+Deploy this configuration update to `aws.greengrass.ShadowManager` itself. The sync
+settings belong to the Shadow Manager component, not to this recipe:
+
+```json
+{
+  "synchronize": {
+    "shadowDocumentsMap": {
+      "MyClientDevice1": { "classic": true, "namedShadows": [] }
+    }
+  }
+}
+```
+
+This is separate from the `accessControl` block that both component generators write
+when `ipc: true`. That policy is scoped to `aws.greengrass.ipc.pubsub`, which provides
+local Greengrass pub/sub between components on the same core.
+`deviceGroups` and `policies` authorize external MQTT client devices through the client
+device auth component. Both blocks can coexist in one recipe. They do not share syntax
+or scope.
+
+**Caveats.**
+
+- `aws.greengrass.clientdevices.Auth` and `aws.greengrass.ShadowManager` are
+  **plugin** components (`aws.greengrass.plugin`). Nucleus lite cannot use plugin
+  components. There is no reduced-functionality path for this scenario.
+- Version compatibility windows narrow with every nucleus release. They must line up
+  across Auth, the MQTT broker, Shadow Manager, and the nucleus. For example, Shadow
+  Manager 2.3.13 requires nucleus `>=2.5.0 <2.17.0`. Docker application manager 2.0.15
+  requires nucleus `>=2.1.0 <2.17.0`. Pin explicit `VersionRequirement` ranges rather
+  than resolving them automatically. Local deployment through `greengrass-cli` has no
+  cloud-side compatibility check like a targeted fleet deployment.
+- Client device auth needs its own Greengrass service-role and IoT-policy permissions.
+  These include `greengrass:VerifyClientDeviceIdentity`,
+  `greengrass:PutCertificateAuthorities`, and MQTT topic permissions for the `-gci`
+  shadow topics. A purely offline, locally deployed component does not need them until
+  an external client device connects. Pair this scenario with the provisioning
+  walkthrough above, not with an offline-only local deployment.
+
+---
+
+## Tier: not planned, demand-gated
+
+### Scenario: docker-compose multi-service component
+
+**Worked example: `aws.greengrass.DockerApplicationManager` with a compose file
+artifact.** This is AWS's documented pattern. Greengrass pulls images from registry
+references. It does not receive image tarballs in the component artifact.
+
+```yaml
+RecipeFormatVersion: "2020-01-25"
+ComponentName: <ComponentName>
+ComponentVersion: 1.0.0
+ComponentDescription: Runs a multi-service stack via Docker Compose.
+ComponentPublisher: <you>
+ComponentDependencies:
+  aws.greengrass.DockerApplicationManager:
+    VersionRequirement: "~2.0.0"
+Manifests:
+  - Platform:
+      os: linux
+    Lifecycle:
+      Run: "docker-compose -f {artifacts:path}/docker-compose.yaml up"
+    Artifacts:
+      - URI: "docker:public.ecr.aws/<repo>/<image>:<tag>"
+      - URI: "docker:<other-image>:<tag>"
+      - URI: "s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/docker-compose.yaml"
+```
+
+This does not map directly onto either component generator. The Python generator builds
+one dependency-vendored zip per architecture when necessary. The TypeScript generator
+builds a bundle zip. Neither shape matches multiple `docker:` URI artifacts plus a
+compose-file artifact. Treat a docker-compose component as its own project alongside a
+generated component. Author a parallel `recipe.yaml` by hand. You can reuse the
+generator's `ComponentName` and `ComponentVersion` conventions for consistency.
+
+**Caveats.**
+
+- `DockerApplicationManager` only pulls and authenticates images. It does not run
+  `docker-compose` for you. The `Lifecycle.Run` script must invoke `docker-compose` or
+  `docker run`. Install Docker Compose on the core device separately. No Greengrass
+  component installs it.
+- `DockerApplicationManager` is a **generic** component. It has only a `2.0.x` version
+  line and supports Linux and Windows. Each release has a nucleus upper-bound
+  compatibility window. For example, 2.0.17 requires nucleus `<2.18.0` and 2.0.15
+  requires nucleus `<2.17.0`.
+- No IPC or host-network wiring is automatic for compose services. A generated
+  component with `ipc: true` gets an `accessControl` block for its own native process.
+  Compose services must still mount the nucleus domain socket and set `SVCUID` and
+  `AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT` themselves.
+- If your images are private, add `aws.greengrass.TokenExchangeService` as a dependency.
+  Grant the Greengrass device role `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, and
+  `ecr:GetDownloadUrlForLayer`.
+
+### Scenario: React+nginx web component
+
+**Worked example: packaging a built static site + nginx as a component.**
+
+Minimal `nginx.conf`. Trim the CORS block unless the page calls a separate-origin API:
+
+```nginx
+events {
+  worker_connections 1024;
+}
+
+http {
+  include /etc/nginx/mime.types;
+
+  server {
+    listen 80;
+    root /wwwroot;
+    index index.html;
+
+    location / {
+      try_files $uri $uri/ /index.html;
+    }
+  }
+}
+```
+
+`Dockerfile` uses a multi-stage build. It copies only the built site into the runtime
+image:
+
+```dockerfile
+FROM node:20 AS build
+WORKDIR /app
+COPY . .
+RUN npm ci && npm run build
+
+FROM nginx:latest
+COPY --from=build /app/build /wwwroot/
+COPY nginx.conf /etc/nginx/nginx.conf
+```
+
+Two artifact strategies work for a single image.
+
+**(a) `DockerApplicationManager`, image pushed to ECR out-of-band** is simpler. Prefer
+it for one image:
+
+```yaml
+ComponentDependencies:
+  aws.greengrass.DockerApplicationManager:
+    VersionRequirement: "~2.0.0"
+Manifests:
+  - Platform:
+      os: linux
+    Lifecycle:
+      Run: "docker run -d --rm -p 80:80 --name <component-name> <account-id>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>"
+    Artifacts:
+      - URI: "docker:<account-id>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>"
+```
+
+**(b) S3 tarball:**
+
+```yaml
+Manifests:
+  - Platform:
+      os: linux
+    Lifecycle:
+      Install:
+        Script: "docker load -i {artifacts:path}/<component-name>.tar"
+      Run:
+        Script: "docker run -d --rm -p 80:80 --name <component-name> <component-name>"
+    Artifacts:
+      - URI: "s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<component-name>.tar"
+```
+
+This is separate from `py#greengrass-component` and `ts#greengrass-component`. Their
+artifact targets produce Python or TypeScript component archives. A React+nginx component
+needs its own `npm run build` plus `docker build` and `docker save` or `docker push`
+steps. Wire those as new targets on the host project.
+
+**Caveats.**
+
+- Do not hardcode `--platform=linux/amd64`. A component targeting `linux-arm64` cores
+  needs the image architecture to match the device. Use a matching platform or a
+  multi-architecture build through `docker buildx`. Otherwise, the image will not load
+  on an ARM core.
+- Trim or scope CORS headers. `Access-Control-Allow-Origin: *` on every response,
+  including error pages, is broader than a same-origin static site needs. Add it only
+  when the page calls a separate-origin API.
+- Nucleus lite gained container support only in v2.15 (July 2025). This applies to every
+  Docker-based component in both demand-gated scenarios. Verify the nucleus lite version
+  in your fleet before shipping one.
+
+Before any of these patterns reaches a fleet, follow
+<Link path="guides/greengrass-device-validation">Validating on real devices</Link>.

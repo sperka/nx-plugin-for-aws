@@ -652,6 +652,14 @@ export default defineConfig({
                   label: 'greengrass-deployment',
                   link: '/guides/greengrass-deployment',
                 },
+                {
+                  label: 'Validating on real devices',
+                  link: '/guides/greengrass-device-validation',
+                },
+                {
+                  label: 'Beyond the generators',
+                  link: '/guides/greengrass-out-of-scope',
+                },
               ],
             },
           ],
