@@ -79,6 +79,9 @@ sudo update-alternatives --set sudo /usr/bin/sudo.ws
 sudo systemctl restart greengrass
 ```
 
+A privileged `Install` step in the recipe applies the same switch fleet-wide, without the restart:
+see <Link path="guides/greengrass-out-of-scope#scenario-switch-a-sudo-rs-fleet-back-to-classic-sudo-from-the-recipe">Beyond the generators</Link>.
+
 `ipc` defaults to `true` on `py#greengrass-component`. The default generated Python
 component is therefore the failing case. This is a distribution-versus-nucleus
 incompatibility, not a generator defect.
