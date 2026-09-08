@@ -168,7 +168,7 @@ The first `build` of a fresh workspace fails on `metrics/metrics.tf` formatting,
 ## Deploying and observing locally
 
 :::caution[Run these on the core device]
-`<c>-deploy-local` and `<c>-logs` only make sense executed **on** a Greengrass core device (or a container running the [nucleus](https://docs.aws.amazon.com/greengrass/v2/developerguide/greengrass-nucleus-component.html)) — they call `greengrass-cli`, which is installed alongside the nucleus, not on your development machine. Neither target is wired into the project's `dev` target: a routine `nx run <project>:dev` must never mutate a real device as a side effect.
+`<c>-deploy-local` and `<c>-logs` only make sense executed **on** a Greengrass core device (or a container running the [nucleus](https://docs.aws.amazon.com/greengrass/v2/developerguide/greengrass-nucleus-component.html)) — they call `greengrass-cli`, which is installed alongside the nucleus, not on your development machine. Neither target is wired into the project's `dev` target: a routine `nx run <project>:dev` must never mutate a real device as a side effect. Once a deployment reaches the device, follow [Verifying on a real device](#verifying-on-a-real-device).
 :::
 
 <NxCommands commands={['run <project>:<component-name>-deploy-local']} />
@@ -184,6 +184,64 @@ Local deployments resolve the recipe's `s3://` placeholder artifact from `--arti
 Tails the component's log file (`<GREENGRASS_ROOT>/logs/<ComponentName>.log`) in follow mode until you press Ctrl-C.
 
 Both targets read `GREENGRASS_ROOT` from the environment, defaulting to `/greengrass/v2`.
+
+## Verifying on a real device
+
+CI cannot prove on-device behaviour. It proves that `CreateComponentVersion` and `CreateDeployment` succeed, not that the component runs. This section is the procedure the author's receipts followed, in order. Every command here appears in one of those receipts.
+
+1. **The device as the cloud sees it.** Nucleus version, platform and health in one call. `architecture` is `aarch64` here, never `arm64`; that token is what the recipe manifests must carry.
+
+   ```bash
+   aws greengrassv2 get-core-device --core-device-thing-name <thing> \
+     --query '{status:status,coreVersion:coreVersion,platform:platform,architecture:architecture}'
+   ```
+
+2. **Deployment status, then component state.** A deployment and its IoT job can report `SUCCEEDED` while the component is `BROKEN` and the device is `UNHEALTHY`, with no rollback. Read both, and treat only the second as evidence.
+
+   ```bash
+   aws greengrassv2 list-effective-deployments --core-device-thing-name <thing>
+   aws greengrassv2 list-installed-components --core-device-thing-name <thing>
+   ```
+
+   On the device itself, before and after the deployment:
+
+   ```bash
+   sudo /greengrass/v2/bin/greengrass-cli component list
+   ```
+
+3. **The bytes the device fetched.** One archive per manifest the device matched, and nothing from any other architecture.
+
+   ```bash
+   sudo ls /greengrass/v2/packages/artifacts/<ComponentName>/<version>/
+   sudo ls /greengrass/v2/packages/artifacts-unarchived/<ComponentName>/<version>/
+   sudo find /greengrass/v2/packages -iname "*<other-architecture>*"   # expect no output
+   ```
+
+4. **The machine code.** With `ipc: true`, `file` on the vendored `aws-crt` addon must name the device's architecture. The author has not run the TypeScript component through this procedure on hardware yet, so treat this step as the check to perform, not as a claim already made.
+
+   ```bash
+   sudo find /greengrass/v2/packages/artifacts-unarchived/<ComponentName>/<version>/ -name "aws-crt-nodejs.node" -exec file {} \;
+   ```
+
+5. **Liveness.** Two samples of the component's own log, spaced apart, with no restart between them. With `ipc: true` the first lines also show the IPC connection and a published message.
+
+   <NxCommands commands={['run <project>:<component-name>-logs']} />
+
+   ```text
+   INFO:awsiot.eventstreamrpc:<Connection ...> /greengrass/v2/ipc.socket:0> connected
+   INFO:<ComponentName>:Published heartbeat 0 to <ComponentName>/heartbeat
+   INFO:<ComponentName>:Published heartbeat 8 to <ComponentName>/heartbeat
+   ```
+
+6. **The teardown sweep.** After the infrastructure is destroyed, nothing of the component remains in the registry, in the bucket, or on the device.
+
+   ```bash
+   aws greengrassv2 list-component-versions --arn arn:aws:greengrass:<region>:<account>:components:<ComponentName>
+   aws s3api head-bucket --bucket <artifact-bucket>          # expect a 404
+   aws greengrassv2 list-installed-components --core-device-thing-name <thing>
+   ```
+
+The deployment guide records the two failure modes this procedure exists for: <Link path="guides/greengrass-deployment#a-successful-deployment-is-not-a-running-component">a successful deployment that is not a running component</Link>, and <Link path="guides/greengrass-deployment#ipc-components-fail-on-a-sudo-rs-device">IPC components that fail on a sudo-rs device</Link>.
 
 ## File ownership
 
@@ -230,7 +288,7 @@ In this mode, the artifact key is `<ComponentName>/<sha256>/<file>`. The deploym
 
 ### Component version immutability
 
-`ComponentVersion` in `recipe.yaml` is user-owned from the start. Once a version of a component is published to AWS IoT Greengrass, that version's content can never change - publishing again under the same version with different content is rejected. Keep a concrete version and bump it by hand whenever you change the component. Or use an automatic versioning sentinel.
+`ComponentVersion` in `recipe.yaml` is user-owned from the start. Once a version of a component is published to AWS IoT Greengrass, that version's content can never change - publishing again under the same version with different content is rejected. Keep a concrete version and bump it by hand whenever you change the component. Or use an automatic versioning sentinel. Two quotas bind that workflow, and neither is adjustable: AWS IoT Greengrass keeps at most 5,000 versions per component per Region, so a bump-per-deploy habit has a ceiling, and `CreateComponentVersion` allows 1 request per second per Region, so a deploy that publishes many components at once is rate-limited. The <Link path="guides/greengrass-deployment#service-quotas-that-bind-generated-code">deployment guide</Link> lists both with their consequences.
 
 <OptionFilter when={{ ipc: true }} description="ipc=true wires a least-privilege accessControl block">
 
