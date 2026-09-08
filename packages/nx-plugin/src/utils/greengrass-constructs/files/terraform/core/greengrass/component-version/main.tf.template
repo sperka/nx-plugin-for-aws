@@ -314,9 +314,13 @@ output "component_name" {
 }
 
 output "component_version" {
-  # This computed resource value forms the deployment ordering edge: a caller
-  # consuming it waits for the version to exist, not merely for its local name.
-  value = awscc_greengrassv2_component_version.this.component_version
+  # The plan-time value, not the resource's computed attribute: a concrete
+  # version is known at plan (as before), and a resolved one is known whenever
+  # the resolver ran at plan. `depends_on` keeps the ordering edge a consumer
+  # needs - a deployment referencing this output waits for the version to
+  # exist in the registry, not merely for its number.
+  value      = local.resolved_version
+  depends_on = [awscc_greengrassv2_component_version.this]
 }
 
 output "arn" {

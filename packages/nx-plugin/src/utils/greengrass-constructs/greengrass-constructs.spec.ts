@@ -1773,8 +1773,9 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     expect(content).toContain(
       '"nx:greengrass:content-sha256" = data.external.next_version[0].result.content_key',
     );
+    expect(content).toContain('value      = local.resolved_version');
     expect(content).toContain(
-      'value = awscc_greengrassv2_component_version.this.component_version',
+      'depends_on = [awscc_greengrassv2_component_version.this]',
     );
   });
 
