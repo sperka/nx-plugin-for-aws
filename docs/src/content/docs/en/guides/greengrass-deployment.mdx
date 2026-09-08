@@ -15,7 +15,9 @@ import OptionFilter from '@components/option-filter.astro';
 
 The `greengrass-deployment` generator creates a small TypeScript library for typed [AWS IoT Greengrass v2](https://docs.aws.amazon.com/greengrass/v2/developerguide/what-is-iot-greengrass.html) component wiring, plus (unless `--infra none`) the CDK constructs or Terraform modules an `AWS::GreengrassV2::Deployment` and its artifact bucket need: a retained artifact bucket, and a deployment targeting the thing, thing group, or ARN you target.
 
-Publishing a component's version is handled separately, by escalating a <Link path="guides/py-greengrass-component">`py#greengrass-component`</Link> with `--infra component-version` - this generator only owns the deployment side (the target, the artifact bucket, and the `AWS::GreengrassV2::Deployment` resource itself).
+Publishing a component's version is handled separately, by escalating a <Link path="guides/py-greengrass-component">`py#greengrass-component`</Link> or <Link path="guides/ts-greengrass-component">`ts#greengrass-component`</Link> with `--infra component-version` - this generator only owns the deployment side (the target, the artifact bucket, and the `AWS::GreengrassV2::Deployment` resource itself).
+
+For supported scenarios that these generators do not scaffold, see <Link path="guides/greengrass-out-of-scope">Beyond the generators</Link>.
 
 ## Usage
 
@@ -444,6 +446,8 @@ This is why local iteration and a deployed fleet do not mix on one device: use `
 ## A Successful Deployment Is Not a Running Component
 
 A deployment and its IoT job can both report `SUCCEEDED` while the component on the device is `BROKEN`. Observed on real hardware: the nucleus logged the component `BROKEN` at 04:47:50.169Z and wrote `DeploymentStatus=SUCCEEDED` 14 seconds later, at 04:48:04.732Z. The IoT job reported `SUCCEEDED` too, and no rollback happened despite `failureHandlingPolicy: ROLLBACK`. `get-core-device` reported the device `UNHEALTHY` throughout.
+
+For the validation tiers and other defects that only real hardware exposed, see <Link path="guides/greengrass-device-validation">Validating on real devices</Link>.
 
 So a green deployment means the device accepted and applied the document, not that anything it installed runs. Two things are evidence:
 

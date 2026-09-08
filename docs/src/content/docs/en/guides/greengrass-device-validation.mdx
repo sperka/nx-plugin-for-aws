@@ -1,0 +1,174 @@
+---
+title: Validating Greengrass Components on Real Devices
+description: What each Greengrass validation tier proves, and what only a real device can prove
+---
+
+import Link from '@components/link.astro';
+
+Greengrass component generators produce software for a physical or virtual core device
+managed by the AWS IoT Greengrass nucleus. Unit tests, snapshots, and a successful
+CloudFormation deployment cannot observe every part of that software's correctness.
+
+## The five validation tiers
+
+| Tier | Proves | Cannot prove |
+| --- | --- | --- |
+| Unit tests / snapshots | Generated file content, option handling, idempotency, target wiring | That any of it is accepted by AWS or runnable |
+| Linked-workspace build | A freshly generated workspace builds out of the box, artifacts are well-formed | That the recipe is valid to the service |
+| E2E smoke (upstream CI) | Generate + build across the option matrix, no crashes | Anything requiring AWS credentials or a device |
+| Real cloud deploy | `CreateComponentVersion` / `CreateDeployment` accept the output; artifact fetch and IAM grants work | That the component process starts or stays up |
+| **Real core device** | The nucleus selects the right manifest, the artifact unpacks, the interpreter and native extensions load, the process runs, IPC connects | - |
+
+Each tier catches defects that the tiers above it cannot see. Keep all five tiers.
+Do not run all five tiers in upstream CI.
+
+## Defects that only the device tier found
+
+These defects passed unit tests, built cleanly, and in most cases deployed successfully.
+
+1. **`architecture: arm64` is silently wrong.** The nucleus matches `aarch64`.
+   A Docker-style `arm64` produces `LOCAL_RECIPE_NOT_FOUND` on the device.
+   Nothing upstream of the device rejects it.
+2. **A bare `python3` in the recipe's `Run` resolves to the device's default interpreter**,
+   not the one the wheels were vendored for. It gives
+   `ImportError: undefined symbol: Py_GetConstant`.
+   The recipe now pins `python<requires-python floor>`.
+3. **`Source.asset` must target the artifact directory, not the archive with `extract: false`.**
+   The latter publishes under the CDK asset's own hashed filename, which no recipe URI can
+   reference.
+4. **A build-time timestamp in the zip churned the artifact sha256 on every rebuild**,
+   so CloudFormation tried to replace an immutable component version and hit
+   `AlreadyExists`. DOS-epoch timestamps and sorted entries fix this.
+5. **A missing `ComponentVersion` -> `Deployment` dependency edge** let the IoT job reach
+   devices before the version existed.
+6. **Greengrass nucleus 2.18.3 cannot run IPC components on Ubuntu 25.10+.**
+   This was invisible to every other tier.
+7. **A deployment can report `SUCCEEDED` while the component is `BROKEN`.**
+
+## Two findings to understand before you deploy
+
+### `sudo-rs` breaks every IPC component on recent Ubuntu
+
+Nucleus 2.18.3 launches each component through `sudo -E`. This is how the component
+receives `AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT` and `SVCUID`.
+Ubuntu 25.10+ ships `sudo-rs` as the default `sudo`.
+`sudo-rs` accepts `-E` and then discards the environment, printing a warning.
+The component starts, imports its architecture-specific native extension successfully,
+and dies:
+
+```text
+stderr. sudo: preserving the entire environment is not supported, '-E' is ignored
+KeyError: 'AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT'
+```
+
+Three crash loops, then `BROKEN`. The nucleus uses this invocation shape:
+
+```bash
+$ sudo env FOO=abc sudo    -n -E -H -u ggc_user -g ggc_group sh -c 'echo [$FOO]'
+sudo: preserving the entire environment is not supported, '-E' is ignored
+[]
+$ sudo env FOO=abc sudo.ws -n -E -H -u ggc_user -g ggc_group sh -c 'echo [$FOO]'
+[abc]
+```
+
+Classic sudo ships on Ubuntu already. It is not the selected alternative.
+Fix the device and restart Greengrass:
+
+```bash
+sudo update-alternatives --set sudo /usr/bin/sudo.ws
+sudo systemctl restart greengrass
+```
+
+`ipc` defaults to `true` on `py#greengrass-component`. The default generated Python
+component is therefore the failing case. This is a distribution-versus-nucleus
+incompatibility, not a generator defect.
+
+### `SUCCEEDED` is not evidence that a component runs
+
+On one failing run, the nucleus marked the component `BROKEN` at 04:47:50.169Z.
+14 seconds later, it wrote:
+
+```text
+DeploymentStatusKeeper: Stored deployment status. {DeploymentStatus=SUCCEEDED}
+IotJobsHelper: ... {Status=SUCCEEDED, StatusDetails={detailed-deployment-status=SUCCESSFUL}}
+```
+
+`get-core-device` at the same moment reported `UNHEALTHY`. No rollback ran despite
+`failureHandlingPolicy: ROLLBACK` in the deployment document. Check `get-core-device`
+status and `list-installed-components` lifecycle state. Do not use deployment status as
+evidence that a component runs.
+
+## Multi-architecture results
+
+`platform: linux-amd64-arm64` vendors dependencies per architecture and writes one recipe
+manifest each. One component version can serve a mixed fleet. Two real devices proved:
+
+- One component version, `com.gg-validate.MultiArch` 1.0.0, exactly one in the registry,
+  two platforms on it, both artifacts under one aggregate-sha256 prefix.
+- The **aarch64** device (Amazon Linux 2023, Graviton) fetched only
+  `multiarch-aarch64.zip` and ran `_awscrt.abi3.so` reporting `ARM aarch64`
+  (BuildID `5dfa1679`).
+- The **x86_64** device (Ubuntu 26.04) fetched only `multiarch-amd64.zip` and ran the
+  same file reporting `x86-64` (BuildID `68c84233`).
+- Store-wide negative checks confirmed neither device held a single byte of the other's
+  archive.
+- Both connected over the nucleus IPC socket and published heartbeats one second apart.
+
+**Manifest selection is active platform matching, not first-match.** The nucleus-persisted
+recipe is byte-identical on both devices
+(sha256 `7a10ba434a947b2f66bc433ad227020fd5351817442afb51b9d348b4fa92eb04`).
+The **amd64 manifest is first** in both. The aarch64 device resolved to the *second*
+entry. One device cannot establish that distinction.
+
+This result has two limits:
+
+- The x86 device is Ubuntu and the aarch64 device is Amazon Linux 2023. OS and
+  architecture varied together, so the run cannot separate their effects.
+- `ts#greengrass-component` accepts the same option and was not exercised. Its
+  multi-architecture path remains unit-tested only.
+
+## Why this does not run in the upstream e2e suite
+
+The upstream `cdk-deploy` e2e jobs assume `DEPLOY_INTEG_TESTS_ROLE_ARN` and deploy into
+the maintainers' integration account on every change. Greengrass device assertions do
+not belong in that suite for six independent reasons:
+
+1. **Component versions are immutable and retained.** `RemovalPolicy.RETAIN` sits on
+   both `DeletionPolicy` and `UpdateReplacePolicy` by design. Every run would leave
+   component versions that teardown cannot remove. Greengrass allows 5,000 versions per
+   component per Region with no automatic cleanup. The retention policy actively fights
+   the teardown the e2e suite needs.
+2. **It requires physical or virtual core devices.** The claims that matter are manifest
+   selection, interpreter resolution, native extension loading, IPC connection, and
+   process liveness. Only a running nucleus can expose them. Provisioning a device per
+   run means an EC2 instance, a thing, a certificate, a token exchange role, and a thing
+   group per run. All are stateful and slow.
+3. **A green deployment is not a green component.** A device-less API assertion would
+   produce false confidence.
+4. **Cost and wall-clock.** The two validation devices are a `t4g.2xlarge` and a
+   `t2.large` running continuously. A single deploy-and-verify cycle takes minutes.
+   Per-architecture wheel vendoring makes the build slow. The option matrix multiplies
+   both costs on every push.
+5. **Hard service ceilings turn the matrix into a cliff.** CloudFormation permits at
+   most 10 deployment resources added or deleted per operation. `CreateComponentVersion`
+   is limited to 1 request per second per Region. A matrix that fans out hits both.
+6. **Platform coverage is the point.** The `sudo-rs` finding exists only because a device
+   ran a specific Ubuntu release. A CI runner image proves nothing about the
+   distributions users deploy to.
+
+## What each tier owns
+
+- **Upstream CI, every change:** unit tests, snapshots, and the existing
+  generate-and-build e2e smoke matrix. This tier owns option handling, idempotency, and
+  file content. It is fast and hermetic. Do not add Greengrass assertions to
+  `deploy-invocations.ts`.
+- **Manual or nightly, owned by the contributor:** cloud publish and deploy, plus
+  on-device verification. The Greengrass Test Framework (GTF) is the eventual home for
+  automating this tier. It is deliberately out of initial scope.
+- **Graduation criterion for dropping `experimental`:** repeat the validation against
+  shipped code, complete one full release cycle with no schema or layout changes, and
+  keep the e2e suites stable.
+
+## Verifying on a real device
+
+Use the real-device procedure in the <Link path="guides/py-greengrass-component#verifying-on-a-real-device">Python component guide</Link> or the <Link path="guides/ts-greengrass-component#verifying-on-a-real-device">TypeScript component guide</Link>.
