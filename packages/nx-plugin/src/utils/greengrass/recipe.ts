@@ -7,6 +7,38 @@ import { valid as validSemver } from 'semver';
 import { z } from 'zod';
 import { validateComponentName } from './naming.js';
 
+export const NEXT_VERSION_SENTINELS = [
+  'NEXT_PATCH',
+  'NEXT_MINOR',
+  'NEXT_MAJOR',
+] as const;
+
+export type NextVersionSentinel = (typeof NEXT_VERSION_SENTINELS)[number];
+
+/** Whether a value requests deploy-time component version resolution. */
+export const isNextVersionSentinel = (
+  value: string,
+): value is NextVersionSentinel =>
+  NEXT_VERSION_SENTINELS.includes(value as NextVersionSentinel);
+
+/** Maps a version sentinel to its semantic-version bump strategy. */
+export const nextVersionStrategy = (
+  sentinel: NextVersionSentinel,
+): 'patch' | 'minor' | 'major' => {
+  switch (sentinel) {
+    case 'NEXT_PATCH':
+      return 'patch';
+    case 'NEXT_MINOR':
+      return 'minor';
+    case 'NEXT_MAJOR':
+      return 'major';
+  }
+};
+
+/** Whether a value is a semantic version or a deploy-time version sentinel. */
+export const isValidComponentVersion = (value: string): boolean =>
+  Boolean(validSemver(value)) || isNextVersionSentinel(value);
+
 /**
  * Typed model of the Greengrass v2 recipe format (`RecipeFormatVersion`
  * `2020-01-25`) and a zod schema over it.
@@ -151,10 +183,10 @@ export const GreengrassRecipeSchema = z
       });
     }
 
-    if (!validSemver(recipe.ComponentVersion)) {
+    if (!isValidComponentVersion(recipe.ComponentVersion)) {
       ctx.addIssue({
         code: 'custom',
-        message: `ComponentVersion "${recipe.ComponentVersion}" must be a valid semantic version (eg. "1.0.0").`,
+        message: `ComponentVersion "${recipe.ComponentVersion}" must be a valid semantic version (eg. "1.0.0") or one of NEXT_PATCH, NEXT_MINOR, NEXT_MAJOR.`,
         path: ['ComponentVersion'],
       });
     }

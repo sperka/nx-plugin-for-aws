@@ -8,6 +8,10 @@ terraform {
       source  = "hashicorp/awscc"
       version = "<%- awsccProviderVersion %>"
     }
+    external = {
+      source  = "hashicorp/external"
+      version = "<%- externalProviderVersion %>"
+    }
   }
 }
 
@@ -39,6 +43,13 @@ locals {
   recipe            = try(yamldecode(file(local.recipe_path)), {})
   component_name    = try(local.recipe.ComponentName, "")
   component_version = try(local.recipe.ComponentVersion, "")
+  next_version_strategies = {
+    NEXT_PATCH = "patch"
+    NEXT_MINOR = "minor"
+    NEXT_MAJOR = "major"
+  }
+  next_version_mode      = contains(keys(local.next_version_strategies), local.component_version)
+  recipe_without_version = { for key, value in local.recipe : key => value if key != "ComponentVersion" }
 
   artifact_dir       = "${var.artifacts_dir}/${local.component_name}/${local.component_version}"
   artifact_files     = try(fileset(local.artifact_dir, "*"), [])
@@ -56,6 +67,11 @@ locals {
     sha256(join("\n", [for f in local.artifact_basenames : "${f}:${local.artifact_hashes[f]}"]))
   )
 
+  # The resolver's tag carries this version-independent content identity. The
+  # raw recipe stays part of it, so a lifecycle-only recipe change is a new
+  # component version even when its artifact bytes have not changed.
+  content_sha256 = local.next_version_mode ? sha256("${jsonencode(local.recipe_without_version)}\n${local.sha256}") : ""
+
   # No length guard needed here, unlike the CDK construct's
   # `assertArtifactKeyPrefixFits`: that guard exists because `BucketDeployment`
   # tags its destination bucket with a key derived from this prefix and throws
@@ -65,7 +81,9 @@ locals {
   # 1024-byte object key limit, which even a maximum-length 128-character
   # `ComponentName` plus this fixed 64-character hash and its separators
   # cannot approach.
-  destination_key_prefix = "${local.component_name}/${local.component_version}/${local.sha256}/"
+  # Sentinel versions use one key for identical content, independent of the
+  # number resolved at plan time. Concrete versions keep their existing key.
+  destination_key_prefix = local.next_version_mode ? "${local.component_name}/${local.sha256}/" : "${local.component_name}/${local.component_version}/${local.sha256}/"
   replacement_prefix     = "s3://${var.bucket_name}/${local.destination_key_prefix}"
 
   # Rewrite only `Manifests[].Artifacts[].Uri` carrying the GDK placeholder
@@ -95,11 +113,17 @@ locals {
       }
     ]...)
   ]
-  substituted_recipe = merge(local.recipe, [
+  # Recipe mode receives an empty merge arm and keeps the current encoded
+  # recipe shape; sentinel mode supplies the deployment-time resolved number.
+  substituted_recipe_base = merge(local.recipe, [
     for _ in range(can(local.recipe.Manifests) ? 1 : 0) : {
       Manifests = local.substituted_manifests
     }
   ]...)
+  substituted_recipe = local.next_version_mode ? merge(
+    local.substituted_recipe_base,
+    { ComponentVersion = local.resolved_version },
+  ) : local.substituted_recipe_base
 
   substituted_basenames = distinct(flatten([
     for manifest in try(local.recipe.Manifests, []) : [
@@ -109,6 +133,49 @@ locals {
   ]))
   missing_basenames      = setsubtract(toset(local.substituted_basenames), toset(local.artifact_basenames))
   unreferenced_artifacts = setsubtract(toset(local.artifact_basenames), toset(local.substituted_basenames))
+}
+
+data "aws_partition" "current" {
+  count = local.next_version_mode ? 1 : 0
+}
+
+data "aws_region" "current" {
+  count = local.next_version_mode ? 1 : 0
+}
+
+data "aws_caller_identity" "current" {
+  count = local.next_version_mode ? 1 : 0
+}
+
+# Resolve sentinel versions at plan time, so the plan contains the immutable
+# version the real resource will publish. This program uses the CLI process's
+# ambient credentials; provider `profile` and `assume_role` settings are not
+# passed into it, so it verifies that its STS identity matches the provider
+# account before resolving.
+#
+# Destroy planning also evaluates data sources. `count = 0` when no recipe was
+# assembled, so the resolver never calls Greengrass for that empty shape.
+#
+# The resolver folds `bucket_name` into its content key at resolution time. A
+# fresh workspace's created bucket name is unknown during its first plan, so
+# Terraform defers this data source to apply once; later plans resolve normally.
+data "external" "next_version" {
+  count   = local.next_version_mode ? 1 : 0
+  program = ["node", "${path.module}/next-version.cjs"]
+
+  query = {
+    component_name = local.component_name
+    strategy       = local.next_version_strategies[local.component_version]
+    content_sha256 = local.content_sha256
+    bucket_name    = var.bucket_name
+    region         = data.aws_region.current[0].region
+    account_id     = data.aws_caller_identity.current[0].account_id
+    partition      = data.aws_partition.current[0].partition
+  }
+}
+
+locals {
+  resolved_version = local.next_version_mode ? data.external.next_version[0].result.version : local.component_version
 }
 
 # Synth-time-equivalent guard. Terraform has no shared mutable state across
@@ -134,6 +201,12 @@ resource "terraform_data" "guard" {
     precondition {
       condition     = length(local.unreferenced_artifacts) == 0
       error_message = "The build produced artifact(s) ${join(", ", local.unreferenced_artifacts)} for ${local.component_name}@${local.component_version} that no manifest references. Add a manifest whose artifact Uri ends in each name, then bump ComponentVersion before re-applying."
+    }
+    # A conditional, not `||`: only the chosen branch is evaluated, so the
+    # zero-count data source is never indexed in recipe mode.
+    precondition {
+      condition     = local.next_version_mode ? data.external.next_version[0].result.version != "" : true
+      error_message = "The next-version resolver returned an empty version for ${local.component_name}. Run the component's \"-artifact\" target, then plan again."
     }
   }
 }
@@ -195,6 +268,13 @@ resource "awscc_greengrassv2_component_version" "this" {
   # only shape that works. Verified against the real API on 2026-09-06.
   inline_recipe = jsonencode(local.substituted_recipe)
 
+  # The tag is the idempotency carrier: a later plan with the same content
+  # key finds the deployable published version instead of creating another one.
+  tags = local.next_version_mode ? {
+    "nx:greengrass:content-sha256" = data.external.next_version[0].result.content_key
+    "nx:greengrass:versioning"     = local.component_version
+  } : null
+
   # Referencing `var.bucket_name` inside `inline_recipe` does not make
   # Terraform wait for the upload - an explicit `depends_on` on the object
   # itself is required, mirroring the CDK construct's
@@ -234,7 +314,9 @@ output "component_name" {
 }
 
 output "component_version" {
-  value = local.component_version
+  # This computed resource value forms the deployment ordering edge: a caller
+  # consuming it waits for the version to exist, not merely for its local name.
+  value = awscc_greengrassv2_component_version.this.component_version
 }
 
 output "arn" {

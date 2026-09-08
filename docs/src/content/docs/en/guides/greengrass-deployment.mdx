@@ -220,6 +220,114 @@ provider "awscc" {
 </Fragment>
 </Infrastructure>
 
+## Automatic Versioning
+
+Set `ComponentVersion` in `recipe.yaml` to `NEXT_PATCH`, `NEXT_MINOR`, or
+`NEXT_MAJOR` to resolve the version at deploy time. CDK resolves it with a
+custom resource. Terraform resolves it with a plan-time `data "external"`
+program. The component guides list the bump rules.
+
+The resolver reads the highest published strict `M.m.p` version of the
+component. It reuses that version when the version's content tag matches the
+current recipe and artifact and its state is `DEPLOYABLE`. Otherwise it
+publishes the next version. The first publication is `1.0.0`. In this mode the
+artifact key is `<ComponentName>/<sha256>/<file>`.
+
+The deployment must receive the resolved version. The connection generator
+writes the sentinel into the components entry verbatim, and the deployment
+refuses that marker until you wire the resolved version in.
+
+<Infrastructure>
+<Fragment slot="cdk">
+
+Use the same wiring from the Infrastructure section. `dependOn` orders the
+deployment and carries the resolved version:
+
+```ts title="packages/infra/src/stacks/application-stack.ts"
+const deployment = new MyDeployment(this, 'MyDeployment', { components });
+const myComponent = new MyComponent(this, 'MyComponent', {
+  bucket: deployment.artifactBucket,
+});
+
+deployment.dependOn(myComponent);
+```
+
+An unwired sentinel fails at synth:
+
+```text
+Validation failed with the following errors:
+  [TestStack/Deployment] Component "com.myscope.MyComponent" has sentinel version "NEXT_PATCH". Wire its resolved version with deployment.dependOn(myComponent) (preferred) or componentVersions: { [myComponent.componentName]: myComponent.componentVersion }.
+```
+
+Use `componentVersions` only when the resolved version does not come from a
+component construct. For example:
+
+```ts
+const deployment = new MyDeployment(this, 'MyDeployment', {
+  components,
+  componentVersions: { 'com.myscope.ExternalComponent': resolvedVersion },
+});
+```
+
+A `componentVersions` key that names no component in `components` causes an
+error when the construct is created.
+
+CDK retains replaced component versions and their artifacts. They accumulate
+toward the 5,000-version quota for each component in a Region.
+
+</Fragment>
+<Fragment slot="terraform">
+
+Pass the component module's output to the deployment module:
+
+```hcl title="packages/infra/src/main.tf"
+module "my_deployment" {
+  source = "../../common/terraform/src/app/greengrass-deployment/my-deployment"
+
+  component_versions = {
+    (module.my_component.component_name) = module.my_component.component_version
+  }
+}
+```
+
+An unwired sentinel fails at plan:
+
+```text
+Component(s) com.myscope.MyComponent use NEXT_* version markers. Wire each resolved component output on the deployment app module: component_versions = { (module.<x>.component_name) = module.<x>.component_version }.
+```
+
+A `component_versions` key that names no entry in `components` also fails at
+plan.
+
+This reference orders the deployment after the component version. An explicit
+`depends_on` is optional for that component. Terraform deletes the outgoing
+version and artifact object on replacement. See
+[Retention Diverges From CDK Here](#retention-diverges-from-cdk-here).
+
+The resolver runs `node` with `@aws-sdk/client-greengrassv2` and
+`@aws-sdk/client-sts` from the workspace root. It uses the Terraform CLI
+process's ambient credentials. A provider-level `assume_role` or `profile` is
+not visible to it, so the resolver compares its own STS account with the
+provider's account and fails on a mismatch.
+
+On a fresh workspace the created bucket's name is unknown at plan, so the first
+plan shows the version as `(known after apply)`. Every later plan shows it.
+
+A saved plan carries digests, not bytes. A rebuild between `plan` and `apply`
+uploads the new bytes under the planned key and content tag, as it does in
+recipe mode. The vended `apply` target applies the plan its own `plan` step
+wrote.
+
+Deleting the current version outside Terraform restarts numbering at `1.0.0`.
+Set a concrete `ComponentVersion` above the lost number once, deploy it, then
+switch back to a sentinel.
+
+</Fragment>
+</Infrastructure>
+
+Two workspaces must not publish the same `ComponentName` into one account and
+Region. That configuration is unsupported.
+
 ## The Token Exchange Role Grant
 
 Every Greengrass core device assumes a *token exchange role* to reach AWS services, including fetching component artifacts from S3. Pass that role's ARN as `tokenExchangeRoleArn` and the generated construct grants it `s3:GetObject` - and only `s3:GetObject` - on the artifact bucket's objects:

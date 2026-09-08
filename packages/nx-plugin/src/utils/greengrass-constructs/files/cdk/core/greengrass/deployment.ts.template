@@ -49,6 +49,14 @@ export interface GreengrassDeploymentProps {
   /** Components to deploy, keyed by `ComponentName`. */
   readonly components?: Record<string, GreengrassDeploymentComponent>;
 
+  /**
+   * Resolved component versions overriding `components[name].componentVersion`,
+   * for example `{ [myComponent.componentName]: myComponent.componentVersion }`.
+   * Use this only when a resolved version does not come from a component
+   * construct passed to {@link GreengrassDeployment.dependOn}.
+   */
+  readonly componentVersions?: Record<string, string>;
+
   readonly deploymentPolicies?: CfnDeployment.DeploymentPoliciesProperty;
 
   readonly iotJobConfiguration?: CfnDeployment.DeploymentIoTJobConfigurationProperty;
@@ -68,32 +76,69 @@ export interface GreengrassDeploymentProps {
   readonly tags?: Record<string, string>;
 }
 
+interface GreengrassComponentVersionLike {
+  readonly componentName: string;
+  readonly componentVersion: string;
+}
+
+const NEXT_VERSION_SENTINELS = ['NEXT_PATCH', 'NEXT_MINOR', 'NEXT_MAJOR'];
+
+const isGreengrassComponentVersion = (
+  dependable: IDependable,
+): dependable is IDependable & GreengrassComponentVersionLike => {
+  const component = dependable as Partial<GreengrassComponentVersionLike>;
+  return (
+    typeof component.componentName === 'string' &&
+    typeof component.componentVersion === 'string'
+  );
+};
+
+const assertKnownComponentVersionName = (
+  components: Record<string, GreengrassDeploymentComponent> | undefined,
+  componentName: string,
+): void => {
+  if (!components?.[componentName]) {
+    throw new Error(
+      `componentVersions names "${componentName}", but components has no component by that name.`,
+    );
+  }
+};
+
 const toCfnComponents = (
   components: Record<string, GreengrassDeploymentComponent> | undefined,
+  componentVersions: Record<string, string> | undefined,
 ): Record<string, CfnDeployment.ComponentDeploymentSpecificationProperty> | undefined => {
   if (!components) {
     return undefined;
   }
   return Object.fromEntries(
-    Object.entries(components).map(([componentName, component]) => [
-      componentName,
-      {
-        componentVersion: component.componentVersion,
-        runWith: component.runWith,
-        ...(component.configurationUpdate
-          ? {
-              configurationUpdate: {
-                reset: component.configurationUpdate.reset as
-                  | string[]
-                  | undefined,
-                ...(component.configurationUpdate.merge
-                  ? { merge: JSON.stringify(component.configurationUpdate.merge) }
-                  : {}),
-              },
-            }
-          : {}),
-      },
-    ]),
+    Object.entries(components).map(([componentName, component]) => {
+      const componentVersion =
+        componentVersions?.[componentName] ?? component.componentVersion;
+      return [
+        componentName,
+        {
+          componentVersion,
+          runWith: component.runWith,
+          ...(component.configurationUpdate
+            ? {
+                configurationUpdate: {
+                  reset: component.configurationUpdate.reset as
+                    | string[]
+                    | undefined,
+                  ...(component.configurationUpdate.merge
+                    ? {
+                        merge: JSON.stringify(
+                          component.configurationUpdate.merge,
+                        ),
+                      }
+                    : {}),
+                },
+              }
+            : {}),
+        },
+      ];
+    }),
   );
 };
 
@@ -180,9 +225,19 @@ export class GreengrassDeployment extends Construct {
   public readonly thingGroup?: CfnThingGroup;
   public readonly targetArn: string;
   public readonly deployment: CfnDeployment;
+  private readonly components:
+    | Record<string, GreengrassDeploymentComponent>
+    | undefined;
+  private readonly componentVersions: Record<string, string>;
 
   constructor(scope: Construct, id: string, props: GreengrassDeploymentProps) {
     super(scope, id);
+
+    this.components = props.components;
+    this.componentVersions = { ...props.componentVersions };
+    for (const componentName of Object.keys(this.componentVersions)) {
+      assertKnownComponentVersionName(this.components, componentName);
+    }
 
     const target = resolveTargetInput(props);
     const stack = Stack.of(this);
@@ -206,7 +261,7 @@ export class GreengrassDeployment extends Construct {
     this.deployment = new CfnDeployment(this, 'Resource', {
       targetArn: this.targetArn,
       deploymentName: props.deploymentName,
-      components: toCfnComponents(props.components),
+      components: this.renderComponents(),
       deploymentPolicies: props.deploymentPolicies,
       iotJobConfiguration: props.iotJobConfiguration,
       parentTargetArn: props.parentTargetArn,
@@ -214,21 +269,64 @@ export class GreengrassDeployment extends Construct {
     });
 
     this.deployment.applyRemovalPolicy(props.removalPolicy ?? RemovalPolicy.RETAIN);
+
+    this.node.addValidation({
+      validate: () =>
+        Object.entries(this.components ?? {}).flatMap(
+          ([componentName, component]) => {
+            const componentVersion =
+              this.componentVersions[componentName] ??
+              component.componentVersion;
+            if (
+              componentVersion === undefined ||
+              Token.isUnresolved(componentVersion) ||
+              !NEXT_VERSION_SENTINELS.includes(componentVersion)
+            ) {
+              return [];
+            }
+            return [
+              `Component "${componentName}" has sentinel version "${componentVersion}". ` +
+                `Wire its resolved version with deployment.dependOn(myComponent) (preferred) or ` +
+                `componentVersions: { [myComponent.componentName]: myComponent.componentVersion }.`,
+            ];
+          },
+        ),
+    });
+  }
+
+  private renderComponents():
+    | Record<string, CfnDeployment.ComponentDeploymentSpecificationProperty>
+    | undefined {
+    return toCfnComponents(this.components, this.componentVersions);
   }
 
   /**
-   * Order this deployment after the component versions it references.
+   * Order this deployment after the component versions it references and
+   * record their resolved versions.
    *
    * CloudFormation creates unrelated resources in parallel, so without this
    * the IoT job can reach core devices before a referenced component version
    * exists in the registry - the devices then fail version negotiation with
    * FAILED_NO_STATE_CHANGE ("No local or cloud component version satisfies
-   * the requirements"). Call it with every `GreengrassComponentVersion` (or
-   * any construct publishing one) named in `components`.
+   * the requirements"). Call it with every `GreengrassComponentVersion` named
+   * in `components`. Its `componentVersion` also replaces a NEXT_* marker.
    */
   public dependOn(...componentVersions: IDependable[]): this {
+    let recordedVersion = false;
     for (const componentVersion of componentVersions) {
       this.deployment.node.addDependency(componentVersion);
+      if (isGreengrassComponentVersion(componentVersion)) {
+        assertKnownComponentVersionName(
+          this.components,
+          componentVersion.componentName,
+        );
+        this.componentVersions[componentVersion.componentName] =
+          componentVersion.componentVersion;
+        recordedVersion = true;
+      }
+    }
+    if (recordedVersion) {
+      this.deployment.components = this.renderComponents();
     }
     return this;
   }

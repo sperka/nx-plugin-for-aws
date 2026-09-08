@@ -246,6 +246,15 @@ describe('greengrass-deployment generator', () => {
         ),
       ).toBe(true);
     }
+    expect(
+      tree.exists(
+        'packages/common/terraform/src/core/greengrass/component-version/next-version.cjs',
+      ),
+    ).toBe(true);
+    expect(deploymentModule).toContain('variable "component_versions"');
+    expect(deploymentModule).toContain(
+      'component_version = lookup(var.component_versions, name, try(entry.component_version, null))',
+    );
 
     // F5: credential-free terraform test coverage is vended alongside the
     // core modules it exercises.

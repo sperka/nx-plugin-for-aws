@@ -27,6 +27,7 @@ import {
   SHARED_TERRAFORM_DIR,
 } from '../shared-constructs-constants.js';
 import {
+  cdkLambdaRuntimeVars,
   type ITsDepVersion,
   terraformProviderVersions,
   withVersions,
@@ -37,9 +38,13 @@ import {
  * time, owned by whichever generator triggers their creation
  * (`greengrass-deployment` or `py#greengrass-component --infra
  * component-version`) via `ownedElsewhere` - the install itself always
- * happens here, in `common/constructs`'s own package.json. CDK-only: the
- * Terraform modules use the built-in `yamldecode`/`yamlencode` functions, no
- * package needed.
+ * happens here. CDK adds `js-yaml` in `common/constructs`; Terraform adds the
+ * Greengrass and STS SDK clients its plan-time external resolver requires at
+ * the workspace root. CDK declares the same two clients in `common/constructs`
+ * too: the vended `next-version/index.js` handler `require`s them, the
+ * workspace's biome `noUndeclaredDependencies` rule checks that against the
+ * package manifest, and the Node.js Lambda runtime supplies them at run time
+ * (the `api-gateway-account` handler declares its clients the same way).
  */
 export const GREENGRASS_CONSTRUCTS_DEPENDENCIES = [
   { name: 'js-yaml', when: (m: IacMetadata) => m.iac === 'cdk' },
@@ -48,9 +53,22 @@ export const GREENGRASS_CONSTRUCTS_DEPENDENCIES = [
     dev: true,
     when: (m: IacMetadata) => m.iac === 'cdk',
   },
+  {
+    name: '@aws-sdk/client-greengrassv2',
+    dev: true,
+    root: true,
+    when: (m: IacMetadata) => m.iac === 'terraform',
+  },
+  {
+    name: '@aws-sdk/client-sts',
+    dev: true,
+    root: true,
+    when: (m: IacMetadata) => m.iac === 'terraform',
+  },
 ] as const satisfies readonly {
   name: ITsDepVersion;
   dev?: boolean;
+  root?: boolean;
   when?: (m: IacMetadata) => boolean;
 }[];
 
@@ -155,6 +173,13 @@ export const addGreengrassCoreConstructs = async <
       terraformProviderVersions(),
       { overwriteStrategy: OverwriteStrategy.Overwrite },
     );
+    generateFiles(
+      tree,
+      joinPathFragments(import.meta.dirname, 'files', 'next-version'),
+      joinPathFragments(CORE_GREENGRASS_TERRAFORM_DIR, 'component-version'),
+      { nextVersionFileName: 'next-version.cjs' },
+      { overwriteStrategy: OverwriteStrategy.Overwrite },
+    );
     // Credential-free `terraform test` coverage for the modules above (mocked
     // providers, no AWS calls) - see the test file's own header comment.
     generateFiles(
@@ -163,6 +188,14 @@ export const addGreengrassCoreConstructs = async <
       TESTS_TERRAFORM_DIR,
       {},
       { overwriteStrategy: OverwriteStrategy.Overwrite },
+    );
+    addDependenciesToPackageJson(
+      tree,
+      {},
+      withVersions(
+        forDependencies<typeof GREENGRASS_CONSTRUCTS_DEPENDENCIES>(declaration),
+        ['@aws-sdk/client-greengrassv2', '@aws-sdk/client-sts'],
+      ),
     );
     return;
   }
@@ -180,7 +213,14 @@ export const addGreengrassCoreConstructs = async <
       'greengrass',
     ),
     CORE_GREENGRASS_DIR,
-    esmVars(tree),
+    { ...esmVars(tree), ...cdkLambdaRuntimeVars() },
+    { overwriteStrategy: OverwriteStrategy.Overwrite },
+  );
+  generateFiles(
+    tree,
+    joinPathFragments(import.meta.dirname, 'files', 'next-version'),
+    joinPathFragments(CORE_GREENGRASS_DIR, 'next-version'),
+    { nextVersionFileName: 'index.js' },
     { overwriteStrategy: OverwriteStrategy.Overwrite },
   );
 
@@ -200,7 +240,7 @@ export const addGreengrassCoreConstructs = async <
     tree,
     withVersions(
       forDependencies<typeof GREENGRASS_CONSTRUCTS_DEPENDENCIES>(declaration),
-      ['js-yaml'],
+      ['js-yaml', '@aws-sdk/client-greengrassv2', '@aws-sdk/client-sts'],
     ),
     withVersions(
       forDependencies<typeof GREENGRASS_CONSTRUCTS_DEPENDENCIES>(declaration),

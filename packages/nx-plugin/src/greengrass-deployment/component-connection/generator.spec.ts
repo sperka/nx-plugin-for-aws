@@ -193,6 +193,38 @@ Manifests:
     ).toEqual({ 'com.example.MyComponent': { component_version: '1.0.0' } });
   });
 
+  it('writes NEXT_PATCH verbatim and logs the resolved-version wiring', async () => {
+    const deployment = addDeploymentProject('my-deployment', {
+      iac: 'terraform',
+    });
+    const project = addComponentHostProject();
+    addRecipe({ componentVersion: 'NEXT_PATCH' });
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+
+    await greengrassDeploymentComponentConnectionGenerator(tree, {
+      sourceProject: `@proj/${deployment}`,
+      targetProject: project,
+      targetComponent: greengrassComponent({
+        componentVersion: 'NEXT_PATCH',
+      }) as any,
+    });
+
+    expect(tree.read(componentsPath(), 'utf-8')).toContain(
+      `'com.example.MyComponent': { componentVersion: 'NEXT_PATCH' }`,
+    );
+    expect(
+      JSON.parse(
+        tree.read('packages/my-deployment/src/components.json', 'utf-8')!,
+      ),
+    ).toEqual({
+      'com.example.MyComponent': { component_version: 'NEXT_PATCH' },
+    });
+    expect(info).toHaveBeenCalledWith(
+      "Component 'com.example.MyComponent' uses NEXT_PATCH. Wire its resolved version before deployment: CDK: deployment.dependOn(<x>) wires the version on CDK and orders the deployment. Use componentVersions: { [<x>.componentName]: <x>.componentVersion } only for a version that does not come from a component construct. Terraform: pass component_versions = { (module.<x>.component_name) = module.<x>.component_version } to the deployment module block in the root module. The deployment fails at plan/synth until this is wired.",
+    );
+    info.mockRestore();
+  });
+
   it('does not create src/components.json for a CDK deployment', async () => {
     const deployment = addDeploymentProject('my-deployment', { iac: 'cdk' });
     const project = addComponentHostProject();

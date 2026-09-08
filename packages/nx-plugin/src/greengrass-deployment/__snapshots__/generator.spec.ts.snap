@@ -54,6 +54,12 @@ export interface MyDeploymentProps {
    * (\`@proj/my-deployment\`).
    */
   readonly components?: Record<string, GreengrassDeploymentComponent>;
+
+  /**
+   * Resolved versions overriding \`components[name].componentVersion\`.
+   * Prefer {@link dependOn} for a version that comes from a component construct.
+   */
+  readonly componentVersions?: Record<string, string>;
 }
 
 /**
@@ -81,12 +87,14 @@ export class MyDeployment extends Construct {
     this.deployment = new GreengrassDeployment(this, 'Deployment', {
       thingGroupName: 'my-things',
       components: props.components,
+      componentVersions: props.componentVersions,
     });
   }
 
   /**
-   * Order the deployment after the component versions it references, so the
-   * IoT job can't reach core devices before a version exists in the registry.
+   * Order the deployment after the component versions it references and wire
+   * their resolved versions, so the IoT job can't reach core devices before a
+   * version exists in the registry.
    */
   public dependOn(...componentVersions: IDependable[]): this {
     this.deployment.dependOn(...componentVersions);
@@ -100,6 +108,7 @@ exports[`greengrass-deployment generator > should generate the deployment librar
 "export * from './artifact-bucket.js';
 export * from './component-version.js';
 export * from './deployment.js';
+export * from './next-version.js';
 export * from './recipe.js';
 "
 `;

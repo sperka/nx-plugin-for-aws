@@ -28,7 +28,7 @@
     },
     "componentVersion": {
       "type": "string",
-      "description": "The initial recipe ComponentVersion. Written into recipe.yaml once; the recipe is user-owned from then on.",
+      "description": "The initial recipe ComponentVersion. Written into recipe.yaml once; the recipe is user-owned from then on. NEXT_PATCH, NEXT_MINOR or NEXT_MAJOR instead of a number resolves the version at deploy time from the highest version already published - see the guide.",
       "default": "1.0.0"
     },
     "publisher": {
