@@ -310,6 +310,11 @@ process's ambient credentials. A provider-level `assume_role` or `profile` is
 not visible to it, so the resolver compares its own STS account with the
 provider's account and fails on a mismatch.
 
+Terraform reads data sources during the refresh step of a destroy plan, so
+`terraform destroy` runs the resolver once more (two read-only calls). Pass
+`-refresh=false` to skip it, for example `nx run infra:destroy -- -refresh=false`.
+Terraform then destroys from the last recorded state without checking it first.
+
 On a fresh workspace the created bucket's name is unknown at plan, so the first
 plan shows the version as `(known after apply)`. Every later plan shows it.
 
