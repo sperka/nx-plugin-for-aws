@@ -16,7 +16,10 @@ import {
   insertViaGritQL,
 } from '../../utils/ast.js';
 import { formatFilesInSubtree } from '../../utils/format.js';
-import { parseRecipe } from '../../utils/greengrass/recipe.js';
+import {
+  isNextVersionSentinel,
+  parseRecipe,
+} from '../../utils/greengrass/recipe.js';
 import { installDependencies } from '../../utils/install.js';
 import { addGeneratorMetricsIfApplicable } from '../../utils/metrics.js';
 import {
@@ -351,6 +354,12 @@ export const greengrassDeploymentComponentConnectionGenerator = async (
         );
       }
     }
+  }
+
+  if (isNextVersionSentinel(componentVersion)) {
+    logger.info(
+      `Component '${componentName}' uses ${componentVersion}. Wire its resolved version before deployment: CDK: deployment.dependOn(<x>) wires the version on CDK and orders the deployment. Use componentVersions: { [<x>.componentName]: <x>.componentVersion } only for a version that does not come from a component construct. Terraform: pass component_versions = { (module.<x>.component_name) = module.<x>.component_version } to the deployment module block in the root module. The deployment fails at plan/synth until this is wired.`,
+    );
   }
 
   // Recorded so the version sync and future tooling can identify this

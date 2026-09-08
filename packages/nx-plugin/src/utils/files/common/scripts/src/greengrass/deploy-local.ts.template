@@ -1,13 +1,29 @@
 import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
-import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
+import {
+  closeSync,
+  cpSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
-import { readResolvedRecipe } from './recipe-utils<% if (esm) { %>.js<% } %>';
+import yaml from 'js-yaml';
+import {
+  isNextVersionSentinel,
+  readResolvedRecipe,
+  resolveLocalNextVersion,
+} from './recipe-utils<% if (esm) { %>.js<% } %>';
 
 /*
  * Usage: deploy-local.ts <dist>
  *
- * <dist> the component's dist root written by the "-artifact" target: reads
- *        <dist>/greengrass-build/{recipes,artifacts}
+ * <dist> the component's dist root written by the "-artifact" target. Reads
+ *        <dist>/greengrass-build/{recipes,artifacts}. A NEXT_* recipe stages
+ *        the resolved recipe and artifact under greengrass-build/local/.
  *
  * Creates one local deployment via greengrass-cli, then polls the component's
  * own lifecycle state until it settles. A deployment the nucleus reports as
@@ -18,10 +34,15 @@ import { readResolvedRecipe } from './recipe-utils<% if (esm) { %>.js<% } %>';
  * GREENGRASS_ROOT overrides the /greengrass/v2 nucleus root, and
  * GREENGRASS_DEPLOY_TIMEOUT_SECONDS the 120 second poll bound.
  *
- * Re-deploying a ComponentVersion already RUNNING on this device can read the
- * outgoing instance's state, so bump ComponentVersion in recipe.yaml (which a
- * content change requires anyway) to keep this check meaningful. This warns
- * when it sees that case, since it cannot tell the two instances apart.
+ * A NEXT_* ComponentVersion resolves on the device, not against the cloud
+ * registry: the next version above the highest of the installed version and
+ * the version directories the nucleus keeps under
+ * <GREENGRASS_ROOT>/packages/{artifacts,artifacts-unarchived}/<ComponentName>/.
+ *
+ * Re-deploying a concrete ComponentVersion already RUNNING on this device can
+ * read the outgoing instance's state, so bump that version in recipe.yaml to
+ * keep this check meaningful. A NEXT_* version resolves a new local version,
+ * so this warning does not apply to it.
  */
 
 const log = (msg: string): void => console.error(`[deploy-local] ${msg}`);
@@ -149,6 +170,38 @@ const parseComponentStatus = (
   return found;
 };
 
+/** The nucleus package stores that keep one directory per component version. */
+const LOCAL_VERSION_STORES = ['artifacts', 'artifacts-unarchived'];
+
+/**
+ * Versions this device has held for the component: the directory names under
+ * <GREENGRASS_ROOT>/packages/{artifacts,artifacts-unarchived}/<ComponentName>/.
+ * The recipe store (packages/recipes) is not read - it is root-only and names
+ * its files by a hashed component name. The nucleus garbage-collects unused
+ * versions, so this history is best-effort; the caller always counts the
+ * installed version too. A store that is missing or unreadable is skipped with
+ * one log line.
+ */
+const readLocalVersionHistory = (
+  greengrassRoot: string,
+  componentName: string,
+): string[] => {
+  const versions: string[] = [];
+  for (const store of LOCAL_VERSION_STORES) {
+    const dir = join(greengrassRoot, 'packages', store, componentName);
+    try {
+      versions.push(
+        ...readdirSync(dir, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => entry.name),
+      );
+    } catch (e) {
+      log(`Skipping ${dir}: ${(e as Error).message}`);
+    }
+  }
+  return versions;
+};
+
 /**
  * Reads the last {@link LOG_TAIL_BYTES} of the component's log, returning
  * undefined when it cannot be read.
@@ -232,13 +285,14 @@ async function main(): Promise<void> {
   }
 
   const greengrassRoot = process.env.GREENGRASS_ROOT || '/greengrass/v2';
-  const recipeDir = join(dist, 'greengrass-build', 'recipes');
-  const artifactDir = join(dist, 'greengrass-build', 'artifacts');
+  let recipeDir = join(dist, 'greengrass-build', 'recipes');
+  let artifactDir = join(dist, 'greengrass-build', 'artifacts');
 
   let componentName: string;
   let componentVersion: string;
+  let recipe: Record<string, unknown>;
   try {
-    ({ componentName, componentVersion } = readResolvedRecipe(recipeDir));
+    ({ componentName, componentVersion, recipe } = readResolvedRecipe(recipeDir));
   } catch (e) {
     log((e as Error).message);
     process.exit(1);
@@ -252,15 +306,80 @@ async function main(): Promise<void> {
   // Read BEFORE submitting. The state read afterwards can only be attributed
   // to this deployment if the device was not already running this exact
   // version - `component list` reports no instance identity to tell the
-  // incoming instance from the outgoing one. Failures here are ignored: the
-  // submit below reports an unusable CLI properly.
+  // incoming instance from the outgoing one.
   const before = runCli(cli, ['component', 'list'], timeoutMs);
-  if (
-    !before.error &&
-    before.status === 0 &&
-    parseComponentStatus(before.stdout ?? '', componentName)?.version ===
-      componentVersion
-  ) {
+  const installed =
+    !before.error && before.status === 0
+      ? parseComponentStatus(before.stdout ?? '', componentName)
+      : undefined;
+
+  if (isNextVersionSentinel(componentVersion)) {
+    const sentinel = componentVersion;
+    if (before.error || before.status !== 0) {
+      const detail = (before.error?.message ?? before.stderr ?? '').trim();
+      log(
+        `Cannot resolve ${sentinel} locally because "${cli} component list" failed${detail ? `: ${detail}` : ''}. Local NEXT_VERSION resolution needs the installed component version.`,
+      );
+      process.exit(1);
+      return;
+    }
+
+    const history = readLocalVersionHistory(greengrassRoot, componentName);
+    let resolved: string;
+    try {
+      resolved = resolveLocalNextVersion(installed?.version, history, sentinel);
+    } catch (e) {
+      log((e as Error).message);
+      process.exit(1);
+      return;
+    }
+
+    const localDir = join(dist, 'greengrass-build', 'local');
+    const localRecipeDir = join(localDir, 'recipes');
+    const localArtifactDir = join(
+      localDir,
+      'artifacts',
+      componentName,
+      resolved,
+    );
+    const sourceArtifactDir = join(
+      artifactDir,
+      componentName,
+      componentVersion,
+    );
+    try {
+      rmSync(localDir, { recursive: true, force: true });
+      mkdirSync(localRecipeDir, { recursive: true });
+      mkdirSync(localArtifactDir, { recursive: true });
+      writeFileSync(
+        join(localRecipeDir, `${componentName}-${resolved}.yaml`),
+        yaml.dump(
+          { ...recipe, ComponentVersion: resolved },
+          { lineWidth: -1 },
+        ),
+      );
+      for (const artifact of readdirSync(sourceArtifactDir)) {
+        cpSync(
+          join(sourceArtifactDir, artifact),
+          join(localArtifactDir, artifact),
+          { recursive: true },
+        );
+      }
+    } catch (e) {
+      log(
+        `Cannot stage ${sentinel} as ${resolved} for local deployment: ${(e as Error).message}`,
+      );
+      process.exit(1);
+      return;
+    }
+
+    log(
+      `Resolved ${sentinel} to ${resolved} (installed: ${installed?.version ?? 'none'}; package stores: ${history.length > 0 ? history.join(', ') : 'none'}).`,
+    );
+    componentVersion = resolved;
+    recipeDir = localRecipeDir;
+    artifactDir = join(localDir, 'artifacts');
+  } else if (installed?.version === componentVersion) {
     log(
       `This device already reports ${componentName}=${componentVersion}. The ` +
         'state check below can then read the outgoing instance and pass while ' +

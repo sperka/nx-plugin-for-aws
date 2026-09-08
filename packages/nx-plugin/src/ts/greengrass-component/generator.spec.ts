@@ -673,6 +673,36 @@ describe('ts#greengrass-component generator', () => {
     });
   });
 
+  it('should carry NEXT_PATCH into the recipe, GDK config and metadata', async () => {
+    seedTypeScriptProject(tree);
+
+    await tsGreengrassComponentGenerator(tree, {
+      project: 'test-project',
+      name: 'my-component',
+      componentVersion: 'NEXT_PATCH',
+      infra: 'none',
+    });
+
+    expect(
+      tree.read(
+        'packages/test-project/greengrass/my-component/recipe.yaml',
+        'utf-8',
+      ),
+    ).toContain('ComponentVersion: NEXT_PATCH');
+    expect(
+      JSON.parse(
+        tree.read(
+          'packages/test-project/greengrass/my-component/gdk-config.json',
+          'utf-8',
+        ),
+      ).component['com.proj.MyComponent'].version,
+    ).toBe('NEXT_PATCH');
+    expect(
+      JSON.parse(tree.read('packages/test-project/project.json', 'utf-8'))
+        .metadata.components[0].componentVersion,
+    ).toBe('NEXT_PATCH');
+  });
+
   describe('multi-architecture (platform: linux-amd64-arm64)', () => {
     it('should write one manifest per architecture over a single artifact for linux-amd64-arm64', async () => {
       seedTypeScriptProject(tree);
@@ -924,7 +954,9 @@ describe('ts#greengrass-component generator', () => {
         name: 'my-component',
         componentVersion: 'not-a-version',
       }),
-    ).rejects.toThrow(/semantic version/i);
+    ).rejects.toThrow(
+      'ComponentVersion "not-a-version" must be a valid semantic version (eg. "1.0.0") or one of NEXT_PATCH, NEXT_MINOR, NEXT_MAJOR.',
+    );
   });
 
   it('should use greengrass.publisher from aws-nx-plugin.config.mts when set', async () => {

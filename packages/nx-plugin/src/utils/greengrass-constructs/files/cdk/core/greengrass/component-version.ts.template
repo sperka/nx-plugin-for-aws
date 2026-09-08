@@ -7,11 +7,26 @@ import { BucketDeployment, Source } from 'aws-cdk-lib/aws-s3-deployment';
 import { Construct } from 'constructs';
 import yaml from 'js-yaml';
 import type { GreengrassArtifactBucket } from './artifact-bucket<% if (esm) { %>.js<% } %>';
+import { GreengrassNextVersion } from './next-version<% if (esm) { %>.js<% } %>';
 import {
   readRecipeSummary,
   substituteArtifactUris,
 } from './recipe<% if (esm) { %>.js<% } %>';
 
+const NEXT_VERSION_STRATEGIES = {
+  NEXT_PATCH: 'patch',
+  NEXT_MINOR: 'minor',
+  NEXT_MAJOR: 'major',
+} as const;
+const NEXT_VERSION_TAG_KEY = 'nx:greengrass:content-sha256';
+const VERSIONING_TAG_KEY = 'nx:greengrass:versioning';
+
+/**
+ * A recipe `ComponentVersion` of `NEXT_PATCH`, `NEXT_MINOR`, or `NEXT_MAJOR`
+ * resolves at deploy time. The resolver returns the version and content-key
+ * tag. Artifacts use `<ComponentName>/<sha256>/`, and CDK's retained
+ * replacements accumulate toward the 5,000-version component limit.
+ */
 export interface GreengrassComponentVersionProps {
   /**
    * Directory holding the one resolved recipe YAML the `<c>-artifact` target
@@ -23,7 +38,8 @@ export interface GreengrassComponentVersionProps {
   /**
    * Directory holding the `<c>-artifact` target's artifact tree
    * (`greengrass-build/artifacts`), containing one file per manifest platform
-   * at `<artifactsDir>/<ComponentName>/<ComponentVersion>/`.
+   * at `<artifactsDir>/<ComponentName>/<ComponentVersion>/`. Sentinel versions
+   * keep their literal directory name, such as `<ComponentName>/NEXT_PATCH/`.
    */
   readonly artifactsDir: string;
 
@@ -109,10 +125,14 @@ const assertNoSynthTimeVersionDrift = (
   const key = `${componentName}@${componentVersion}`;
   const previousHash = publishedHashesByVersion.get(key);
   if (previousHash !== undefined && previousHash !== sha256) {
+    const sentinelMode = componentVersion in NEXT_VERSION_STRATEGIES;
     throw new Error(
-      `Two different artifacts both claim to be ${key} in this synth ` +
-        `("${recipePath}" hashes to ${sha256}, a previous construct hashed to ${previousHash}). ` +
-        `Component versions are immutable - bump ComponentVersion in recipe.yaml before rebuilding.`,
+      sentinelMode
+        ? `Two constructs publish the same sentinel-versioned component ${key} with different content in one synth ` +
+            `("${recipePath}" hashes to ${sha256}, a previous construct hashed to ${previousHash}).`
+        : `Two different artifacts both claim to be ${key} in this synth ` +
+            `("${recipePath}" hashes to ${sha256}, a previous construct hashed to ${previousHash}). ` +
+            `Component versions are immutable - bump ComponentVersion in recipe.yaml before rebuilding.`,
     );
   }
   publishedHashesByVersion.set(key, sha256);
@@ -157,14 +177,20 @@ const assertArtifactKeyPrefixFits = (
   }
   const overBy =
     destinationKeyPrefix.length - MAX_DESTINATION_KEY_PREFIX_LENGTH;
+  const sentinelMode = componentVersion in NEXT_VERSION_STRATEGIES;
+  const fields = sentinelMode
+    ? `ComponentName "${componentName}" (${componentName.length} characters)`
+    : `ComponentName "${componentName}" (${componentName.length} characters) and ` +
+      `ComponentVersion "${componentVersion}" (${componentVersion.length} characters)`;
+  const suffixDescription = sentinelMode
+    ? 'plus two "/" separators'
+    : 'plus three "/" separators, on top of ComponentName and ComponentVersion';
   throw new Error(
-    `ComponentName "${componentName}" (${componentName.length} characters) and ` +
-      `ComponentVersion "${componentVersion}" (${componentVersion.length} characters) ` +
-      `produce an artifact key prefix "${destinationKeyPrefix}" that is ${destinationKeyPrefix.length} ` +
+    `${fields} produce an artifact key prefix "${destinationKeyPrefix}" that is ${destinationKeyPrefix.length} ` +
       `characters long, exceeding the ${MAX_DESTINATION_KEY_PREFIX_LENGTH} character limit CDK's ` +
       `BucketDeployment enforces on it (the prefix always carries a fixed 64-character content hash ` +
-      `plus three "/" separators, on top of ComponentName and ComponentVersion). Shorten ` +
-      `ComponentName, ComponentVersion, or both by at least ${overBy} character(s).`,
+      `${suffixDescription}). Shorten ${sentinelMode ? 'ComponentName' : 'ComponentName, ComponentVersion, or both'} ` +
+      `by at least ${overBy} character(s).`,
   );
 };
 
@@ -214,16 +240,26 @@ const assertInlineRecipeFits = (
   recipePath: string,
   inlineRecipe: string,
   bucketName: string,
+  versionToken?: string,
 ): void => {
   const bytes = Buffer.byteLength(inlineRecipe, 'utf-8');
-  const minimumBytes = Token.isUnresolved(bucketName)
-    ? Buffer.byteLength(
-        inlineRecipe
-          .split(bucketName)
-          .join('x'.repeat(MIN_S3_BUCKET_NAME_LENGTH)),
-        'utf-8',
-      )
-    : bytes;
+  let minimumInlineRecipe = inlineRecipe;
+  const unresolvedInputs: string[] = [];
+  if (Token.isUnresolved(bucketName)) {
+    minimumInlineRecipe = minimumInlineRecipe
+      .split(bucketName)
+      .join('x'.repeat(MIN_S3_BUCKET_NAME_LENGTH));
+    unresolvedInputs.push(
+      `the ${MIN_S3_BUCKET_NAME_LENGTH}-character minimum S3 allows for the artifact bucket name`,
+    );
+  }
+  if (versionToken !== undefined && Token.isUnresolved(versionToken)) {
+    minimumInlineRecipe = minimumInlineRecipe
+      .split(versionToken)
+      .join('0.0.0');
+    unresolvedInputs.push('0.0.0 for the resolved ComponentVersion');
+  }
+  const minimumBytes = Buffer.byteLength(minimumInlineRecipe, 'utf-8');
   if (minimumBytes <= MAX_INLINE_RECIPE_BYTES) {
     return;
   }
@@ -231,9 +267,14 @@ const assertInlineRecipeFits = (
   const sizeClause =
     minimumBytes === bytes
       ? `serializes to ${bytes} bytes`
-      : `serializes to ${bytes} bytes, of which ${minimumBytes} do not depend on the artifact ` +
-        `bucket's name (still an unresolved token here, so this counts it as the ` +
-        `${MIN_S3_BUCKET_NAME_LENGTH}-character minimum S3 allows)`;
+      : unresolvedInputs.length === 1 &&
+          Token.isUnresolved(bucketName) &&
+          versionToken === undefined
+        ? `serializes to ${bytes} bytes, of which ${minimumBytes} do not depend on the artifact ` +
+          `bucket's name (still an unresolved token here, so this counts it as the ` +
+          `${MIN_S3_BUCKET_NAME_LENGTH}-character minimum S3 allows)`
+        : `serializes to ${bytes} bytes, of which ${minimumBytes} count unresolved values as ` +
+          `${unresolvedInputs.join(' and ')}`;
   throw new Error(
     `The resolved recipe for ${componentName}@${componentVersion} ("${recipePath}") ${sizeClause}, ` +
       `exceeding the ${MAX_INLINE_RECIPE_BYTES} byte limit CreateComponentVersion ` +
@@ -253,9 +294,17 @@ const assertInlineRecipeFits = (
  * the shared {@link GreengrassArtifactBucket}, and emits an
  * `AWS::GreengrassV2::ComponentVersion` with the recipe's artifact URI
  * placeholders substituted for the real (deploy-time-resolvable) location.
+ * In sentinel mode, a custom resource resolves the version at deploy time.
+ * The version tags carry its content identity, artifacts omit the version
+ * from their key, and retained CDK versions count toward the 5,000 budget.
  */
 export class GreengrassComponentVersion extends Construct {
   public readonly componentName: string;
+  /**
+   * The literal version from recipe.yaml or, for a NEXT_* sentinel, the
+   * `ComponentVersion` attribute of the published resource: a deploy-time
+   * token that orders a deployment referencing it after the version exists.
+   */
   public readonly componentVersion: string;
   public readonly cfnComponentVersion: CfnComponentVersion;
 
@@ -277,6 +326,10 @@ export class GreengrassComponentVersion extends Construct {
       readFileSync(recipePath, 'utf-8'),
       recipePath,
     );
+    const strategy =
+      NEXT_VERSION_STRATEGIES[
+        componentVersion as keyof typeof NEXT_VERSION_STRATEGIES
+      ];
 
     const artifactDir = join(
       props.artifactsDir,
@@ -317,15 +370,26 @@ export class GreengrassComponentVersion extends Construct {
                 .join('\n'),
             )
             .digest('hex');
+    const rawWithoutVersion = { ...raw };
+    delete rawWithoutVersion.ComponentVersion;
+    const contentSha256 = strategy
+      ? createHash('sha256')
+          .update(
+            `${yaml.dump(rawWithoutVersion, { lineWidth: -1 })}\n${sha256}`,
+          )
+          .digest('hex')
+      : undefined;
 
     assertNoSynthTimeVersionDrift(
       componentName,
       componentVersion,
-      sha256,
+      strategy ? contentSha256! : sha256,
       recipePath,
     );
 
-    const destinationKeyPrefix = `${componentName}/${componentVersion}/${sha256}/`;
+    const destinationKeyPrefix = strategy
+      ? `${componentName}/${sha256}/`
+      : `${componentName}/${componentVersion}/${sha256}/`;
 
     assertArtifactKeyPrefixFits(
       componentName,
@@ -355,14 +419,26 @@ export class GreengrassComponentVersion extends Construct {
       retainOnDelete: removalPolicy === RemovalPolicy.RETAIN,
     });
 
+    const next = strategy
+      ? new GreengrassNextVersion(this, 'NextVersion', {
+          componentName,
+          strategy,
+          contentSha256: contentSha256!,
+          bucketName: props.bucket.bucket.bucketName,
+        })
+      : undefined;
+    if (next) {
+      // Like the bucket token described on `substituteArtifactUris`, this
+      // deploy-time version token becomes an Fn::Join inside the YAML.
+      raw.ComponentVersion = next.version;
+    }
+
     // `bucket.bucketName` is typically an unresolved token; see the doc
     // comment on `substituteArtifactUris` for why embedding it in the YAML
     // string here is safe.
     const substitutedBasenames = substituteArtifactUris(raw, {
       bucketName: props.bucket.bucket.bucketName,
-      componentName,
-      componentVersion,
-      sha256,
+      keyPrefix: destinationKeyPrefix,
     });
 
     // The recipe names its artifacts; the build names the files. A mismatch in
@@ -403,10 +479,17 @@ export class GreengrassComponentVersion extends Construct {
       recipePath,
       inlineRecipe,
       props.bucket.bucket.bucketName,
+      next?.version,
     );
 
     this.cfnComponentVersion = new CfnComponentVersion(this, 'Resource', {
       inlineRecipe,
+      tags: strategy
+        ? {
+            [NEXT_VERSION_TAG_KEY]: next!.contentKey,
+            [VERSIONING_TAG_KEY]: componentVersion,
+          }
+        : undefined,
     });
 
     // CloudFormation does not infer this dependency from the token embedded
@@ -423,6 +506,11 @@ export class GreengrassComponentVersion extends Construct {
     this.cfnComponentVersion.applyRemovalPolicy(removalPolicy);
 
     this.componentName = componentName;
-    this.componentVersion = componentVersion;
+    // The L1's attribute, not the resolver's token: both resolve to the same
+    // string, but a deployment referencing this one waits for the published
+    // version rather than for the resolver alone.
+    this.componentVersion = next
+      ? this.cfnComponentVersion.attrComponentVersion
+      : componentVersion;
   }
 }

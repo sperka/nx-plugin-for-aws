@@ -21,6 +21,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import terraformProjectGenerator from '../../terraform/project/generator.js';
 import { declareDependencies } from '../declared-dependencies.js';
 import { createTreeUsingTsSolutionSetup } from '../test.js';
+import { cdkLambdaRuntime } from '../versions.js';
 import {
   addGreengrassComponentAppConstruct,
   addGreengrassCoreConstructs,
@@ -45,6 +46,7 @@ const CORE_DIR = join(
 const MODULE_NAMES = [
   'recipe',
   'artifact-bucket',
+  'next-version',
   'component-version',
   'deployment',
 ] as const;
@@ -80,6 +82,15 @@ const tmpModulePath = (name: ModuleName): string =>
 const loadTemplate = (name: ModuleName): string => {
   const content = readFileSync(join(CORE_DIR, `${name}.ts.template`), 'utf-8');
   return content
+    .replace('<%- nodeRuntime %>', cdkLambdaRuntime('node'))
+    .replace(
+      /<% if \(esm\) \{ %>import\.meta\.url<% } else { %>require\('url'\)\.pathToFileURL\(__filename\)\.href<% } %>/g,
+      'import.meta.url',
+    )
+    .replace(
+      /url\.fileURLToPath\(\s*new URL\('\.\/next-version', import\.meta\.url\),\s*\)/g,
+      'import.meta.dirname',
+    )
     .replace(/<% if \(esm\) \{ %>\.js<% \} %>/g, '.js')
     .replace(/<%.*?%>/g, '');
 };
@@ -167,6 +178,11 @@ interface DeploymentModuleShape {
       ...componentVersions: import('constructs').IDependable[]
     ) => unknown;
   };
+}
+
+interface SynthesizedResource {
+  readonly Type: string;
+  readonly Properties: Record<string, unknown>;
 }
 
 let cdkLib: typeof import('aws-cdk-lib');
@@ -412,9 +428,7 @@ describe('recipe.ts (readRecipeSummary / substituteArtifactUris)', () => {
 
     const substituted = RecipeModule.substituteArtifactUris(raw, {
       bucketName: 'real-bucket',
-      componentName: 'com.example.MyComponent',
-      componentVersion: '1.0.0',
-      sha256: 'deadbeef',
+      keyPrefix: 'com.example.MyComponent/1.0.0/deadbeef/',
     });
 
     // Only the placeholder URI's basename is reported back.
@@ -592,6 +606,97 @@ describe('GreengrassComponentVersion', () => {
     expect(componentVersion.componentName).toBe('com.example.DependsOnTest');
     expect(componentVersion.componentVersion).toBe('1.0.0');
     void bucket;
+  });
+
+  it('resolves sentinel versions at deploy time and tags the returned content key', () => {
+    const componentName = 'com.example.NextVersion';
+    const { recipesDir, artifactsDir } = writeBuildOutput(
+      componentName,
+      'NEXT_PATCH',
+      'next-version artifact bytes',
+    );
+
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
+      stack,
+      'ArtifactBucket',
+    );
+    const componentVersion =
+      new ComponentVersionModule.GreengrassComponentVersion(
+        stack,
+        'ComponentVersion',
+        { recipesDir, artifactsDir, bucket },
+      );
+
+    const resources = assertionsLib.Template.fromStack(stack).toJSON()
+      .Resources as Record<string, SynthesizedResource>;
+    const nextVersion = Object.entries(resources).find(
+      ([, resource]) => resource.Type === 'Custom::GreengrassNextVersion',
+    );
+
+    expect(nextVersion).toBeDefined();
+    if (!nextVersion) {
+      throw new Error('Expected a Greengrass next-version custom resource.');
+    }
+
+    const [nextVersionLogicalId, nextVersionResource] = nextVersion;
+    expect(nextVersionResource.Properties.ComponentName).toBe(componentName);
+    expect(nextVersionResource.Properties.Strategy).toBe('patch');
+
+    const recipe = yaml.load(
+      readFileSync(
+        join(recipesDir, `${componentName}-NEXT_PATCH.yaml`),
+        'utf-8',
+      ),
+    ) as Record<string, unknown>;
+    delete recipe.ComponentVersion;
+    const expectedContentSha256 = createHash('sha256')
+      .update(
+        `${yaml.dump(recipe, { lineWidth: -1 })}\n${sha256Of(
+          'next-version artifact bytes',
+        )}`,
+      )
+      .digest('hex');
+    expect(nextVersionResource.Properties.ContentSha256).toBe(
+      expectedContentSha256,
+    );
+
+    const componentVersionResource =
+      resources[stack.getLogicalId(componentVersion.cfnComponentVersion)];
+    const tags = componentVersionResource.Properties.Tags as Record<
+      string,
+      unknown
+    >;
+
+    expect(tags['nx:greengrass:versioning']).toBe('NEXT_PATCH');
+    expect(tags['nx:greengrass:content-sha256']).toEqual({
+      'Fn::GetAtt': [nextVersionLogicalId, 'ContentKey'],
+    });
+
+    const bucketDeploymentResource = Object.values(resources).find(
+      (resource) => resource.Type === 'Custom::CDKBucketDeployment',
+    );
+
+    expect(bucketDeploymentResource).toBeDefined();
+    if (!bucketDeploymentResource) {
+      throw new Error('Expected a bucket deployment custom resource.');
+    }
+
+    expect(bucketDeploymentResource.Properties.DestinationBucketKeyPrefix).toBe(
+      `${componentName}/${sha256Of('next-version artifact bytes')}/`,
+    );
+    expect(cdkLib.Token.isUnresolved(componentVersion.componentVersion)).toBe(
+      true,
+    );
+    // The public version is the L1's own attribute, so a deployment that
+    // references it depends on the published version, not on the resolver.
+    expect(stack.resolve(componentVersion.componentVersion)).toEqual({
+      'Fn::GetAtt': [
+        stack.getLogicalId(componentVersion.cfnComponentVersion),
+        'ComponentVersion',
+      ],
+    });
   });
 
   it('throws when the recipe references an artifact the build did not produce', () => {
@@ -1023,9 +1128,7 @@ describe('GreengrassComponentVersion', () => {
     const { raw } = RecipeModule.readRecipeSummary(recipeSource, 'recipe.yaml');
     RecipeModule.substituteArtifactUris(raw, {
       bucketName: 'test-bucket',
-      componentName,
-      componentVersion: '1.0.0',
-      sha256: sha256Of(RECIPE_SIZE_ARTIFACT_CONTENT),
+      keyPrefix: `${componentName}/1.0.0/${sha256Of(RECIPE_SIZE_ARTIFACT_CONTENT)}/`,
     });
     expect(inlineRecipe).toBe(yaml.dump(raw, { lineWidth: -1 }));
   });
@@ -1117,9 +1220,7 @@ describe('GreengrassComponentVersion', () => {
     );
     RecipeModule.substituteArtifactUris(raw, {
       bucketName,
-      componentName,
-      componentVersion: '1.0.0',
-      sha256: sha256Of(RECIPE_SIZE_ARTIFACT_CONTENT),
+      keyPrefix: `${componentName}/1.0.0/${sha256Of(RECIPE_SIZE_ARTIFACT_CONTENT)}/`,
     });
     return yaml.dump(raw, { lineWidth: -1 });
   };
@@ -1235,15 +1336,72 @@ describe('GreengrassDeployment', () => {
     expect(deployment.thingGroup).toBeDefined();
   });
 
-  it('dependOn orders the deployment after the given component versions', () => {
+  it('uses resolved componentVersions to override declared component versions', () => {
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const deployment = new DeploymentModule.GreengrassDeployment(
+      stack,
+      'Deployment',
+      {
+        thingGroupName: 'my-things',
+        components: {
+          'com.example.NextVersion': { componentVersion: 'NEXT_PATCH' },
+        },
+        componentVersions: {
+          'com.example.NextVersion': '1.0.1',
+        },
+      },
+    );
+
+    const resources = assertionsLib.Template.fromStack(stack).toJSON()
+      .Resources as Record<string, any>;
+    expect(
+      resources[stack.getLogicalId(deployment.deployment)].Properties
+        .Components['com.example.NextVersion'].ComponentVersion,
+    ).toBe('1.0.1');
+  });
+
+  it('reports an unwired sentinel at synth and rejects an override for an unknown component', () => {
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    new DeploymentModule.GreengrassDeployment(stack, 'Sentinel', {
+      thingGroupName: 'my-things',
+      components: {
+        'com.example.NextVersion': { componentVersion: 'NEXT_PATCH' },
+      },
+    });
+    expect(() => app.synth()).toThrow(
+      /TestStack\/Sentinel.*com\.example\.NextVersion.*deployment\.dependOn\(myComponent\).*componentVersions/s,
+    );
+    expect(
+      () =>
+        new DeploymentModule.GreengrassDeployment(stack, 'UnknownOverride', {
+          thingGroupName: 'my-other-things',
+          components: {},
+          componentVersions: { 'com.example.Unknown': '1.0.0' },
+        }),
+    ).toThrow(/componentVersions names "com\.example\.Unknown"/);
+  });
+
+  it('dependOn orders the deployment and wires the resolved component version', () => {
     const { recipesDir, artifactsDir } = writeBuildOutput(
       'com.example.DependOnOrdering',
-      '1.0.0',
+      'NEXT_PATCH',
       'artifact bytes',
     );
 
     const app = new cdkLib.App();
     const stack = new cdkLib.Stack(app, 'TestStack');
+    const deployment = new DeploymentModule.GreengrassDeployment(
+      stack,
+      'Deployment',
+      {
+        thingGroupName: 'my-things',
+        components: {
+          'com.example.DependOnOrdering': { componentVersion: 'NEXT_PATCH' },
+        },
+      },
+    );
     const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
       stack,
       'ArtifactBucket',
@@ -1254,16 +1412,6 @@ describe('GreengrassDeployment', () => {
         'ComponentVersion',
         { recipesDir, artifactsDir, bucket },
       );
-    const deployment = new DeploymentModule.GreengrassDeployment(
-      stack,
-      'Deployment',
-      {
-        thingGroupName: 'my-things',
-        components: {
-          'com.example.DependOnOrdering': { componentVersion: '1.0.0' },
-        },
-      },
-    );
 
     deployment.dependOn(componentVersion);
 
@@ -1284,6 +1432,64 @@ describe('GreengrassDeployment', () => {
       'AWS::GreengrassV2::ComponentVersion',
     );
     expect(dependsOn).toContain(componentVersionLogicalId);
+    expect(
+      deploymentResource.Properties.Components['com.example.DependOnOrdering']
+        .ComponentVersion,
+    ).toEqual({
+      'Fn::GetAtt': [componentVersionLogicalId, 'ComponentVersion'],
+    });
+  });
+
+  it('componentVersions wired from a sentinel component orders the deployment after the published version', () => {
+    const componentName = 'com.example.WiredOrdering';
+    const { recipesDir, artifactsDir } = writeBuildOutput(
+      componentName,
+      'NEXT_PATCH',
+      'artifact bytes',
+    );
+
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
+      stack,
+      'ArtifactBucket',
+    );
+    const sentinelComponent =
+      new ComponentVersionModule.GreengrassComponentVersion(
+        stack,
+        'ComponentVersion',
+        { recipesDir, artifactsDir, bucket },
+      );
+    const deployment = new DeploymentModule.GreengrassDeployment(
+      stack,
+      'Deployment',
+      {
+        thingGroupName: 'my-things',
+        components: { [componentName]: { componentVersion: 'NEXT_PATCH' } },
+        componentVersions: {
+          [sentinelComponent.componentName]: sentinelComponent.componentVersion,
+        },
+      },
+    );
+
+    const resources = assertionsLib.Template.fromStack(stack).toJSON()
+      .Resources as Record<string, any>;
+    const deploymentResource =
+      resources[stack.getLogicalId(deployment.deployment)];
+    const publishedVersionLogicalId = stack.getLogicalId(
+      sentinelComponent.cfnComponentVersion,
+    );
+
+    // No dependOn call here: the GetAtt on the published version is itself the
+    // ordering edge, so CloudFormation cannot create the deployment first.
+    expect(deploymentResource.DependsOn ?? []).not.toContain(
+      publishedVersionLogicalId,
+    );
+    expect(
+      deploymentResource.Properties.Components[componentName].ComponentVersion,
+    ).toEqual({
+      'Fn::GetAtt': [publishedVersionLogicalId, 'ComponentVersion'],
+    });
   });
 
   it('imports an existing thing by name without creating a thing group', () => {
@@ -1403,7 +1609,11 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     for (const name of ['artifact-bucket', 'component-version', 'deployment']) {
       const content = readCore(name);
       const used = new Set(
-        [...content.matchAll(/^(?:resource|data) "([a-z0-9]+)_[a-z0-9_]+"/gm)]
+        [
+          ...content.matchAll(
+            /^(?:resource|data) "([a-z0-9]+)(?:_[a-z0-9_]+)?"/gm,
+          ),
+        ]
           .map((match) => match[1])
           // `terraform_data` is built in to Terraform: no entry, no version.
           .filter((provider) => provider !== 'terraform'),
@@ -1428,6 +1638,69 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     expect(readCore('deployment')).toContain(
       'resource "aws_iot_thing_group" "this"',
     );
+  });
+
+  it('vends the shared next-version resolver and CDK carrier with overwrite', async () => {
+    await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
+    const terraformResolver =
+      'packages/common/terraform/src/core/greengrass/component-version/next-version.cjs';
+    expect(tree.exists(terraformResolver)).toBe(true);
+    expect(tree.read(terraformResolver, 'utf-8')).toContain(
+      'exports.resolveNextVersion',
+    );
+    tree.write(terraformResolver, 'stale terraform resolver');
+    await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
+    expect(tree.read(terraformResolver, 'utf-8')).not.toBe(
+      'stale terraform resolver',
+    );
+
+    tree.write(
+      'packages/common/constructs/package.json',
+      '{"name":"@proj/common-constructs","dependencies":{},"devDependencies":{}}',
+    );
+    await addGreengrassCoreConstructs(tree, { iac: 'cdk' }, declaration);
+    const cdkResolver =
+      'packages/common/constructs/src/core/greengrass/next-version/index.js';
+    expect(tree.exists(cdkResolver)).toBe(true);
+    expect(tree.read(cdkResolver, 'utf-8')).toContain(
+      'exports.resolveNextVersion',
+    );
+    tree.write(cdkResolver, 'stale cdk resolver');
+    await addGreengrassCoreConstructs(tree, { iac: 'cdk' }, declaration);
+    expect(tree.read(cdkResolver, 'utf-8')).not.toBe('stale cdk resolver');
+
+    const cdkNextVersion = tree.read(
+      'packages/common/constructs/src/core/greengrass/next-version.ts',
+      'utf-8',
+    )!;
+    expect(cdkNextVersion).toContain(`runtime: ${cdkLambdaRuntime('node')}`);
+    expect(cdkNextVersion).toContain('Custom::GreengrassNextVersion');
+    expect(cdkNextVersion).toContain('greengrass:ListComponentVersions');
+    expect(cdkNextVersion).toContain('greengrass:DescribeComponent');
+
+    const cdkComponentVersion = tree.read(
+      'packages/common/constructs/src/core/greengrass/component-version.ts',
+      'utf-8',
+    )!;
+    expect(cdkComponentVersion).toContain('NEXT_VERSION_STRATEGIES');
+    expect(cdkComponentVersion).toContain('NEXT_VERSION_TAG_KEY');
+    expect(cdkComponentVersion).toContain('new GreengrassNextVersion');
+
+    const cdkDeployment = tree.read(
+      'packages/common/constructs/src/core/greengrass/deployment.ts',
+      'utf-8',
+    )!;
+    expect(cdkDeployment).toContain('componentVersions');
+    expect(cdkDeployment).toContain('addValidation');
+    expect(cdkDeployment).toContain(
+      'this.deployment.components = this.renderComponents();',
+    );
+    expect(
+      tree.read(
+        'packages/common/constructs/src/core/greengrass/index.ts',
+        'utf-8',
+      ),
+    ).toContain("export * from './next-version.js';");
   });
 
   it('retains the artifact bucket, and orders replacements create-before-destroy', async () => {
@@ -1474,6 +1747,37 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     expect(content).toContain('depends_on = [aws_s3_object.artifact]');
   });
 
+  it('resolves sentinel versions at plan time and tags their content identity', async () => {
+    await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
+
+    const content = readCore('component-version');
+    expect(content).toContain('source  = "hashicorp/external"');
+    expect(content).toContain('data "external" "next_version"');
+    expect(content).toContain(
+      'program = ["node", "${path.module}/next-version.cjs"]',
+    );
+    for (const queryKey of [
+      'component_name',
+      'strategy',
+      'content_sha256',
+      'bucket_name',
+      'region',
+      'account_id',
+      'partition',
+    ]) {
+      expect(content).toMatch(new RegExp(`${queryKey}\\s*=`));
+    }
+    expect(content).toContain('data.aws_caller_identity.current[0].account_id');
+    expect(content).toContain('data.aws_region.current[0].region');
+    expect(content).toContain('data.aws_partition.current[0].partition');
+    expect(content).toContain(
+      '"nx:greengrass:content-sha256" = data.external.next_version[0].result.content_key',
+    );
+    expect(content).toContain(
+      'value = awscc_greengrassv2_component_version.this.component_version',
+    );
+  });
+
   it('uploads the artifact under a sha256-hashed key prefix, and substitutes only the GDK placeholder Uri', async () => {
     await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
 
@@ -1481,7 +1785,7 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     // The hash lives in the prefix, not the basename - see the doc comment on
     // `destination_key_prefix`/`replacement_prefix`.
     expect(content).toContain(
-      'destination_key_prefix = "${local.component_name}/${local.component_version}/${local.sha256}/"',
+      'destination_key_prefix = local.next_version_mode ? "${local.component_name}/${local.sha256}/" : "${local.component_name}/${local.component_version}/${local.sha256}/"',
     );
     // for_each over the hash map - key names come from a `fileset`, always
     // known at plan time.
@@ -1528,7 +1832,7 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     // uploaded key and the substituted recipe Uris are actually built from -
     // otherwise the two arms above could be dead locals.
     expect(content).toContain(
-      'destination_key_prefix = "${local.component_name}/${local.component_version}/${local.sha256}/"',
+      'destination_key_prefix = local.next_version_mode ? "${local.component_name}/${local.sha256}/" : "${local.component_name}/${local.component_version}/${local.sha256}/"',
     );
     expect(content).toContain(
       'replacement_prefix     = "s3://${var.bucket_name}/${local.destination_key_prefix}"',
@@ -1545,6 +1849,10 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     expect(content).toContain('length(local.target_inputs_provided) == 1');
     expect(content).toContain(
       'requires exactly one of thing_group_name, thing_name or target_arn',
+    );
+    expect(content).toContain('next_version_sentinel_components');
+    expect(content).toContain(
+      'component_versions = { (module.<x>.component_name) = module.<x>.component_version }',
     );
   });
 
@@ -1700,9 +2008,68 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     expect(readCore('deployment')).toBe(before);
   });
 
-  it('does not add js-yaml to any package.json - the terraform path never installs it', async () => {
+  it('adds only the resolver SDK at the root on the Terraform path', async () => {
     await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
     expect(tree.exists('packages/common/terraform/package.json')).toBe(false);
+    const rootPackageJson = JSON.parse(
+      tree.read('package.json', 'utf-8') ?? '{}',
+    );
+    expect(
+      rootPackageJson.devDependencies['@aws-sdk/client-greengrassv2'],
+    ).toBe('catalog:');
+    expect(rootPackageJson.devDependencies['@aws-sdk/client-sts']).toBe(
+      'catalog:',
+    );
+    const workspaceYaml = yaml.load(
+      tree.read('pnpm-workspace.yaml', 'utf-8') ?? '',
+    ) as { catalog?: Record<string, string> };
+    expect(workspaceYaml.catalog?.['@aws-sdk/client-greengrassv2']).toBe(
+      '3.1126.0',
+    );
+    expect(workspaceYaml.catalog?.['@aws-sdk/client-sts']).toBe('3.1126.0');
+    expect(rootPackageJson.dependencies?.['js-yaml']).toBeUndefined();
+    expect(rootPackageJson.devDependencies?.['js-yaml']).toBeUndefined();
+
+    const cdkTree = createTreeUsingTsSolutionSetup();
+    cdkTree.write(
+      'packages/common/constructs/package.json',
+      '{"name":"@proj/common-constructs","dependencies":{},"devDependencies":{}}',
+    );
+    await addGreengrassCoreConstructs(cdkTree, { iac: 'cdk' }, declaration);
+    const cdkRootPackageJson = JSON.parse(
+      cdkTree.read('package.json', 'utf-8') ?? '{}',
+    );
+    expect(
+      cdkRootPackageJson.devDependencies['@aws-sdk/client-greengrassv2'],
+    ).toBeUndefined();
+    expect(
+      cdkRootPackageJson.devDependencies?.['@aws-sdk/client-sts'],
+    ).toBeUndefined();
+    // The vended Lambda handler `require`s both clients, and the workspace's
+    // biome `noUndeclaredDependencies` rule checks them against this manifest.
+    const cdkConstructsPackageJson = JSON.parse(
+      cdkTree.read('packages/common/constructs/package.json', 'utf-8') ?? '{}',
+    );
+    expect(
+      cdkConstructsPackageJson.dependencies['@aws-sdk/client-greengrassv2'],
+    ).toBe('catalog:');
+    expect(cdkConstructsPackageJson.dependencies['@aws-sdk/client-sts']).toBe(
+      'catalog:',
+    );
+  });
+
+  it('vends the next-version Terraform test runs', async () => {
+    await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
+    const tests = tree.read(
+      'packages/common/terraform/src/tests/greengrass.tftest.hcl',
+      'utf-8',
+    );
+    expect(tests).toContain('component_version_resolves_next_version');
+    expect(tests).toContain('deployment_rejects_next_version_sentinel');
+    expect(tests).toContain('data.external.next_version[0]');
+    expect(tests).toContain(
+      'content_key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+    );
   });
 });
 
@@ -1791,6 +2158,14 @@ describe('terraform app modules', () => {
     expect(deploymentContent).toContain('thing_group_name = "my-things"');
     expect(deploymentContent).toContain(
       'packages/my-deployment/src/components.json',
+    );
+    expect(deploymentContent).toContain('variable "component_versions"');
+    expect(deploymentContent).toContain(
+      'component_version = lookup(var.component_versions, name, try(entry.component_version, null))',
+    );
+    // A mistyped override key fails the plan instead of being dropped.
+    expect(deploymentContent).toContain(
+      'resource "terraform_data" "component_versions_guard"',
     );
     // Neither module block references the other - the caller wires the
     // ordering itself with `depends_on` on the `deployment` module block.

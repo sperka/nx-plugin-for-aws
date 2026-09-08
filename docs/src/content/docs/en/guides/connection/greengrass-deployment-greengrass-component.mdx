@@ -66,6 +66,16 @@ export const components: Record<string, DeploymentComponent> = {
 
 The `ComponentName` and `componentVersion` written are read from the component's own `recipe.yaml`, which is user-owned from first generation onward and is the same file the vended `GreengrassComponentVersion` construct reads at synth time. So a component whose recipe you have already bumped is added at its current version, not the one it was generated with.
 
+### Automatic versioning
+
+When `ComponentVersion` is `NEXT_PATCH`, `NEXT_MINOR`, or `NEXT_MAJOR`, the entry carries that sentinel verbatim. The sentinel is a marker. The deployment refuses it until you wire in the resolved version.
+
+The generator logs this message:
+
+```
+Component 'com.myscope.MyComponent' uses NEXT_PATCH. Wire its resolved version before deployment: CDK: deployment.dependOn(<x>) wires the version on CDK and orders the deployment. Use componentVersions: { [<x>.componentName]: <x>.componentVersion } only for a version that does not come from a component construct. Terraform: pass component_versions = { (module.<x>.component_name) = module.<x>.component_version } to the deployment module block in the root module. The deployment fails at plan/synth until this is wired.
+```
+
 ### Re-running the generator
 
 Re-running with the same source and target is a clean no-op - the entry already exists and is left untouched, and the generator logs that it skipped it. Connecting a second, differently-named component adds a second entry; the first is never touched.
@@ -93,9 +103,9 @@ A Terraform deployment whose `components.json` has been deleted is also refused,
 
 If you restructure the `components` declaration itself (`satisfies Record<...>`, say, or splitting it across files) the generator can no longer find where to write, so it refuses with the entry to paste in by hand rather than reporting a connection it did not make.
 
-## Adding the deployment dependency in your stack
+## Wiring the deployment in your stack
 
-The generator **cannot** wire the CloudFormation dependency between the component's `ComponentVersion` and the deployment, because it doesn't know which stack instantiates either construct. Call `.dependOn(...)` yourself, in the stack where you instantiate both:
+The generator cannot wire the CloudFormation dependency or the resolved version because it does not know which stack instantiates either construct. Call `.dependOn(...)` yourself, in the stack where you instantiate both:
 
 ```ts title="packages/infra/src/stacks/application-stack.ts" {5}
 import { MyComponent, MyDeployment } from '@my-scope/common-constructs';
@@ -105,13 +115,14 @@ const deployment = new MyDeployment(this, 'MyDeployment', { components });
 const myComponent = new MyComponent(this, 'MyComponent', {
   bucket: deployment.artifactBucket,
 });
-// CloudFormation creates unrelated resources in parallel, so without this the
-// IoT job can reach core devices before the component version exists in the
-// registry, and devices fail negotiation with FAILED_NO_STATE_CHANGE.
+// This orders the deployment after the component version and wires its
+// resolved version. Without it the IoT job can reach core devices before the
+// version exists in the registry, and devices fail negotiation with
+// FAILED_NO_STATE_CHANGE.
 deployment.dependOn(myComponent);
 ```
 
-Without this call, referencing the component in `components` at synth time does not make CloudFormation wait for the `ComponentVersion` to exist - `dependOn` is what orders the two resources.
+Without this call, the deployment keeps the `NEXT_*` marker and CloudFormation does not wait for the `ComponentVersion` to exist.
 
 The `import { components } from '@my-scope/my-deployment'` line above is a cross-project import you write yourself, so neither this generator nor `greengrass-deployment` declares it for you - they don't know which project holds your stack. Run the sync generators once after adding it:
 

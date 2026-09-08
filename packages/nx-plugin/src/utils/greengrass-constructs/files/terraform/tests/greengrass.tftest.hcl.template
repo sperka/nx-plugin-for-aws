@@ -13,6 +13,7 @@
 # mocks - still not one AWS call.
 mock_provider "aws" {}
 mock_provider "awscc" {}
+mock_provider "external" {}
 mock_provider "random" {}
 
 # --- core/greengrass/component-version ------------------------------------
@@ -62,6 +63,68 @@ run "artifact_key_carries_sha256" {
   }
 }
 
+run "component_version_resolves_next_version" {
+  command = plan
+
+  module {
+    source = "./core/greengrass/component-version"
+  }
+
+  variables {
+    recipes_dir   = "tests/fixtures/component-version-next/recipes"
+    artifacts_dir = "tests/fixtures/component-version-next/artifacts"
+    bucket_name   = "test-bucket"
+  }
+
+  override_data {
+    target = data.external.next_version[0]
+    values = {
+      result = {
+        version     = "1.0.1"
+        action      = "create"
+        highest     = "1.0.0"
+        content_key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  }
+
+  override_data {
+    target = data.aws_partition.current[0]
+    values = {
+      partition = "aws"
+    }
+  }
+
+  override_data {
+    target = data.aws_region.current[0]
+    values = {
+      region = "us-east-1"
+    }
+  }
+
+  override_data {
+    target = data.aws_caller_identity.current[0]
+    values = {
+      account_id = "123456789012"
+    }
+  }
+
+  assert {
+    condition     = strcontains(awscc_greengrassv2_component_version.this.inline_recipe, "\"ComponentVersion\":\"1.0.1\"")
+    error_message = "NEXT_PATCH must substitute the resolver's version into inline_recipe"
+  }
+
+  assert {
+    condition     = aws_s3_object.artifact["fixture-artifact.txt"].key == "com.test.FixtureComponent/${filesha256("tests/fixtures/component-version-next/artifacts/com.test.FixtureComponent/NEXT_PATCH/fixture-artifact.txt")}/fixture-artifact.txt"
+    error_message = "sentinel mode must drop the component version from the artifact key"
+  }
+
+  assert {
+    condition     = awscc_greengrassv2_component_version.this.tags["nx:greengrass:content-sha256"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    error_message = "sentinel mode must tag the component version with the resolver content key"
+  }
+}
+
 # --- core/greengrass/deployment -------------------------------------------
 
 run "deployment_target_rejects_none" {
@@ -99,6 +162,46 @@ run "deployment_target_accepts_exactly_one" {
   variables {
     thing_group_name = "my-group"
   }
+}
+
+# An entry carrying only configuration_update has a null component_version;
+# the sentinel guard must not choke on it.
+run "deployment_accepts_component_without_version" {
+  command = plan
+
+  module {
+    source = "./core/greengrass/deployment"
+  }
+
+  variables {
+    thing_group_name = "my-group"
+    components = {
+      "com.test.ConfigOnly" = {
+        configuration_update = {
+          merge = "{\"key\":\"value\"}"
+        }
+      }
+    }
+  }
+}
+
+run "deployment_rejects_next_version_sentinel" {
+  command = plan
+
+  module {
+    source = "./core/greengrass/deployment"
+  }
+
+  variables {
+    thing_group_name = "my-group"
+    components = {
+      "com.test.X" = {
+        component_version = "NEXT_PATCH"
+      }
+    }
+  }
+
+  expect_failures = [terraform_data.guard]
 }
 
 # --- core/greengrass/artifact-bucket ---------------------------------------

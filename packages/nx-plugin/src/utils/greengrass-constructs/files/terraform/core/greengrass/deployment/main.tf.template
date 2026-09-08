@@ -123,6 +123,13 @@ locals {
     local.target_arn_account != "" && local.target_arn_account != data.aws_caller_identity.current.account_id ? "account \"${local.target_arn_account}\" does not match \"${data.aws_caller_identity.current.account_id}\"" : "",
     local.target_arn_region != "" && local.target_arn_region != data.aws_region.current.region ? "region \"${local.target_arn_region}\" does not match \"${data.aws_region.current.region}\"" : "",
   ])
+
+  # `component_version` is optional, so it is null for an entry carrying only
+  # `configuration_update`. A null must not reach `contains`.
+  next_version_sentinel_components = [
+    for component_name, component in var.components : component_name
+    if contains(["NEXT_PATCH", "NEXT_MINOR", "NEXT_MAJOR"], component.component_version == null ? "" : component.component_version)
+  ]
 }
 
 resource "terraform_data" "guard" {
@@ -152,6 +159,10 @@ resource "terraform_data" "guard" {
     precondition {
       condition     = length(local.target_arn_mismatches) == 0
       error_message = "target_arn \"${local.target_arn_display}\" looks like it belongs to a different environment than this configuration: ${join(", ", local.target_arn_mismatches)}."
+    }
+    precondition {
+      condition     = length(local.next_version_sentinel_components) == 0
+      error_message = "Component(s) ${join(", ", local.next_version_sentinel_components)} use NEXT_* version markers. Wire each resolved component output on the deployment app module: component_versions = { (module.<x>.component_name) = module.<x>.component_version }."
     }
   }
 }

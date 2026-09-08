@@ -184,7 +184,7 @@ module "my_deployment" {
 
 Creates one local deployment (`greengrass-cli deployment create --recipeDir ... --artifactDir ... --merge <ComponentName>=<version>`), then polls `greengrass-cli component list` until the component settles. It exits 0 once the component holds `RUNNING` (or `FINISHED`) across three checks two seconds apart, and non-zero on `BROKEN` or `ERRORED`, or when the component has not settled within 120 seconds (`GREENGRASS_DEPLOY_TIMEOUT_SECONDS` changes that bound) — printing the state it reached and the last 40 lines of the component's log. Three checks rather than one because the nucleus reports `RUNNING` as soon as it starts the process, so a component that crashes a few seconds in is `RUNNING` at the first check. `FINISHED` passes, for a component deliberately made one-shot, but is called out: a generated component subscribes to IPC and runs until it is stopped, so `FINISHED` usually means it exited immediately. That check exists because a deployment can report success while the component is broken, see <Link path="guides/greengrass-deployment#a-successful-deployment-is-not-a-running-component">A Successful Deployment Is Not a Running Component</Link>.
 
-Bump `ComponentVersion` before re-deploying: the CLI reports no instance identity, so on a re-deploy of a version already on the device the state read can be the outgoing instance's. The target warns when it sees that case rather than claiming a verdict it cannot support.
+For a concrete `ComponentVersion`, bump the version before re-deploying. The CLI reports no instance identity, so a re-deploy of a version already on the device can read the outgoing instance's state. The target warns when it sees that case rather than claiming a verdict it cannot support. A `NEXT_*` version resolves to a new version above every version the device already holds, so this warning does not apply.
 
 Local deployments resolve the recipe's `s3://` placeholder artifact from `--artifactDir` by component name and version; this generator is experimental while that flow is being verified across nucleus versions.
 
@@ -218,9 +218,25 @@ Manifests:
 - The `BUCKET_NAME` / `COMPONENT_NAME` / `COMPONENT_VERSION` placeholders are the same ones GDK uses. `<c>-artifact` copies them through to the resolved recipe untouched; a later publishing step substitutes them with the real bucket and key.
 - The `Uri` basename must stay `<component-name>.zip`, or `<component-name>-<architecture>.zip` per manifest when you target both architectures (`platform: linux-amd64-arm64`) — because that is the name `<c>-artifact` gives each zip, and Greengrass unarchives it to `{artifacts:decompressedPath}/<basename>/` — which is where the matching `Run` script looks for `main.py`. `<c>-artifact` fails with an explicit message if you break that pairing.
 
+### Automatic versioning (NEXT_PATCH, NEXT_MINOR, NEXT_MAJOR)
+
+Set `ComponentVersion` to one of these sentinels to resolve the version at deploy time.
+
+| Sentinel | Highest published 1.4.2 becomes | Nothing published yet |
+| --- | --- | --- |
+| `NEXT_PATCH` | `1.4.3` | `1.0.0` |
+| `NEXT_MINOR` | `1.5.0` | `1.0.0` |
+| `NEXT_MAJOR` | `2.0.0` | `1.0.0` |
+
+The version resolves from the highest version already published in the account and Region. The first publication uses `1.0.0`. Unchanged content re-deploys the same version. The published version carries a content tag, so the plugin does not republish it. Changed content publishes the next number. The plugin never rewrites `recipe.yaml`.
+
+In this mode, the artifact key is `<ComponentName>/<sha256>/<file>`. The deployment must receive the resolved version. Follow the <Link path="guides/greengrass-deployment#automatic-versioning">automatic versioning deployment guidance</Link> when you connect this component to a deployment.
+
+`<c>-deploy-local` resolves the sentinel on the device instead of against the cloud registry. It takes the highest strict version among the installed version and the version directories under `<GREENGRASS_ROOT>/packages/artifacts/<ComponentName>/` and `<GREENGRASS_ROOT>/packages/artifacts-unarchived/<ComponentName>/`, then bumps it. A store that is missing or unreadable is skipped with one log line. GDK understands only `NEXT_PATCH`. A `gdk-config.json` file carrying `NEXT_MINOR` or `NEXT_MAJOR` is invalid for GDK. The plugin never invokes GDK.
+
 ### Component version immutability
 
-`ComponentVersion` in `recipe.yaml` is user-owned from the start. Once a version of a component is published to AWS IoT Greengrass, that version's content can never change — publishing again under the same version with different content is rejected. The key prefix a version's artifact is uploaded under is a hash covering **all** of that version's artifacts, so changing either architecture's zip under `platform: linux-amd64-arm64` produces a new prefix just the same as changing the one zip a single-platform component builds. **Bump `ComponentVersion` in `recipe.yaml` whenever you change the component**, before building a new artifact and redeploying via the `GreengrassComponentVersion` construct described in [Infrastructure](#infrastructure) above.
+`ComponentVersion` in `recipe.yaml` is user-owned from the start. Once a version of a component is published to AWS IoT Greengrass, that version's content can never change - publishing again under the same version with different content is rejected. Keep a concrete version and bump it by hand whenever you change the component. Or use an automatic versioning sentinel. The key prefix a version's artifact is uploaded under is a hash covering **all** of that version's artifacts, so changing either architecture's zip under `platform: linux-amd64-arm64` produces a new prefix just the same as changing the one zip a single-platform component builds.
 
 <OptionFilter when={{ ipc: true }} description="ipc=true wires a least-privilege accessControl block">
 

@@ -13,6 +13,12 @@ export interface <%- nameClassName %>Props {
    * (`<%- libraryImportPath %>`).
    */
   readonly components?: Record<string, GreengrassDeploymentComponent>;
+
+  /**
+   * Resolved versions overriding `components[name].componentVersion`.
+   * Prefer {@link dependOn} for a version that comes from a component construct.
+   */
+  readonly componentVersions?: Record<string, string>;
 }
 
 /**
@@ -40,6 +46,7 @@ export class <%- nameClassName %> extends Construct {
 <% if (parentTargetArn) { %>      parentTargetArn: '<%- parentTargetArn %>',
 <% } %><% if (deploymentPoliciesLiteral) { %>      deploymentPolicies: <%- deploymentPoliciesLiteral %>,
 <% } %>      components: props.components,
+      componentVersions: props.componentVersions,
     });
 <% if (tokenExchangeRoleArn && tokenExchangeKeyPrefix) { %>
     // Grants the device-side token exchange role read access to the
@@ -64,8 +71,9 @@ export class <%- nameClassName %> extends Construct {
 <% } %>  }
 
   /**
-   * Order the deployment after the component versions it references, so the
-   * IoT job can't reach core devices before a version exists in the registry.
+   * Order the deployment after the component versions it references and wire
+   * their resolved versions, so the IoT job can't reach core devices before a
+   * version exists in the registry.
    */
   public dependOn(...componentVersions: IDependable[]): this {
     this.deployment.dependOn(...componentVersions);

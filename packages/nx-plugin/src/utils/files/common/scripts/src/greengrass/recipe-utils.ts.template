@@ -22,7 +22,83 @@ const MAX_COMPONENT_NAME_LENGTH = 128;
 // https://semver.org/#is-there-a-suggested-regular-expression-regex-to-check-a-semver-string
 const SEMVER_PATTERN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
+const STRICT_COMPONENT_VERSION_PATTERN =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const DECOMPRESSED_PATH_TOKEN = '{artifacts:decompressedPath}';
+
+export const NEXT_VERSION_SENTINELS = [
+  'NEXT_PATCH',
+  'NEXT_MINOR',
+  'NEXT_MAJOR',
+] as const;
+
+export type NextVersionSentinel = (typeof NEXT_VERSION_SENTINELS)[number];
+
+/** Whether a value requests local deploy-time component version resolution. */
+export function isNextVersionSentinel(
+  value: unknown,
+): value is NextVersionSentinel {
+  return (
+    typeof value === 'string' &&
+    NEXT_VERSION_SENTINELS.includes(value as NextVersionSentinel)
+  );
+}
+
+/**
+ * Resolves a version sentinel on a device: bumps the highest strict M.m.p
+ * version among the installed version and the candidate versions the caller
+ * collected from the nucleus's package stores, or returns 1.0.0 when there is
+ * none. A candidate that is not strict M.m.p is ignored. An installed version
+ * that is not strict M.m.p is an error, because the sentinel cannot bump it.
+ */
+export function resolveLocalNextVersion(
+  installedVersion: string | undefined,
+  candidateVersions: readonly string[],
+  sentinel: NextVersionSentinel,
+): string {
+  if (
+    installedVersion !== undefined &&
+    !STRICT_COMPONENT_VERSION_PATTERN.test(installedVersion)
+  ) {
+    throw new Error(
+      `Installed component version "${installedVersion}" is not a strict M.m.p version, so ${sentinel} cannot resolve it.`,
+    );
+  }
+
+  const highest = [...candidateVersions, installedVersion]
+    .filter(
+      (version): version is string =>
+        version !== undefined && STRICT_COMPONENT_VERSION_PATTERN.test(version),
+    )
+    .reduce<string | undefined>((currentHighest, candidate) => {
+      if (currentHighest === undefined) {
+        return candidate;
+      }
+      const current = STRICT_COMPONENT_VERSION_PATTERN.exec(currentHighest)!;
+      const next = STRICT_COMPONENT_VERSION_PATTERN.exec(candidate)!;
+      for (let index = 1; index <= 3; index++) {
+        const difference = BigInt(next[index]) - BigInt(current[index]);
+        if (difference !== 0n) {
+          return difference > 0n ? candidate : currentHighest;
+        }
+      }
+      return currentHighest;
+    }, undefined);
+  if (highest === undefined) {
+    return '1.0.0';
+  }
+
+  const [, major, minor, patch] =
+    STRICT_COMPONENT_VERSION_PATTERN.exec(highest)!;
+  switch (sentinel) {
+    case 'NEXT_PATCH':
+      return `${major}.${minor}.${(BigInt(patch) + 1n).toString()}`;
+    case 'NEXT_MINOR':
+      return `${major}.${(BigInt(minor) + 1n).toString()}.0`;
+    case 'NEXT_MAJOR':
+      return `${(BigInt(major) + 1n).toString()}.0.0`;
+  }
+}
 
 /** Reads and parses a recipe.yaml. Throws with a clear message on failure. */
 export function loadRecipe(recipePath: string): GreengrassRecipe {
@@ -78,10 +154,11 @@ export function validateRecipe(
   const componentVersion = recipe.ComponentVersion;
   if (
     typeof componentVersion !== 'string' ||
-    !SEMVER_PATTERN.test(componentVersion)
+    (!SEMVER_PATTERN.test(componentVersion) &&
+      !isNextVersionSentinel(componentVersion))
   ) {
     errors.push(
-      'ComponentVersion is required and must be a valid semver version (e.g. "1.0.0")',
+      'ComponentVersion is required and must be a valid semver version (e.g. "1.0.0") or one of NEXT_PATCH, NEXT_MINOR, NEXT_MAJOR',
     );
   }
 

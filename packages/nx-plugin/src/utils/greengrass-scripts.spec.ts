@@ -86,6 +86,11 @@ interface RecipeUtilsModule {
     componentName: string;
     componentVersion: string;
   };
+  resolveLocalNextVersion: (
+    installedVersion: string | undefined,
+    candidateVersions: readonly string[],
+    sentinel: 'NEXT_PATCH' | 'NEXT_MINOR' | 'NEXT_MAJOR',
+  ) => string;
 }
 
 interface ZipWriterModule {
@@ -122,6 +127,7 @@ describe('greengrass recipe-utils.ts', () => {
   let validateRecipe: RecipeUtilsModule['validateRecipe'];
   let validateManifestArchitectures: RecipeUtilsModule['validateManifestArchitectures'];
   let readResolvedRecipe: RecipeUtilsModule['readResolvedRecipe'];
+  let resolveLocalNextVersion: RecipeUtilsModule['resolveLocalNextVersion'];
   let tmpDir: string;
 
   beforeAll(async () => {
@@ -132,6 +138,7 @@ describe('greengrass recipe-utils.ts', () => {
     validateRecipe = mod.validateRecipe;
     validateManifestArchitectures = mod.validateManifestArchitectures;
     readResolvedRecipe = mod.readResolvedRecipe;
+    resolveLocalNextVersion = mod.resolveLocalNextVersion;
   });
 
   beforeEach(() => {
@@ -215,6 +222,18 @@ describe('greengrass recipe-utils.ts', () => {
         /valid semver version/,
       );
     });
+
+    it.each(['NEXT_PATCH', 'NEXT_MINOR', 'NEXT_MAJOR'])(
+      'should accept %s as a ComponentVersion',
+      (componentVersion) => {
+        expect(() =>
+          validateRecipe(
+            { ...validRecipe(), ComponentVersion: componentVersion },
+            ['my-component'],
+          ),
+        ).not.toThrow();
+      },
+    );
 
     it('should reject when no lifecycle script references the decompressed component dir', () => {
       const recipe = {
@@ -626,6 +645,40 @@ describe('greengrass recipe-utils.ts', () => {
       expect(() => readResolvedRecipe(tmpDir)).toThrow(
         /Expected exactly one resolved recipe/,
       );
+    });
+  });
+
+  describe('resolveLocalNextVersion', () => {
+    it.each([
+      [undefined, [], 'NEXT_PATCH', '1.0.0'],
+      [undefined, [], 'NEXT_MINOR', '1.0.0'],
+      [undefined, [], 'NEXT_MAJOR', '1.0.0'],
+      ['1.4.2', [], 'NEXT_PATCH', '1.4.3'],
+      ['1.4.2', [], 'NEXT_MINOR', '1.5.0'],
+      ['1.4.2', [], 'NEXT_MAJOR', '2.0.0'],
+      ['1.4.2', ['1.5.0', '1.4.9'], 'NEXT_PATCH', '1.5.1'],
+      [undefined, ['1.4.2', '2.0.0'], 'NEXT_MINOR', '2.1.0'],
+      ['1.4.2', ['1.5.0-beta.1', 'not-a-version'], 'NEXT_PATCH', '1.4.3'],
+    ] as const)(
+      'should resolve installed %s and candidates %j with %s to %s',
+      (installedVersion, candidateVersions, sentinel, resolvedVersion) => {
+        expect(
+          resolveLocalNextVersion(
+            installedVersion,
+            candidateVersions,
+            sentinel,
+          ),
+        ).toBe(resolvedVersion);
+      },
+    );
+
+    it('should reject an installed version that is not strict M.m.p', () => {
+      expect(() =>
+        resolveLocalNextVersion('1.4.2-beta.1', [], 'NEXT_MINOR'),
+      ).toThrow('Installed component version "1.4.2-beta.1"');
+      expect(() =>
+        resolveLocalNextVersion('1.4.2-beta.1', [], 'NEXT_MINOR'),
+      ).toThrow('NEXT_MINOR');
     });
   });
 });
@@ -1455,6 +1508,7 @@ describe('greengrass deploy-local.ts', () => {
         '#!/bin/sh',
         `FIXTURES="${join(greengrassRoot, 'fixtures')}"`,
         'if [ "$1" = "deployment" ]; then',
+        '  echo "$*" > "$FIXTURES/deployment-args"',
         '  echo "Local deployment submitted!"',
         '  exit "$(cat "$FIXTURES/submit-status")"',
         'fi',
@@ -1522,6 +1576,55 @@ describe('greengrass deploy-local.ts', () => {
 
   /** The device before this deployment: a previous version, running. */
   const PREVIOUS_VERSION_RUNNING = listOutputFor('0.9.0', 'RUNNING');
+
+  /** A device that has never installed the component. */
+  const NOTHING_INSTALLED = [
+    'Components currently running in Greengrass:',
+    'Component Name: aws.greengrass.Cli',
+    '    Version: 2.18.3',
+    '    State: RUNNING',
+    '',
+  ].join('\n');
+
+  /** Replaces the 1.0.0 build the beforeEach wrote with a NEXT_PATCH one. */
+  const writeSentinelBuild = (): void => {
+    const recipesDir = join(distDir, 'greengrass-build', 'recipes');
+    rmSync(recipesDir, { recursive: true, force: true });
+    mkdirSync(recipesDir, { recursive: true });
+    writeFileSync(
+      join(recipesDir, `${COMPONENT_NAME}-NEXT_PATCH.yaml`),
+      [
+        'RecipeFormatVersion: 2020-01-25',
+        `ComponentName: ${COMPONENT_NAME}`,
+        'ComponentVersion: NEXT_PATCH',
+        'Manifests:',
+        '  - Artifacts:',
+        '      - Uri: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/my-component.zip',
+        '',
+      ].join('\n'),
+    );
+    const artifactDir = join(
+      distDir,
+      'greengrass-build',
+      'artifacts',
+      COMPONENT_NAME,
+      'NEXT_PATCH',
+    );
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(join(artifactDir, 'my-component.zip'), 'zip bytes');
+  };
+
+  /** One version directory per version the nucleus has held, per store. */
+  const writePackageStore = (
+    store: 'artifacts' | 'artifacts-unarchived',
+    versions: readonly string[],
+  ): string => {
+    const dir = join(greengrassRoot, 'packages', store, COMPONENT_NAME);
+    for (const version of versions) {
+      mkdirSync(join(dir, version), { recursive: true });
+    }
+    return dir;
+  };
 
   const runDeployLocal = (
     timeoutSeconds?: number | string,
@@ -1736,6 +1839,98 @@ describe('greengrass deploy-local.ts', () => {
     },
     30000,
   );
+
+  it('should resolve NEXT_PATCH above the installed version and the package stores, then deploy the staged copy', () => {
+    writeSentinelBuild();
+    // Version directories from both stores count; a prerelease directory and
+    // a plain file do not.
+    const artifactsStore = writePackageStore('artifacts', [
+      '1.2.0',
+      '1.3.0-beta.1',
+    ]);
+    writePackageStore('artifacts-unarchived', ['1.2.5']);
+    writeFileSync(join(artifactsStore, '9.9.9'), 'a file, not a version');
+    writeFixtures({
+      listOutputs: [
+        PREVIOUS_VERSION_RUNNING,
+        listOutputFor('1.2.6', 'RUNNING'),
+      ],
+    });
+
+    const result = runDeployLocal();
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toContain(
+      'Resolved NEXT_PATCH to 1.2.6 (installed: 0.9.0; package stores: 1.2.0, 1.3.0-beta.1, 1.2.5)',
+    );
+    expect(result.stderr).toContain(`${COMPONENT_NAME}=1.2.6 is RUNNING`);
+    expect(result.stderr).not.toContain('Skipping');
+
+    const localDir = join(distDir, 'greengrass-build', 'local');
+    expect(
+      readFileSync(
+        join(localDir, 'recipes', `${COMPONENT_NAME}-1.2.6.yaml`),
+        'utf-8',
+      ),
+    ).toContain('ComponentVersion: 1.2.6');
+    expect(
+      existsSync(
+        join(
+          localDir,
+          'artifacts',
+          COMPONENT_NAME,
+          '1.2.6',
+          'my-component.zip',
+        ),
+      ),
+    ).toBe(true);
+    const deploymentArgs = readFileSync(
+      join(greengrassRoot, 'fixtures', 'deployment-args'),
+      'utf-8',
+    );
+    expect(deploymentArgs).toContain(
+      `--recipeDir ${join(localDir, 'recipes')}`,
+    );
+    expect(deploymentArgs).toContain(
+      `--artifactDir ${join(localDir, 'artifacts')}`,
+    );
+    expect(deploymentArgs).toContain(`--merge ${COMPONENT_NAME}=1.2.6`);
+  }, 30000);
+
+  it('should resolve NEXT_PATCH to 1.0.0 and log each missing package store when the device holds nothing', () => {
+    writeSentinelBuild();
+    writeFixtures({
+      listOutputs: [NOTHING_INSTALLED, listOutputFor('1.0.0', 'RUNNING')],
+    });
+
+    const result = runDeployLocal();
+
+    expect(result.status, result.stderr).toBe(0);
+    for (const store of ['artifacts', 'artifacts-unarchived']) {
+      expect(result.stderr).toContain(
+        `Skipping ${join(greengrassRoot, 'packages', store, COMPONENT_NAME)}: `,
+      );
+    }
+    expect(result.stderr).toContain(
+      'Resolved NEXT_PATCH to 1.0.0 (installed: none; package stores: none)',
+    );
+    expect(result.stderr).toContain(`${COMPONENT_NAME}=1.0.0 is RUNNING`);
+  }, 30000);
+
+  it('should refuse to resolve NEXT_PATCH over an installed version that is not strict M.m.p', () => {
+    writeSentinelBuild();
+    writeFixtures({
+      listOutputs: [listOutputFor('1.0.0-beta.1', 'RUNNING')],
+    });
+
+    const result = runDeployLocal();
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      'Installed component version "1.0.0-beta.1" is not a strict M.m.p version, so NEXT_PATCH cannot resolve it.',
+    );
+    expect(result.stderr).not.toContain('Deploying');
+  }, 30000);
 
   it('should give up rather than hang when greengrass-cli never returns', () => {
     writeFixtures({});

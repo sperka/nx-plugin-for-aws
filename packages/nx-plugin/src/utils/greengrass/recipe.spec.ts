@@ -6,6 +6,8 @@ import yaml from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import {
   type GreengrassRecipe,
+  NEXT_VERSION_SENTINELS,
+  nextVersionStrategy,
   parseRecipe,
   validateRecipe,
 } from './recipe.js';
@@ -43,6 +45,15 @@ describe('greengrass recipe', () => {
       expect(validateRecipe(baseRecipe)).toEqual([]);
     });
 
+    it.each(NEXT_VERSION_SENTINELS)(
+      'should accept %s as a ComponentVersion',
+      (componentVersion) => {
+        expect(
+          validateRecipe({ ...baseRecipe, ComponentVersion: componentVersion }),
+        ).toEqual([]);
+      },
+    );
+
     it('should reject the reserved aws.greengrass. component name prefix', () => {
       const issues = validateRecipe({
         ...baseRecipe,
@@ -72,6 +83,21 @@ describe('greengrass recipe', () => {
         issues.some((issue) => /semantic version/.test(issue.message)),
       ).toBe(true);
     });
+
+    it.each(['NEXT_PATCH ', 'next_patch', 'NEXT_BUILD'])(
+      'should reject %s as a ComponentVersion',
+      (componentVersion) => {
+        const issues = validateRecipe({
+          ...baseRecipe,
+          ComponentVersion: componentVersion,
+        });
+        expect(
+          issues.some((issue) =>
+            issue.message.includes('NEXT_PATCH, NEXT_MINOR, NEXT_MAJOR'),
+          ),
+        ).toBe(true);
+      },
+    );
 
     it('should report both a bad name and a bad version together', () => {
       const issues = validateRecipe({
@@ -138,6 +164,16 @@ describe('greengrass recipe', () => {
       expect(() => parseRecipe(source)).toThrow(/ComponentVersion/);
     });
 
+    it.each(NEXT_VERSION_SENTINELS)(
+      'should parse %s as a ComponentVersion',
+      (componentVersion) => {
+        const { recipe } = parseRecipe(
+          yaml.dump({ ...baseRecipe, ComponentVersion: componentVersion }),
+        );
+        expect(recipe.ComponentVersion).toBe(componentVersion);
+      },
+    );
+
     it('should round-trip an authoring model with unknown fields without loss', () => {
       const authored: GreengrassRecipe = {
         ...baseRecipe,
@@ -167,6 +203,16 @@ describe('greengrass recipe', () => {
       expect(raw).toEqual(authored);
       // Re-serializing the untouched raw object reproduces the same document.
       expect(yaml.dump(raw as object)).toBe(source);
+    });
+  });
+
+  describe('nextVersionStrategy', () => {
+    it.each([
+      ['NEXT_PATCH', 'patch'],
+      ['NEXT_MINOR', 'minor'],
+      ['NEXT_MAJOR', 'major'],
+    ] as const)('should map %s to %s', (sentinel, strategy) => {
+      expect(nextVersionStrategy(sentinel)).toBe(strategy);
     });
   });
 });

@@ -423,6 +423,36 @@ describe('py#greengrass-component generator', () => {
     });
   });
 
+  it('should carry NEXT_PATCH into the recipe, GDK config and metadata', async () => {
+    seedPythonProject(tree);
+
+    await pyGreengrassComponentGenerator(tree, {
+      project: 'test-project',
+      name: 'my-component',
+      componentVersion: 'NEXT_PATCH',
+      infra: 'none',
+    });
+
+    expect(
+      tree.read(
+        'apps/test_project/greengrass/my-component/recipe.yaml',
+        'utf-8',
+      ),
+    ).toContain('ComponentVersion: NEXT_PATCH');
+    expect(
+      JSON.parse(
+        tree.read(
+          'apps/test_project/greengrass/my-component/gdk-config.json',
+          'utf-8',
+        ),
+      ).component['com.proj.MyComponent'].version,
+    ).toBe('NEXT_PATCH');
+    expect(
+      JSON.parse(tree.read('apps/test_project/project.json', 'utf-8')).metadata
+        .components[0].componentVersion,
+    ).toBe('NEXT_PATCH');
+  });
+
   it('should reject a componentName using the reserved aws.greengrass. prefix', async () => {
     seedPythonProject(tree);
 
@@ -456,7 +486,9 @@ describe('py#greengrass-component generator', () => {
         name: 'my-component',
         componentVersion: 'not-a-version',
       }),
-    ).rejects.toThrow(/semantic version/i);
+    ).rejects.toThrow(
+      'ComponentVersion "not-a-version" must be a valid semantic version (eg. "1.0.0") or one of NEXT_PATCH, NEXT_MINOR, NEXT_MAJOR.',
+    );
   });
 
   it('should use greengrass.publisher from aws-nx-plugin.config.mts when set', async () => {

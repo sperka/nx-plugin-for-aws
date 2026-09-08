@@ -70,21 +70,17 @@ const PLACEHOLDER_PREFIX = 's3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/';
 
 export interface ArtifactUriSubstitution {
   readonly bucketName: string;
-  readonly componentName: string;
-  readonly componentVersion: string;
   /**
-   * The uploaded artifact's sha256, inserted as its own path segment so the
-   * basename (the part after the placeholder) survives untouched - it is what
-   * the recipe's `Run` lifecycle script references via
-   * `{artifacts:decompressedPath}/<name>/...`.
+   * Prefix of the uploaded artifacts, including the trailing slash. Recipe
+   * mode includes the ComponentVersion. Automatic versioning omits it.
    */
-  readonly sha256: string;
+  readonly keyPrefix: string;
 }
 
 /**
  * Rewrite every `Manifests[].Artifacts[].Uri` that carries the GDK placeholder
  * prefix, in place, to the real (deploy-time-resolvable) S3 location -
- * `s3://<bucketName>/<componentName>/<componentVersion>/<sha256>/<basename>`.
+ * `s3://<bucketName>/<keyPrefix><basename>`.
  * Returns the basename of every URI rewritten, so the caller can check each
  * one against the artifact that was actually built.
  *
@@ -105,8 +101,8 @@ export const substituteArtifactUris = (
   raw: GreengrassRecipeSummary['raw'],
   substitution: ArtifactUriSubstitution,
 ): string[] => {
-  const { bucketName, componentName, componentVersion, sha256 } = substitution;
-  const replacementPrefix = `s3://${bucketName}/${componentName}/${componentVersion}/${sha256}/`;
+  const { bucketName, keyPrefix } = substitution;
+  const replacementPrefix = `s3://${bucketName}/${keyPrefix}`;
   const substitutedBasenames: string[] = [];
 
   for (const manifest of raw.Manifests ?? []) {

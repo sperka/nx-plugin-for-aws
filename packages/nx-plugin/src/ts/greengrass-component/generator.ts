@@ -10,7 +10,6 @@ import {
   type Tree,
   updateProjectConfiguration,
 } from '@nx/devkit';
-import { valid as validSemver } from 'semver';
 import { addTsDependencies } from '../../utils/add-dependencies.js';
 import {
   addTypeScriptBundleTarget,
@@ -32,6 +31,7 @@ import {
   assertValidComponentName,
   buildDefaultComponentName,
 } from '../../utils/greengrass/naming.js';
+import { isValidComponentVersion } from '../../utils/greengrass/recipe.js';
 import {
   addGreengrassComponentAppConstruct,
   GREENGRASS_CONSTRUCTS_DEPENDENCIES,
@@ -143,9 +143,9 @@ export const tsGreengrassComponentGenerator = async (
   assertValidComponentName(componentName);
 
   const componentVersion = options.componentVersion ?? '1.0.0';
-  if (!validSemver(componentVersion)) {
+  if (!isValidComponentVersion(componentVersion)) {
     throw new Error(
-      `ComponentVersion "${componentVersion}" must be a valid semantic version (eg "1.0.0").`,
+      `ComponentVersion "${componentVersion}" must be a valid semantic version (eg. "1.0.0") or one of NEXT_PATCH, NEXT_MINOR, NEXT_MAJOR.`,
     );
   }
 
