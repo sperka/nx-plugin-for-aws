@@ -123,6 +123,13 @@ run "component_version_resolves_next_version" {
     condition     = awscc_greengrassv2_component_version.this.tags["nx:greengrass:content-sha256"] == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     error_message = "sentinel mode must tag the component version with the resolver content key"
   }
+
+  # The output is the plan-time value with a depends_on on the resource, so a
+  # consumer sees the number at plan and still waits for the published version.
+  assert {
+    condition     = output.component_version == "1.0.1"
+    error_message = "component_version output must be known at plan in sentinel mode"
+  }
 }
 
 # --- core/greengrass/deployment -------------------------------------------
