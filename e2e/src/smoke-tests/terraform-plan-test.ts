@@ -101,7 +101,7 @@ export const runTerraformPlanTest = async (opts: {
   ].join('\n');
   writeFileSync(
     join(infraSrc, 'plan.tftest.hcl'),
-    `${mocks}\n\nvariables {\n  environment = "test"\n  aws_region  = "us-east-1"\n}\n\nrun "plan" {\n  command = plan\n}\n`,
+    `${mocks}\n\nvariables {\n  environment = "test"\n  aws_region  = "us-east-1"\n}\n\nrun "plan" {\n  command = plan\n\n  # The TypeScript component carries ComponentVersion: NEXT_PATCH, so its module\n  # reads data.external at plan time. Supply the resolver answer the mocked\n  # provider cannot.\n  override_data {\n    target = module.greengrass_ts_component.module.component_version.data.external.next_version[0]\n    values = {\n      result = {\n        version     = "1.0.0"\n        action      = "create"\n        highest     = ""\n        content_key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n      }\n    }\n  }\n}\n`,
   );
 
   await runCLI('terraform test -no-color', {
