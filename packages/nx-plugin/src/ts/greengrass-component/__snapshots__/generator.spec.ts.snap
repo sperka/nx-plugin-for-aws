@@ -1378,8 +1378,11 @@ Manifests:
     ]
   },
   "targets": {
-    "compile": {
-      "executor": "@nx/js:tsc"
+    "assemble": {
+      "dependsOn": ["bundle", "my-component-artifact"]
+    },
+    "build": {
+      "dependsOn": ["bundle", "my-component-artifact"]
     },
     "bundle": {
       "executor": "nx:run-commands",
@@ -1392,11 +1395,8 @@ Manifests:
         "cwd": "{projectRoot}"
       }
     },
-    "build": {
-      "dependsOn": ["bundle", "my-component-artifact"]
-    },
-    "assemble": {
-      "dependsOn": ["bundle", "my-component-artifact"]
+    "compile": {
+      "executor": "@nx/js:tsc"
     },
     "my-component-artifact": {
       "executor": "nx:run-commands",
@@ -2850,8 +2850,11 @@ Manifests:
     ]
   },
   "targets": {
-    "compile": {
-      "executor": "@nx/js:tsc"
+    "assemble": {
+      "dependsOn": ["bundle", "my-component-artifact"]
+    },
+    "build": {
+      "dependsOn": ["bundle", "my-component-artifact"]
     },
     "bundle": {
       "executor": "nx:run-commands",
@@ -2864,11 +2867,8 @@ Manifests:
         "cwd": "{projectRoot}"
       }
     },
-    "build": {
-      "dependsOn": ["bundle", "my-component-artifact"]
-    },
-    "assemble": {
-      "dependsOn": ["bundle", "my-component-artifact"]
+    "compile": {
+      "executor": "@nx/js:tsc"
     },
     "my-component-artifact": {
       "executor": "nx:run-commands",

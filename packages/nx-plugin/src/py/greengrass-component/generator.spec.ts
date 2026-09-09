@@ -2,8 +2,12 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { parse } from '@iarna/toml';
 import { logger, type Tree, updateJson } from '@nx/devkit';
+import { FsTree, flushChanges } from 'nx/src/generators/tree';
 import { declareDependencies } from '../../utils/declared-dependencies.js';
 import { expectHasMetricTags } from '../../utils/metrics.spec.js';
 import type { UVPyprojectToml } from '../../utils/nxlv-python.js';
@@ -232,6 +236,46 @@ describe('py#greengrass-component generator', () => {
         dep.startsWith('awsiotsdk'),
       ),
     ).toBe(false);
+  });
+
+  it('should land on the same bytes when it re-runs after py#project re-wrote project.json', async () => {
+    // py#project sorts the targets and calls updateProjectConfiguration on
+    // every run, without formatting. In a workspace, a same-options re-run of
+    // this generator then changes no configuration, so nothing would format
+    // the file. The e2e idempotency lane fails on exactly this.
+    seedPythonProject(tree);
+    const options = {
+      project: 'test-project',
+      name: 'my-component',
+      infra: 'none' as const,
+    };
+    await pyGreengrassComponentGenerator(tree, options);
+    const projectJsonPath = 'apps/test_project/project.json';
+    const firstRun = tree.read(projectJsonPath, 'utf-8');
+
+    const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'gg-idempotency-'));
+    try {
+      flushChanges(tmpDir, tree.listChanges());
+      const rewritten = JSON.parse(firstRun);
+      rewritten.targets = sortObjectKeys(rewritten.targets);
+      writeFileSync(
+        path.join(tmpDir, projectJsonPath),
+        `${JSON.stringify(rewritten, null, 2)}\n`,
+      );
+      expect(
+        readFileSync(path.join(tmpDir, projectJsonPath), 'utf-8'),
+      ).not.toBe(firstRun);
+
+      const fsTree = new FsTree(tmpDir, false);
+      await pyGreengrassComponentGenerator(fsTree, options);
+      flushChanges(tmpDir, fsTree.listChanges());
+
+      expect(readFileSync(path.join(tmpDir, projectJsonPath), 'utf-8')).toBe(
+        firstRun,
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('should not duplicate component targets when re-run with the same options', async () => {

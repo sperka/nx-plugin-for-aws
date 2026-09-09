@@ -21,7 +21,10 @@ import {
   declareDependencies,
   ownedElsewhere,
 } from '../../utils/declared-dependencies.js';
-import { formatFilesInSubtree } from '../../utils/format.js';
+import {
+  formatFilesInSubtree,
+  formatFilesWithBiome,
+} from '../../utils/format.js';
 import {
   GREENGRASS_PLATFORM_MAPPINGS,
   type GreengrassPlatformSelection,
@@ -51,6 +54,7 @@ import {
   readProjectConfigurationUnqualified,
   updateComponentGeneratorMetadata,
 } from '../../utils/nx.js';
+import { sortObjectKeys } from '../../utils/object.js';
 import { toProjectRelativePath } from '../../utils/paths.js';
 import { registerPnpmBuiltDependencies } from '../../utils/pnpm-workspace.js';
 import {
@@ -428,6 +432,9 @@ export const tsGreengrassComponentGenerator = async (
     },
   });
 
+  // py#project and ts#project sort targets on every run, including re-runs,
+  // so append in the same order or a later project re-run reorders the file.
+  projectConfig.targets = sortObjectKeys(projectConfig.targets);
   updateProjectConfiguration(tree, projectConfig.name, projectConfig);
 
   const metadata: GreengrassComponentMetadata = {
@@ -488,6 +495,10 @@ export const tsGreengrassComponentGenerator = async (
     TS_GREENGRASS_COMPONENT_GENERATOR_INFO,
   ]);
 
+  // py#project and ts#project rewrite project.json unformatted on re-run, and
+  // a same-options re-run of this generator changes nothing in it, so format
+  // it explicitly rather than only when this run changed it.
+  formatFilesWithBiome(tree, [`${projectConfig.root}/project.json`]);
   await formatFilesInSubtree(tree);
 
   return () =>
