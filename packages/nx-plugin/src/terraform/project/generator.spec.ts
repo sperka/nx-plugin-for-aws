@@ -499,9 +499,7 @@ describe('terraformProjectGenerator', () => {
       const formatTarget = projectConfig.targets['format'];
       expect(formatTarget.executor).toBe('nx:run-commands');
       expect(formatTarget.cache).toBe(true);
-      expect(formatTarget.options.command).toBe(
-        'terraform fmt -check -diff -recursive',
-      );
+      expect(formatTarget.options.command).toBe('terraform fmt -check -diff');
       expect(formatTarget.options.cwd).toBe('{projectRoot}/src');
 
       // Test validate target
@@ -576,7 +574,7 @@ describe('terraformProjectGenerator', () => {
       // hash is computed over, so it could never cache-hit.
       expect(fmt.inputs).toEqual(['default']);
       expect(fmt.options.command).toContain('-check');
-      expect(fmt.configurations.fix.command).toBe('terraform fmt -recursive');
+      expect(fmt.configurations.fix.command).toBe('terraform fmt');
       expect(fmt.configurations.fix.command).not.toContain('-check');
       // Cross-platform no-op (`true` is not available on Windows cmd).
       expect(fmt.configurations['skip-lint'].command).toBe('node -e ""');

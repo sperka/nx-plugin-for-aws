@@ -62,9 +62,9 @@ describe('terraform-fmt-check migration', () => {
     const fmt = readProjectConfiguration(tree, PROJECT).targets.format;
     // Writing from the base target rewrote the `default` input its own hash was
     // computed from, so it could never cache-hit.
-    expect(fmt.options.command).toBe('terraform fmt -check -diff -recursive');
+    expect(fmt.options.command).toBe('terraform fmt -check -diff');
     expect(fmt.inputs).toEqual(['default']);
-    expect(fmt.configurations.fix.command).toBe('terraform fmt -recursive');
+    expect(fmt.configurations.fix.command).toBe('terraform fmt');
     expect(fmt.configurations['skip-lint'].command).toBe('node -e ""');
     // Options the user may have set are preserved.
     expect(fmt.options.cwd).toBe('{projectRoot}/src');

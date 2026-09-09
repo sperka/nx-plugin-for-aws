@@ -1,3 +1,0 @@
-{
-  "description": "Check formatting recursively in Terraform projects, so vended modules in nested directories are covered"
-}

@@ -190,14 +190,6 @@ Pass `components` explicitly to the module block only to override that file with
 
 A literal `target_arn` is cross-checked against the current account, region and partition, the same way the CDK construct's `assertArnMatchesStack` checks it against the deploying stack. One difference in *when* it fires: the check reads `aws_caller_identity`, and the `depends_on` above stops Terraform reading that until the component modules exist, so it is deferred from plan to apply. It still fails before the deployment is created, and with a clearer message than the API's. Independently of it, the awscc provider validates the ARN's shape (`arn:<partition>:iot:<region>:<account>:thing|thinggroup/...`) at plan time.
 
-### First Build of a Fresh Workspace
-
-On a freshly generated workspace the first `nx run-many --target build --all` fails in the shared Terraform project's `format` target. `terraform fmt -check` flags `src/metrics/metrics.tf`: the metrics module rewrites its `metric_id` line out of alignment. Run the fix configuration once, then build again:
-
-<NxCommands commands={['run @my-scope/terraform:format --configuration=fix']} />
-
-This comes from `terraform#project`, not from the Greengrass modules, and it affects every Terraform workspace.
-
 ### Bucket Naming
 
 Left unset, the generated `<name>-artifact-bucket` module names the created bucket `<name>-artifacts-<account-id>-<region>-<random-suffix>` rather than letting AWS generate an opaque `terraform-<random>` name - a bucket created that way carries no workspace or deployment identity, so a human doing manual cleanup (or recovering from a lost state file) has only a creation timestamp and a tag to go on. The random suffix lives in Terraform state, so the name is stable across applies. Pass `bucket_name` on the underlying `core/greengrass/artifact-bucket` module call to set a fixed name instead (S3 bucket names must be globally unique), or `existing_bucket_name` to adopt a bucket this workspace should not own.
