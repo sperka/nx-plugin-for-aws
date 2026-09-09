@@ -558,8 +558,11 @@ export const runGeneratorMatrix = async (
   // manifests, multiple built files, the aggregate sha256 key prefix); the
   // ts#greengrass-component component below stays single-arch on purpose so
   // the one-artifact key-prefix hinge keeps its CI coverage too.
+  // The TypeScript component below carries --ipc=true (the vendored aws-crt
+  // addon path) and --componentVersion=NEXT_PATCH (the deploy-time resolver
+  // wiring), which no other entry exercises.
   await runCLI(
-    `generate @aws/nx-plugin:py#greengrass-component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --platform=linux-amd64-arm64 --no-interactive${deferFlag}`,
+    `generate @aws/nx-plugin:py#greengrass-component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --platform=linux-amd64-arm64 --gdkConfig=true --no-interactive${deferFlag}`,
     opts,
   );
   await runCLI(
@@ -579,7 +582,7 @@ export const runGeneratorMatrix = async (
     opts,
   );
   await runCLI(
-    `generate @aws/nx-plugin:ts#greengrass-component --project=ts-greengrass-project --name=my-ts-greengrass-component --no-interactive${deferFlag}`,
+    `generate @aws/nx-plugin:ts#greengrass-component --project=ts-greengrass-project --name=my-ts-greengrass-component --ipc=true --componentVersion=NEXT_PATCH --no-interactive${deferFlag}`,
     opts,
   );
 
