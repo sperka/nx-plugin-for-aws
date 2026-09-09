@@ -93,24 +93,11 @@ Manifests:
     ]
   },
   "targets": {
-    "my-component-vendor": {
-      "executor": "nx:run-commands",
-      "dependsOn": ["compile"],
-      "cache": true,
-      "inputs": ["production", "^production"],
-      "outputs": [
-        "{workspaceRoot}/dist/{projectRoot}/greengrass/my-component/vendor"
-      ],
-      "options": {
-        "commands": [
-          "shx rm -rf dist/{projectRoot}/greengrass/my-component/vendor",
-          "shx mkdir -p dist/{projectRoot}/greengrass/my-component/vendor",
-          "uv export --frozen --no-dev --no-editable --no-emit-project --project {projectRoot} --package test-project -o dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt",
-          "uv pip install -n --no-deps --no-installer-metadata --no-compile-bytecode --only-binary :all: --python-platform x86_64-manylinux_2_28 --python-version 3.14 --target dist/{projectRoot}/greengrass/my-component/vendor/amd64 -r dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt",
-          "uv pip install -n --no-deps --no-installer-metadata --no-compile-bytecode --only-binary :all: --python-platform aarch64-manylinux_2_28 --python-version 3.14 --target dist/{projectRoot}/greengrass/my-component/vendor/aarch64 -r dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt"
-        ],
-        "parallel": false
-      }
+    "assemble": {
+      "dependsOn": ["my-component-artifact"]
+    },
+    "build": {
+      "dependsOn": ["my-component-artifact"]
     },
     "my-component-artifact": {
       "executor": "nx:run-commands",
@@ -128,12 +115,6 @@ Manifests:
         "command": "tsx packages/common/scripts/src/greengrass/build-artifact.ts {projectRoot} my-component dist/{projectRoot}/greengrass/my-component --platforms=amd64,aarch64"
       }
     },
-    "build": {
-      "dependsOn": ["my-component-artifact"]
-    },
-    "assemble": {
-      "dependsOn": ["my-component-artifact"]
-    },
     "my-component-deploy-local": {
       "executor": "nx:run-commands",
       "dependsOn": ["my-component-artifact"],
@@ -146,6 +127,25 @@ Manifests:
       "continuous": true,
       "options": {
         "command": "tsx packages/common/scripts/src/greengrass/component-logs.ts com.proj.MyComponent"
+      }
+    },
+    "my-component-vendor": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["compile"],
+      "cache": true,
+      "inputs": ["production", "^production"],
+      "outputs": [
+        "{workspaceRoot}/dist/{projectRoot}/greengrass/my-component/vendor"
+      ],
+      "options": {
+        "commands": [
+          "shx rm -rf dist/{projectRoot}/greengrass/my-component/vendor",
+          "shx mkdir -p dist/{projectRoot}/greengrass/my-component/vendor",
+          "uv export --frozen --no-dev --no-editable --no-emit-project --project {projectRoot} --package test-project -o dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt",
+          "uv pip install -n --no-deps --no-installer-metadata --no-compile-bytecode --only-binary :all: --python-platform x86_64-manylinux_2_28 --python-version 3.14 --target dist/{projectRoot}/greengrass/my-component/vendor/amd64 -r dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt",
+          "uv pip install -n --no-deps --no-installer-metadata --no-compile-bytecode --only-binary :all: --python-platform aarch64-manylinux_2_28 --python-version 3.14 --target dist/{projectRoot}/greengrass/my-component/vendor/aarch64 -r dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt"
+        ],
+        "parallel": false
       }
     }
   }
@@ -343,23 +343,11 @@ Manifests:
     ]
   },
   "targets": {
-    "my-component-vendor": {
-      "executor": "nx:run-commands",
-      "dependsOn": ["compile"],
-      "cache": true,
-      "inputs": ["production", "^production"],
-      "outputs": [
-        "{workspaceRoot}/dist/{projectRoot}/greengrass/my-component/vendor"
-      ],
-      "options": {
-        "commands": [
-          "shx rm -rf dist/{projectRoot}/greengrass/my-component/vendor",
-          "shx mkdir -p dist/{projectRoot}/greengrass/my-component/vendor",
-          "uv export --frozen --no-dev --no-editable --no-emit-project --project {projectRoot} --package test-project -o dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt",
-          "uv pip install -n --no-deps --no-installer-metadata --no-compile-bytecode --only-binary :all: --python-platform aarch64-manylinux_2_28 --python-version 3.14 --target dist/{projectRoot}/greengrass/my-component/vendor -r dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt"
-        ],
-        "parallel": false
-      }
+    "assemble": {
+      "dependsOn": ["my-component-artifact"]
+    },
+    "build": {
+      "dependsOn": ["my-component-artifact"]
     },
     "my-component-artifact": {
       "executor": "nx:run-commands",
@@ -377,12 +365,6 @@ Manifests:
         "command": "tsx packages/common/scripts/src/greengrass/build-artifact.ts {projectRoot} my-component dist/{projectRoot}/greengrass/my-component"
       }
     },
-    "build": {
-      "dependsOn": ["my-component-artifact"]
-    },
-    "assemble": {
-      "dependsOn": ["my-component-artifact"]
-    },
     "my-component-deploy-local": {
       "executor": "nx:run-commands",
       "dependsOn": ["my-component-artifact"],
@@ -395,6 +377,24 @@ Manifests:
       "continuous": true,
       "options": {
         "command": "tsx packages/common/scripts/src/greengrass/component-logs.ts com.proj.MyComponent"
+      }
+    },
+    "my-component-vendor": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["compile"],
+      "cache": true,
+      "inputs": ["production", "^production"],
+      "outputs": [
+        "{workspaceRoot}/dist/{projectRoot}/greengrass/my-component/vendor"
+      ],
+      "options": {
+        "commands": [
+          "shx rm -rf dist/{projectRoot}/greengrass/my-component/vendor",
+          "shx mkdir -p dist/{projectRoot}/greengrass/my-component/vendor",
+          "uv export --frozen --no-dev --no-editable --no-emit-project --project {projectRoot} --package test-project -o dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt",
+          "uv pip install -n --no-deps --no-installer-metadata --no-compile-bytecode --only-binary :all: --python-platform aarch64-manylinux_2_28 --python-version 3.14 --target dist/{projectRoot}/greengrass/my-component/vendor -r dist/{projectRoot}/greengrass/my-component/vendor/requirements.txt"
+        ],
+        "parallel": false
       }
     }
   }

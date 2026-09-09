@@ -523,3 +523,21 @@ function resolveRuffOptions(
     lint,
   };
 }
+
+/**
+ * Formats the given files whether or not this generator changed them.
+ *
+ * `formatFilesInSubtree` only sees files the current run changed. A generator
+ * that re-runs without changing a file leaves it as the previous writer did,
+ * and `py#project` and `ts#project` rewrite `project.json` unformatted on
+ * re-run. A generator that owns a host project's targets calls this on that
+ * `project.json` so a re-run leaves it in the form the first run produced.
+ */
+export function formatFilesWithBiome(tree: Tree, paths: string[]): void {
+  formatWithBiome(
+    tree,
+    paths
+      .filter((filePath) => tree.exists(filePath))
+      .map((filePath) => ({ path: filePath, content: tree.read(filePath) })),
+  );
+}
