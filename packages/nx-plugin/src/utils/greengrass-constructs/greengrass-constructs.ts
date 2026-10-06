@@ -35,10 +35,9 @@ import {
 
 /**
  * Dependencies the vended `core/greengrass` construct files need at synth
- * time, owned by whichever generator triggers their creation
- * (`greengrass-deployment` or `py#greengrass-component --infra
- * component-version`) via `ownedElsewhere` - the install itself always
- * happens here. CDK adds `js-yaml` in `common/constructs`; Terraform adds the
+ * time, owned by the component generator that triggers their creation via
+ * `ownedElsewhere` - the install itself always happens here. CDK adds
+ * `js-yaml` in `common/constructs`; Terraform adds the
  * Greengrass and STS SDK clients its plan-time external resolver requires at
  * the workspace root. CDK declares the same two clients in `common/constructs`
  * too: the vended `next-version/index.js` handler `require`s them, the
@@ -93,13 +92,6 @@ const CORE_GREENGRASS_TERRAFORM_DIR = joinPathFragments(
   'core',
   'greengrass',
 );
-const APP_GREENGRASS_TERRAFORM_DIR = joinPathFragments(
-  PACKAGES_DIR,
-  SHARED_TERRAFORM_DIR,
-  'src',
-  'app',
-  'greengrass-deployment',
-);
 const APP_GREENGRASS_COMPONENT_TERRAFORM_DIR = joinPathFragments(
   PACKAGES_DIR,
   SHARED_TERRAFORM_DIR,
@@ -146,11 +138,9 @@ const addArtifactProjectToSharedTargets = (
  * `AWS::GreengrassV2::ComponentVersion` nor `AWS::GreengrassV2::Deployment`
  * exists in the pinned `hashicorp/aws` provider) into
  * `common/constructs/src/core/greengrass/` or
- * `common/terraform/src/core/greengrass/`. Framework-owned and fully
- * generated - regenerated with `OverwriteStrategy.Overwrite` on every call, so
- * it always matches the plugin's current implementation. Idempotent: called
- * from both `greengrass-deployment` and `py#greengrass-component`, in either
- * order, any number of times.
+ * `common/terraform/src/core/greengrass/`. Existing core files are preserved
+ * on later component runs; missing files are added. Idempotent: called from
+ * every component generator run.
  */
 export const addGreengrassCoreConstructs = async <
   const D extends DependencyDeclaration,
@@ -171,14 +161,14 @@ export const addGreengrassCoreConstructs = async <
       ),
       CORE_GREENGRASS_TERRAFORM_DIR,
       terraformProviderVersions(),
-      { overwriteStrategy: OverwriteStrategy.Overwrite },
+      { overwriteStrategy: OverwriteStrategy.KeepExisting },
     );
     generateFiles(
       tree,
       joinPathFragments(import.meta.dirname, 'files', 'next-version'),
       joinPathFragments(CORE_GREENGRASS_TERRAFORM_DIR, 'component-version'),
       { nextVersionFileName: 'next-version.cjs' },
-      { overwriteStrategy: OverwriteStrategy.Overwrite },
+      { overwriteStrategy: OverwriteStrategy.KeepExisting },
     );
     // Credential-free `terraform test` coverage for the modules above (mocked
     // providers, no AWS calls) - see the test file's own header comment.
@@ -187,7 +177,7 @@ export const addGreengrassCoreConstructs = async <
       joinPathFragments(import.meta.dirname, 'files', 'terraform', 'tests'),
       TESTS_TERRAFORM_DIR,
       {},
-      { overwriteStrategy: OverwriteStrategy.Overwrite },
+      { overwriteStrategy: OverwriteStrategy.KeepExisting },
     );
     addDependenciesToPackageJson(
       tree,
@@ -214,14 +204,14 @@ export const addGreengrassCoreConstructs = async <
     ),
     CORE_GREENGRASS_DIR,
     { ...esmVars(tree), ...cdkLambdaRuntimeVars() },
-    { overwriteStrategy: OverwriteStrategy.Overwrite },
+    { overwriteStrategy: OverwriteStrategy.KeepExisting },
   );
   generateFiles(
     tree,
     joinPathFragments(import.meta.dirname, 'files', 'next-version'),
     joinPathFragments(CORE_GREENGRASS_DIR, 'next-version'),
     { nextVersionFileName: 'index.js' },
-    { overwriteStrategy: OverwriteStrategy.Overwrite },
+    { overwriteStrategy: OverwriteStrategy.KeepExisting },
   );
 
   await addStarExport(
@@ -250,120 +240,6 @@ export const addGreengrassCoreConstructs = async <
   );
 };
 
-export interface AddGreengrassDeploymentAppConstructOptions {
-  readonly iac: Iac;
-  /** The generator's `name` option, verbatim, for the class doc comment. */
-  readonly name: string;
-  readonly nameClassName: string;
-  readonly nameKebabCase: string;
-  /** Pre-rendered `GreengrassDeployment` target prop, eg `thingGroupName: 'my-things',`. */
-  readonly targetPropLine: string;
-  /** Pre-rendered terraform `deployment` module target attribute, eg `thing_group_name = "my-things"`. */
-  readonly targetPropLineTf: string;
-  /** Prose describing the target, for the class doc comment. */
-  readonly targetDescription: string;
-  readonly parentTargetArn?: string;
-  readonly tokenExchangeRoleArn?: string;
-  /** Narrows the tokenExchangeRoleArn grant. Defaults to the whole bucket ("*") when unset. */
-  readonly tokenExchangeKeyPrefix?: string;
-  readonly artifactBucketImported: boolean;
-  readonly artifactBucketName?: string;
-  /** Pre-rendered `DeploymentPoliciesProperty` object literal, or undefined to omit the prop entirely. */
-  readonly deploymentPoliciesLiteral?: string;
-  /** Pre-rendered terraform `deployment_policies` object literal, or undefined to omit the attribute entirely. */
-  readonly deploymentPoliciesLiteralTf?: string;
-  readonly libraryImportPath: string;
-  /**
-   * Workspace-root-relative path to the components JSON bridge file the
-   * Terraform `deployment` module reads by default (`packages/<lib>/src/components.json`).
-   * Only used on the Terraform branch.
-   */
-  readonly componentsJsonPathFromRoot?: string;
-}
-
-/**
- * Vends the per-deployment app construct/modules, wiring the shared artifact
- * bucket and a `GreengrassDeployment` from this generator's options.
- *
- * CDK: one construct at
- * `common/constructs/src/app/greengrass/<nameKebabCase>.ts`, owning both the
- * artifact bucket and the deployment as sibling children - CDK's per-child
- * dependency tracking lets a component version depend on the bucket while the
- * deployment depends on the component version, without a cycle.
- *
- * Terraform: two sibling modules,
- * `common/terraform/src/app/greengrass-deployment/<nameKebabCase>-artifact-bucket/`
- * and `.../<nameKebabCase>/` - a `module` block is Terraform's finest reuse
- * granularity, so bundling both concerns in one module the way CDK does would
- * force exactly that cycle the moment a caller wires
- * `component -> bucket` and `deployment -> component` with `depends_on`.
- *
- * `OverwriteStrategy.KeepExisting` on the app files either way, like every
- * other `app/` construct - it's the one layer in this vending path a user
- * might reasonably extend.
- */
-export const addGreengrassDeploymentAppConstruct = async <
-  const D extends DependencyDeclaration,
->(
-  tree: Tree,
-  options: AddGreengrassDeploymentAppConstructOptions,
-  declaration: D & MustDeclare<typeof GREENGRASS_CONSTRUCTS_DEPENDENCIES, D>,
-): Promise<void> => {
-  await addGreengrassCoreConstructs(
-    tree,
-    { iac: options.iac },
-    forDependencies<typeof GREENGRASS_CONSTRUCTS_DEPENDENCIES>(declaration),
-  );
-
-  if (options.iac === 'terraform') {
-    generateFiles(
-      tree,
-      joinPathFragments(
-        import.meta.dirname,
-        'files',
-        'terraform',
-        'app',
-        'greengrass-deployment',
-      ),
-      APP_GREENGRASS_TERRAFORM_DIR,
-      options,
-      { overwriteStrategy: OverwriteStrategy.KeepExisting },
-    );
-    return;
-  }
-
-  generateFiles(
-    tree,
-    joinPathFragments(
-      import.meta.dirname,
-      'files',
-      'cdk',
-      'app',
-      'greengrass-deployment',
-    ),
-    APP_GREENGRASS_DIR,
-    { ...options, ...esmVars(tree) },
-    { overwriteStrategy: OverwriteStrategy.KeepExisting },
-  );
-
-  await addStarExport(
-    tree,
-    joinPathFragments(APP_GREENGRASS_DIR, 'index.ts'),
-    `./${options.nameKebabCase}.js`,
-  );
-  await addStarExport(
-    tree,
-    joinPathFragments(
-      PACKAGES_DIR,
-      SHARED_CONSTRUCTS_DIR,
-      'src',
-      'app',
-      'index.ts',
-    ),
-    './greengrass/index.js',
-  );
-};
-
 export interface AddGreengrassComponentAppConstructOptions {
   readonly iac: Iac;
   readonly componentNameClassName: string;
@@ -381,9 +257,8 @@ export interface AddGreengrassComponentAppConstructOptions {
  * `GreengrassComponentVersion` wrapper pinning this component's build output
  * paths, at `common/constructs/src/app/greengrass/<componentDirName>.ts`
  * (CDK) or `common/terraform/src/app/greengrass-component/<componentDirName>/`
- * (Terraform, taking the artifact bucket's name as a plain input variable -
- * see the deployment app construct's doc comment for why the bucket is a
- * separate module rather than an argument this module creates itself).
+ * (Terraform, taking the artifact bucket's name as a plain input variable so
+ * user IaC can own or import the shared artifact repository).
  * `OverwriteStrategy.KeepExisting` either way. Registers the host project on
  * the shared iac project's `build`/`assemble` targets so `nx run
  * <infra>:deploy` always deploys a freshly built artifact.

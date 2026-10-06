@@ -101,6 +101,54 @@ describe('generator options', () => {
   });
 });
 
+describe('defaultless boolean command values', () => {
+  const options = [{ key: 'ipc', control: 'boolean' as const }];
+
+  it('should omit an unset value so a conditional default can apply', () => {
+    expect(emittedValues({ ipc: '' }, options)).toEqual({});
+  });
+
+  it('should preserve explicit true and false values', () => {
+    expect(emittedValues({ ipc: 'true' }, options)).toEqual({ ipc: 'true' });
+    expect(emittedValues({ ipc: 'false' }, options)).toEqual({ ipc: 'false' });
+  });
+
+  it('should continue omitting a declared default but emit its opposite', () => {
+    const declared = [
+      { key: 'gdkConfig', control: 'boolean' as const, default: 'false' },
+    ];
+    expect(emittedValues({ gdkConfig: 'false' }, declared)).toEqual({});
+    expect(emittedValues({ gdkConfig: 'true' }, declared)).toEqual({
+      gdkConfig: 'true',
+    });
+  });
+
+  it('should carry an explicit false onto the command and drop the unset state', () => {
+    const config = generatorCard({
+      generator: 'greengrass#component',
+      order: ['project', 'name', 'ipc'],
+      options: [
+        { key: 'project', control: 'text' },
+        { key: 'name', control: 'text' },
+        ...options,
+      ],
+    });
+    const request = (ipc: string) => ({
+      packageManager: 'pnpm',
+      values: emittedValues(
+        { project: 'device', name: 'pulse', ipc },
+        config.options,
+      ),
+    });
+    expect(command(config, request('false'))).toBe(
+      'pnpm nx g @aws/nx-plugin:greengrass#component --project=device --name=pulse --ipc=false',
+    );
+    expect(command(config, request(''))).toBe(
+      'pnpm nx g @aws/nx-plugin:greengrass#component --project=device --name=pulse',
+    );
+  });
+});
+
 describe('option applicability', () => {
   const schema = {
     properties: {

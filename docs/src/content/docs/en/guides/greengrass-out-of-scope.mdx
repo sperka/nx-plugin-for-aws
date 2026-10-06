@@ -5,11 +5,11 @@ description: Worked patterns for supported Greengrass scenarios that the generat
 
 import Link from '@components/link.astro';
 
-The shipped Greengrass generators cover Python and TypeScript components, local deployment
-to a core device, and optional CDK or Terraform component-version infrastructure. The
-`greengrass-deployment` generator provides the deployment resource, its artifact bucket,
-and typed component wiring on CDK and Terraform. Both component generators support
-automatic versioning with `NEXT_PATCH`, `NEXT_MINOR`, and `NEXT_MAJOR`.
+The shipped `greengrass#component` generator covers Python and TypeScript components,
+local deployment to a core device, and optional CDK or Terraform component-version
+infrastructure. The generated core provides the deployment resource and artifact bucket;
+you compose them directly in CDK or Terraform. Components support automatic versioning
+with `NEXT_PATCH`, `NEXT_MINOR`, and `NEXT_MAJOR`.
 
 This guide covers adjacent scenarios that the generators do not scaffold. The examples
 show how to add those scenarios by hand. The recipes remain user-owned from first
@@ -37,9 +37,11 @@ generation onward.
 
 **Worked example: EC2 / Amazon Linux 2023, native automatic provisioning.**
 
-This matches what the component generators' `<c>-deploy-local` and `<c>-logs` targets
-assume. It uses a nucleus classic install at `/greengrass/v2`, or the path you export in
-`GREENGRASS_ROOT`, with `greengrass-cli` present.
+This matches what the generator's `<c>-deploy-local` and `<c>-logs` targets assume. It uses
+a nucleus classic install at `/greengrass/v2`, or the path you export in `GREENGRASS_ROOT`,
+with `greengrass-cli` present. For a scripted Ubuntu 26.04 x86_64 variant that provisions
+through Systems Manager without `greengrass-cli`, see the
+<Link path="get_started/tutorials/greengrass/2">tutorial's setup script</Link>.
 
 ```bash
 # on the EC2 instance (AL2023)
@@ -66,7 +68,10 @@ Why these flags matter to the generated targets:
 
 - `--deploy-dev-tools true` installs the Greengrass CLI component. `<c>-deploy-local`
   and `<c>-logs` both call `greengrass-cli` directly. Neither target works on the device
-  without it.
+  without it. On one Ubuntu 26.04 device the flag left `/greengrass/v2/bin/greengrass-cli`
+  as a dangling symlink until `aws.greengrass.Cli` was added to the device's cloud
+  deployment; until then, `aws greengrassv2 list-installed-components` reads the same
+  fleet status data from the cloud.
 - `--setup-system-service true` means the nucleus survives a reboot. Otherwise, you must
   restart it by hand after every EC2 stop/start.
 - `-Droot="/greengrass/v2"` matches the default `GREENGRASS_ROOT`. Keep them in sync.
@@ -87,8 +92,10 @@ nx run <project>:<component-name>-logs
 **IAM detail worth calling out.** Automatic provisioning creates
 `GreengrassV2TokenExchangeRole` with the `GreengrassV2TokenExchangeRoleAccess` managed
 policy. That policy has no access to your artifact S3 bucket. If you later publish this
-component instead of only deploying it locally, add `s3:GetObject` on your artifacts
-bucket or prefix to that role yourself. The installer will not do this for you.
+component instead of only deploying it locally, grant `s3:GetObject` on your artifacts
+bucket or prefix to that role yourself, for example with `GreengrassArtifactBucket.grantReadTo`
+in CDK or `token_exchange_role_arn` on the Terraform `artifact-bucket` module. The installer
+will not do this for you.
 
 **Caveats.**
 
@@ -160,7 +167,7 @@ settings belong to the Shadow Manager component, not to this recipe:
 }
 ```
 
-This is separate from the `accessControl` block that both component generators write
+This is separate from the `accessControl` block that `greengrass#component` writes
 when `ipc: true`. That policy is scoped to `aws.greengrass.ipc.pubsub`, which provides
 local Greengrass pub/sub between components on the same core.
 `deviceGroups` and `policies` authorize external MQTT client devices through the client
@@ -191,8 +198,8 @@ or scope.
 
 ### Scenario: switch a sudo-rs fleet back to classic sudo from the recipe
 
-The deployment guide describes the failure in
-<Link path="guides/greengrass-deployment#ipc-components-fail-on-a-sudo-rs-device">IPC Components Fail on a sudo-rs Device</Link>:
+The device validation guide describes the failure in
+<Link path="guides/greengrass-device-validation#ipc-components-fail-on-a-sudo-rs-device">IPC Components Fail on a sudo-rs Device</Link>:
 Ubuntu 25.10 and later select `sudo-rs` as `sudo`, `sudo-rs` ignores `-E`, and the nucleus
 launches every component through `sudo -E`. A recipe cannot change that command line, because
 the nucleus builds it. A recipe can change which binary `/usr/bin/sudo` points to. The
@@ -232,7 +239,7 @@ group ran the guard and skipped the switch.
 Caveats:
 
 - The step changes `sudo` for every user and process on the device, not only for Greengrass.
-- The step assumes Ubuntu's packaging, where the `sudo-ws` package provides `/usr/bin/sudo.ws`
+- The step assumes Ubuntu's packaging, where the `sudo` package provides `/usr/bin/sudo.ws`
   and `sudo-rs` provides `/usr/lib/cargo/bin/sudo`. Check both paths on your device image.
 - A recipe change is a new component version. With `NEXT_PATCH` versioning the next deploy
   publishes it. With a fixed version, bump `ComponentVersion` by hand.
@@ -361,8 +368,8 @@ Manifests:
       - URI: "s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/<component-name>.tar"
 ```
 
-This is separate from `py#greengrass-component` and `ts#greengrass-component`. Their
-artifact targets produce Python or TypeScript component archives. A React+nginx component
+This is separate from `greengrass#component`. Its artifact targets produce Python or
+TypeScript component archives. A React+nginx component
 needs its own `npm run build` plus `docker build` and `docker save` or `docker push`
 steps. Wire those as new targets on the host project.
 

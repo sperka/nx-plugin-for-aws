@@ -218,9 +218,6 @@ const PRESENTATION: Record<string, { category: string; logo: string }> = {
   'py#rdb': { category: 'Database', logo: 'aurora' },
   'ts#dynamodb': { category: 'Database', logo: 'dynamodb' },
   'py#dynamodb': { category: 'Database', logo: 'dynamodb' },
-  'greengrass-deployment': { category: 'Greengrass', logo: 'greengrass' },
-  'ts#greengrass-component': { category: 'Greengrass', logo: 'greengrass' },
-  'py#greengrass-component': { category: 'Greengrass', logo: 'greengrass' },
 };
 
 /**
@@ -340,7 +337,6 @@ export const CATEGORY_ORDER = [
   'API',
   'Agentic',
   'Database',
-  'Greengrass',
   'Other',
 ] as const;
 

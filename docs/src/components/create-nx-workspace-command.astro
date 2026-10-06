@@ -77,7 +77,7 @@ const initial: Record<string, string> = {
     options.map((option) => [
       option.key,
       prescribed[option.key] ??
-        (option.control === 'boolean' ? (option.default ?? 'false') : ''),
+        (option.control === 'boolean' ? (option.default ?? '') : ''),
     ]),
   ),
 };

@@ -374,6 +374,32 @@ export default defineConfig({
                   },
                   link: '/get_started/tutorials/contribute-generator',
                 },
+                {
+                  label: 'Greengrass MQTT',
+                  collapsed: true,
+                  items: [
+                    {
+                      label: 'Overview',
+                      link: '/get_started/tutorials/greengrass/overview',
+                    },
+                    {
+                      label: '1. Create the component',
+                      link: '/get_started/tutorials/greengrass/1',
+                    },
+                    {
+                      label: '2. Provision the core device',
+                      link: '/get_started/tutorials/greengrass/2',
+                    },
+                    {
+                      label: '3. Deploy, observe and update',
+                      link: '/get_started/tutorials/greengrass/3',
+                    },
+                    {
+                      label: '4. Remove and clean up',
+                      link: '/get_started/tutorials/greengrass/cleanup',
+                    },
+                  ],
+                },
               ],
             },
           ],
@@ -651,16 +677,12 @@ export default defineConfig({
               collapsed: true,
               items: [
                 {
-                  label: 'py#greengrass-component',
-                  link: '/guides/py-greengrass-component',
+                  label: 'greengrass#component',
+                  link: '/guides/greengrass-component',
                 },
                 {
-                  label: 'ts#greengrass-component',
-                  link: '/guides/ts-greengrass-component',
-                },
-                {
-                  label: 'greengrass-deployment',
-                  link: '/guides/greengrass-deployment',
+                  label: 'Operations',
+                  link: '/guides/greengrass-operations',
                 },
                 {
                   label: 'Validating on real devices',

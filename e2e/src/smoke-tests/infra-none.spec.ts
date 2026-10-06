@@ -4,7 +4,7 @@
  */
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { ensureDirSync } from 'fs-extra';
-import { createTestWorkspace, runCLI, tmpProjPath } from '../utils';
+import { createTestWorkspace, runCLI, runInstall, tmpProjPath } from '../utils';
 
 describe('smoke test - infra-none', () => {
   const pkgMgr = 'pnpm';
@@ -93,26 +93,32 @@ describe('smoke test - infra-none', () => {
 
     // Greengrass component with infra=none
     await runCLI(
-      `generate @aws/nx-plugin:py#project --name=py-greengrass-project --projectType=application --no-interactive`,
+      `generate @aws/nx-plugin:py#project --name=py-greengrass-project --type=application --no-interactive`,
       opts,
     );
     await runCLI(
-      `generate @aws/nx-plugin:py#greengrass-component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --infra=none --no-interactive`,
+      `generate @aws/nx-plugin:greengrass#component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --language=python --infra=none --no-interactive`,
       opts,
     );
 
     // TypeScript Greengrass component with infra=none — a dedicated host
-    // project, mirroring the py#greengrass-component decision above.
+    // project, mirroring the Python component decision above.
     await runCLI(
       `generate @aws/nx-plugin:ts#project --name=ts-greengrass-project --no-interactive`,
       opts,
     );
     await runCLI(
-      `generate @aws/nx-plugin:ts#greengrass-component --project=ts-greengrass-project --name=my-ts-greengrass-component --infra=none --no-interactive`,
+      `generate @aws/nx-plugin:greengrass#component --project=ts-greengrass-project --name=my-ts-greengrass-component --language=typescript --ipc=false --infra=none --no-interactive`,
       opts,
     );
 
     await runCLI(`sync --verbose`, opts);
+    // `nx sync` declares local `workspace:*` dependencies, which leaves
+    // pnpm-lock.yaml behind the project manifests. Under CI, pnpm's pre-run
+    // dependency check then installs with a frozen lockfile and fails with
+    // ERR_PNPM_OUTDATED_LOCKFILE before the build starts, so install
+    // explicitly (lockfile updates allowed) first.
+    await runInstall(opts);
     await runCLI(
       `run-many --target build --all --output-style=stream --verbose`,
       opts,
@@ -174,17 +180,20 @@ describe('smoke test - infra-none', () => {
 
     // Re-run the Greengrass component with infra=component-version
     await runCLI(
-      `generate @aws/nx-plugin:py#greengrass-component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --infra=component-version --no-interactive`,
+      `generate @aws/nx-plugin:greengrass#component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --language=python --infra=component-version --no-interactive`,
       opts,
     );
 
     // Re-run the TypeScript Greengrass component with infra=component-version
     await runCLI(
-      `generate @aws/nx-plugin:ts#greengrass-component --project=ts-greengrass-project --name=my-ts-greengrass-component --infra=component-version --no-interactive`,
+      `generate @aws/nx-plugin:greengrass#component --project=ts-greengrass-project --name=my-ts-greengrass-component --language=typescript --ipc=false --infra=component-version --no-interactive`,
       opts,
     );
 
     await runCLI(`sync --verbose`, opts);
+    // The upgrade adds shared construct dependencies that sync declares again;
+    // same frozen-lockfile reasoning as after the first sync.
+    await runInstall(opts);
     await runCLI(
       `run-many --target build --all --output-style=stream --verbose`,
       opts,
@@ -208,5 +217,19 @@ describe('smoke test - infra-none', () => {
         `${projectRoot}/packages/common/constructs/src/app/greengrass/my-ts-greengrass-component.ts`,
       ),
     ).toBe(true);
+    // Omitting --ipc on the Python component leaves the IPC client wired (the
+    // Python default); --ipc=false on the TypeScript component leaves it out.
+    expect(
+      readFileSync(
+        `${projectRoot}/packages/py_greengrass_project/greengrass/my-greengrass-component/main.py`,
+        'utf-8',
+      ),
+    ).toContain('awsiot.greengrasscoreipc');
+    expect(
+      readFileSync(
+        `${projectRoot}/packages/ts-greengrass-project/src/greengrass/my-ts-greengrass-component/main.ts`,
+        'utf-8',
+      ),
+    ).not.toContain('aws-iot-device-sdk-v2');
   });
 });

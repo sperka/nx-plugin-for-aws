@@ -72,6 +72,12 @@ export const runTerraformSmokeTest = async (
   await runInstall(opts);
 
   await runCLI(`sync --verbose`, opts);
+
+  // The sync generators write to project manifests (e.g. ts#sync declares
+  // local workspace dependencies), so install again before the build: under CI,
+  // pnpm's pre-run dependency check would otherwise fail on the stale lockfile.
+  await runInstall(opts);
+
   await runCLI(
     `run-many --target build --all --output-style=stream --skip-nx-cache --verbose`,
     opts,

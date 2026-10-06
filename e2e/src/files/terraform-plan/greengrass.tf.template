@@ -13,13 +13,14 @@
 # with every provider mocked, this wiring costs nothing and still expands the
 # full module graph, which is what catches a plan-time error.
 #
-# The module directory names come from the generator matrix's Greengrass block
-# (`my-greengrass-deployment`, `my-greengrass-component`,
-# `my-ts-greengrass-component`); renaming a project there means renaming it
-# here.
+# The component module names are retained labels from the generator matrix.
+# Deployment composition belongs in this root module, so it reads the component
+# outputs directly rather than going through a generated deployment wrapper.
+# `scripts/validate-greengrass-terraform.ts` plans this same file against
+# fixture components rendered from the repo templates.
 
 module "greengrass_artifact_bucket" {
-  source = "../../common/terraform/src/app/greengrass-deployment/my-greengrass-deployment-artifact-bucket"
+  source = "../../common/terraform/src/core/greengrass/artifact-bucket"
 }
 
 # Reads the resolved recipe and built artifact its `<c>-artifact` target wrote,
@@ -34,13 +35,50 @@ module "greengrass_ts_component" {
   bucket_name = module.greengrass_artifact_bucket.bucket_name
 }
 
-# `components` defaults to the deployment project's `src/components.json`, which
-# the connection generator populated with the Python component.
+# Two components in one fleet. Each `component_version` output carries the core
+# module's own `depends_on` on the published version, so this deployment is
+# ordered after both versions exist without a blanket `depends_on`.
 module "greengrass_deployment" {
-  source = "../../common/terraform/src/app/greengrass-deployment/my-greengrass-deployment"
+  source           = "../../common/terraform/src/core/greengrass/deployment"
+  thing_group_name = "terraform-plan-test"
 
-  depends_on = [
-    module.greengrass_py_component,
-    module.greengrass_ts_component,
-  ]
+  components = {
+    (module.greengrass_py_component.component_name) = {
+      component_version = module.greengrass_py_component.component_version
+    }
+    (module.greengrass_ts_component.component_name) = {
+      component_version = module.greengrass_ts_component.component_version
+    }
+  }
+}
+
+# The same published component in a second fleet, named by its literal version
+# with a configuration override. A literal carries no dependency edge of its
+# own, so a version created in the same apply needs `depends_on` on the
+# deployment module; this defers the module's identity data reads and
+# target-ARN precondition to apply. An already-published version needs neither.
+module "greengrass_literal_deployment" {
+  source           = "../../common/terraform/src/core/greengrass/deployment"
+  thing_group_name = "terraform-plan-test-literal"
+
+  components = {
+    (module.greengrass_py_component.component_name) = {
+      component_version = "1.0.0"
+      configuration_update = {
+        merge = jsonencode({ intervalSeconds = 30 })
+      }
+    }
+  }
+
+  depends_on = [module.greengrass_py_component]
+}
+
+# Versions forwarded to the deployments: a literal passes through unchanged.
+# A NEXT_* recipe carries the resolver's answer, which can become known at
+# apply time when the artifact repository is created in the same operation.
+output "greengrass_component_versions" {
+  value = {
+    (module.greengrass_py_component.component_name) = module.greengrass_py_component.component_version
+    (module.greengrass_ts_component.component_name) = module.greengrass_ts_component.component_version
+  }
 }

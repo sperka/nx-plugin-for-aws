@@ -1,0 +1,154 @@
+---
+title: Greengrass Operations
+description: Automatic versioning, the artifact repository, deployment revisions, retention and teardown, service quotas, and local versus cloud deployments for generated Greengrass components
+---
+
+import Infrastructure from '@components/infrastructure.astro';
+import Link from '@components/link.astro';
+import NxCommands from '@components/nx-commands.astro';
+
+This guide covers what happens after the normal flow in <Link path="guides/greengrass-component#deploying">Greengrass component: Deploying</Link>: how versions are allocated and retained, how the artifact repository is owned, what a deployment revision does, which service quotas bind the generated code, and why a local deployment blocks a cloud one.
+
+The examples name the infrastructure project `@my-scope/infra`, the fully qualified name of a project generated with `--name=infra` in a workspace whose npm scope is `my-scope`. `nx run` needs that full name.
+
+## Automatic versioning
+
+A Greengrass component version is immutable. `CreateComponentVersion` rejects a version that already exists with different content, so a rebuild that reuses a fixed `ComponentVersion` fails the deployment instead of corrupting the published version. Bump the version by hand, or set `ComponentVersion` in `recipe.yaml` to `NEXT_PATCH`, `NEXT_MINOR` or `NEXT_MAJOR`.
+
+The resolver reads the highest published strict `M.m.p` version of the component in the account and Region. It reuses that version when its content tag matches the current recipe and artifact and its state is `DEPLOYABLE`. Otherwise it publishes the next version. The first publication is `1.0.0`. The content identity covers the recipe without its version line, the artifact bytes, and the repository's bucket name. In this mode the artifact key is `<ComponentName>/<sha256>/<file>` instead of `<ComponentName>/<ComponentVersion>/<sha256>/<file>`.
+
+The deployment must receive the resolved version, never the sentinel. CDK's `addComponent` and Terraform's direct output reference do that; a raw `NEXT_*` string that reaches a deployment fails at synth or plan.
+
+<Infrastructure>
+<Fragment slot="cdk">
+A custom resource resolves the version at deploy time. Every automatically versioned component in a stack shares one resolver function, which needs `greengrass:DescribeComponent` and `greengrass:ListComponentVersions`. The deployment references the component version resource's `ComponentVersion` attribute, so it waits for the published version rather than for the resolver alone.
+
+CDK retains replaced component versions and their artifacts. Each retained version counts toward the 5,000 versions per component per Region.
+</Fragment>
+<Fragment slot="terraform">
+A `data "external"` program resolves the version during plan when its inputs are known, or during apply when they depend on a resource being created. It runs `node` with `@aws-sdk/client-greengrassv2` and `@aws-sdk/client-sts` from the workspace root, using the Terraform CLI process's ambient credentials. A provider-level `assume_role` or `profile` is not visible to it, so it compares its own STS account with the provider's account and fails on a mismatch.
+
+Terraform reads data sources during the refresh step of a destroy plan, so `terraform destroy` runs the resolver once more, for two read-only calls. Pass `-refresh=false` to skip it:
+
+<NxCommands commands={['run @my-scope/infra:destroy -- -refresh=false']} />
+
+When the artifact bucket is created in the same apply, its name is unknown at plan, so the version is `(known after apply)`. With a known existing or imported bucket name, the version can resolve during plan. A later bucket replacement can defer resolution again. A saved plan carries digests, not bytes: a rebuild between `plan` and `apply` uploads the new bytes under the planned key and content tag. The vended `apply` target applies the plan its own `plan` step wrote.
+
+Deleting the current version outside Terraform restarts numbering at `1.0.0`. Set a concrete `ComponentVersion` above the lost number once, deploy it, then switch back to a sentinel.
+</Fragment>
+</Infrastructure>
+
+Two workspaces must not publish the same `ComponentName` into one account and Region. That configuration is unsupported. With `--gdkConfig`, GDK understands only `NEXT_PATCH`; a `gdk-config.json` carrying `NEXT_MINOR` or `NEXT_MAJOR` is invalid for GDK, which the plugin never invokes.
+
+`<component>-deploy-local` resolves the sentinel on the device instead of against the cloud registry. It takes the highest strict version among the installed version and the version directories under `<GREENGRASS_ROOT>/packages/artifacts/<ComponentName>/` and `<GREENGRASS_ROOT>/packages/artifacts-unarchived/<ComponentName>/`, then bumps it.
+
+## Artifact repository
+
+Own one artifact repository per account and Region in one designated stack or root module, and import it everywhere else with `existingBucketName` or `existing_bucket_name`. The created bucket is versioned, encrypted with SSE-S3, blocks public access, enforces TLS, and is tagged `greengrass-artifact-repository=true` so an inventory pass can find it after the stack that created it is gone. It is deliberately not a CDK asset bucket: `cdk gc` can collect an asset object a published version still needs when a new core device joins later. Accidentally creating a second repository allocates new `NEXT_*` versions for otherwise unchanged bytes, because the bucket name is part of the content identity.
+
+No S3 lifecycle rule is applied. A published version's artifact must stay retrievable for as long as any deployment can reference it. When you retire versions, delete the version, confirm no deployment references it, then delete its `<ComponentName>/<sha256>/` or `<ComponentName>/<version>/` prefix in the same pass.
+
+Every core device assumes a token exchange role to fetch artifacts. Grant it `s3:GetObject`, and only that action, scoped to the prefix its devices fetch. In CDK, `GreengrassArtifactBucket.grantReadTo(role, 'com.example.Pulse/*')`. In Terraform, `token_exchange_role_arn` and `token_exchange_key_prefix` on the core `artifact-bucket` module. The default scope is the whole bucket, because a deployment can gain a component after the grant exists; narrow it when every component the role's devices will ever fetch shares a prefix. An imported bucket keeps its own policy, so add the grant in the configuration that owns it, or attach this statement to the role:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": "s3:GetObject",
+  "Resource": "arn:aws:s3:::<artifact-bucket-name>/com.example.Pulse/*"
+}
+```
+
+<Infrastructure>
+<Fragment slot="cdk">
+A component's artifact key must fit CDK's `BucketDeployment` tag-key limit: `ComponentName` and `ComponentVersion` together must stay at or under 35 characters when the version is fixed, and `ComponentName` alone at or under 36 characters with a sentinel. The construct fails synth with a message naming both fields and the limit; the service itself would accept a `ComponentName` up to 128 characters.
+</Fragment>
+<Fragment slot="terraform">
+Left unset, the module names a created bucket `<bucket_name_prefix>-<account-id>-<region>-<random-suffix>`, with `bucket_name_prefix` defaulting to `greengrass-artifacts`. The random suffix lives in state, so the name is stable across applies. A bucket's name cannot change in place, so a changed prefix plans a replacement, which `prevent_destroy` refuses plan-wide. Keep the existing bucket by setting `bucket_name` to the name already in state.
+
+The `aws_s3_object` upload has no key-length ceiling below S3's own 1024 bytes.
+</Fragment>
+</Infrastructure>
+
+## Deployment revisions
+
+Changing a deployment's components or configuration replaces the deployment resource. Both providers create the new revision before the superseded one is removed, so the target stays under a managed deployment throughout. CloudFormation allows at most 10 deployment resources added or deleted per operation; batch changes across stacks if you approach it.
+
+<Infrastructure>
+<Fragment slot="cdk">
+[Express mode disables rollback by default](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stack-failure-options.html#express-mode-and-rollback), and disabling rollback is not supported for replacement updates. The `deploy-sandbox` target uses express mode, so a plain revision deploy through it fails with `Replacement type updates not supported on stack with disable-rollback`. Pass `--rollback` to deploy a revision through it: express mode stays on, rollback is re-enabled, and CloudFormation accepts the replacement. Measured with CDK CLI 2.1139.0, a component version bump plus its deployment revision completed in 51 seconds and the stack events still reported `Stack operation completed using Express Mode`. `--no-express` also works, at the speed of a change-set deploy. `deploy` and `deploy-ci` never use express mode.
+
+<NxCommands commands={['run @my-scope/infra:deploy-sandbox -- --rollback']} />
+
+The `deploy` target has no express mode and accepts the replacement without extra flags. It runs `cdk deploy --require-approval=never` in a project whose stacks live in a stage, so it needs the stage selector from `packages/infra/src/main.ts`:
+
+<NxCommands commands={["run @my-scope/infra:deploy -- 'my-scope-infra-sandbox/**'"]} />
+
+If a plain express deploy already left the stack in `UPDATE_FAILED`, one recovery path works. `cdk rollback` is refused with `RollbackStack is not supported for stacks that were last updated using EXPRESS deployment mode and are in a failed state`. A non-express update is refused with `Follow-up operations must use the same DeploymentConfig (mode=EXPRESS) until the stack reaches a *_COMPLETE state`. Redeploy the last good template with `deploy-sandbox` and no extra flags, which for a component means reverting its content so the recipe and artifact match the published version. Once the stack reports `UPDATE_COMPLETE`, deploy the revision with `--rollback`. [aws/aws-cdk-cli#1931](https://github.com/aws/aws-cdk-cli/issues/1931) tracks the CDK CLI regression, present since 2.1133.0, that lets a plain express deploy submit the replacement instead of stopping first.
+</Fragment>
+<Fragment slot="terraform">
+The deployment uses `create_before_destroy`, so `terraform apply` shows `1 to add, 0 to change, 1 to destroy` for a revision. A recipe or artifact change under `NEXT_PATCH` adds the new component version and the new deployment revision in one apply, then deletes the outgoing pair.
+</Fragment>
+</Infrastructure>
+
+Deleting a deployment resource removes deployment management state. It does not uninstall anything from a device. To remove a component from devices, deploy a revision whose component map omits it, wait for `list-installed-components` to stop listing it, and only then remove infrastructure. Removing an IaC resource is not that revision, and neither provider rolls a device back for you.
+
+Keep deployment policies, tags, parent targets for subdeployments, configuration updates and `runWith` settings in the infrastructure code that owns the deployment. Both the CDK construct and the Terraform module expose them as properties.
+
+## Retention and teardown
+
+<Infrastructure>
+<Fragment slot="cdk">
+`DeletionPolicy` and `UpdateReplacePolicy` default to `Retain` on the component version, the artifact bucket and the deployment. Retained versions accumulate toward the 5,000 versions per component per Region, and AWS IoT Greengrass has no automatic cleanup. Plan a periodic inventory with `ListComponentVersions`, delete versions no deployment references, and delete their artifact prefixes in the same pass. Retained deployments stay listed for the target; cancel an active one before deleting it. The <Link path="get_started/tutorials/greengrass/cleanup">tutorial's cleanup page</Link> walks through every retained resource.
+
+Pass `removalPolicy: RemovalPolicy.DESTROY` to the app wrapper or the repository only for short-lived fixtures that tear themselves down.
+</Fragment>
+<Fragment slot="terraform">
+`prevent_destroy = true` applies to the created artifact bucket only. It is deliberately not applied to the component version or the deployment: `prevent_destroy` rejects any plan that replaces the resource, and both resources are replaced on change, so it would refuse the ordinary bump-and-redeploy workflow outright. Both use `create_before_destroy` instead, which keeps the safety property retention exists for: the incoming version is published first, and the outgoing one is deleted only after the deployment has been revised off it.
+
+A replaced component version is therefore deleted from the registry along with its artifact object, where CDK retains both. To keep a published version that Terraform is about to replace, drop it from state first:
+
+```bash
+terraform state rm 'module.pulse.module.component_version.awscc_greengrassv2_component_version.this'
+terraform state rm 'module.pulse.module.component_version.aws_s3_object.artifact'
+```
+
+To keep one while deleting its module from the configuration, use a [`removed` block](https://developer.hashicorp.com/terraform/language/resources/syntax#removing-resources) with `lifecycle { destroy = false }`. The bucket's `prevent_destroy` is a lifecycle literal and cannot be overridden per module call; remove the `lifecycle` block by hand before `terraform destroy`, after deciding which retained artifacts to delete.
+</Fragment>
+</Infrastructure>
+
+Device credentials, IoT things, certificates, role aliases and thing group membership are separate from the deployment infrastructure. Remove them through the process that provisioned the device, after the device no longer runs the component.
+
+## Service quotas
+
+Most [AWS IoT Greengrass quotas](https://docs.aws.amazon.com/general/latest/gr/greengrassv2.html) are far from anything the generated code produces. Four are close enough to plan around.
+
+**The recipe crosses the API as one document capped at 16 KB.** Both providers submit the whole recipe inline, so its total serialized size counts. A generated single-manifest recipe is about 1 KB. Two things consume the rest: a large `ComponentConfiguration.DefaultConfiguration` block, which nothing bounds, and one manifest per architecture under `platform: linux-amd64-arm64`. Exceeding it fails the deployment with `ValidationException: Invalid Input: Size of the recipe size can't exceed 16KB`. The Service Quotas API reports this limit as 8 KB; 16 KB is what the service enforces. The CDK construct measures the serialized recipe at synth and fails there, naming the recipe, its size and the 16384 byte limit, but it can only reject a recipe that is too large whatever the bucket name resolves to, so a recipe within about 100 bytes of the cap is still settled at deploy time. The Terraform module has no equivalent check.
+
+**The deployment document is capped at 31 KB for a thing group and 7 KB for a single thing.** Every component's configuration update is serialized into that one document together with the deployment policies, so the budget is shared across all components in the deployment. The vended constructs do not enable large-configuration support, so treat 31 KB and 7 KB as the operative numbers.
+
+**`CreateComponentVersion` is limited to 1 request per second per Region**, against 30 per second for other control-plane operations. Nothing in the vended constructs serializes component version creation, so a stack that publishes several new versions at once can be throttled. The receipts behind this guide published one or two versions per deploy without observing it. If you hit it, split the components across stacks or deploy them in stages.
+
+**A component keeps at most 5,000 versions per Region.** This is the ceiling on how many times one component can be bumped in one Region. CDK retains every replaced version; Terraform deletes the replaced one. Do not use a new version as a heartbeat.
+
+## Local and cloud deployments on one device
+
+A local deployment made on the device with `greengrass-cli`, which is what `<component>-deploy-local` creates, pins that component to an exact version on that device. The nucleus treats the pin as a requirement it must keep satisfying. A cloud deployment that asks the same device for a different version cannot satisfy both, so the nucleus refuses the whole deployment:
+
+```text
+FAILED_NO_STATE_CHANGE ... Component com.example.Pulse version constraints:
+LOCAL_DEPLOYMENT requires =1.0.0, thinggroup/pumps requires =1.0.1
+```
+
+Remove the pin on the device, then deploy from the cloud again:
+
+```bash
+sudo /greengrass/v2/bin/greengrass-cli deployment create --remove com.example.Pulse
+```
+
+Use `<component>-deploy-local` on a development device, and let cloud deployments own the devices in your thing groups. If you do both on one device, clear the local deployment before every cloud deploy.
+
+## Troubleshooting
+
+Cloud deployment status and device process state are different signals. Check `get-core-device` and `list-installed-components` after every deployment; a deployment that reports `SUCCEEDED` can leave the component `BROKEN`. Read <Link path="guides/greengrass-device-validation#a-successful-deployment-is-not-a-running-component">A successful deployment is not a running component</Link> for the recorded case, and <Link path="guides/greengrass-device-validation#ipc-components-fail-on-a-sudo-rs-device">IPC components fail on a sudo-rs device</Link> for the distribution incompatibility that produced it.
+
+For the complete setup, deployment, update and cleanup order, including a cloud MQTT observation and a `NEXT_PATCH` update, follow the <Link path="get_started/tutorials/greengrass/overview">Greengrass MQTT tutorial</Link>.

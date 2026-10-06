@@ -383,26 +383,6 @@ const GATEWAY_TO_MCP: readonly ConnectionConstraint[] = [
   },
 ];
 
-/**
- * A component generated with `--infra none` publishes no `ComponentVersion`,
- * so a deployment has nothing to reference. This is the same restriction the
- * connection generator enforces at runtime (`--infra none` is a valid choice
- * for a component that never joins a deployment, so the generator itself
- * can't reject it up front - only a connection attempt can).
- *
- * `iac` carries no constraint: both generators support `cdk` and `terraform`,
- * so both ends inherit the workspace's provider like every other endpoint.
- */
-const DEPLOYMENT_TO_GREENGRASS_COMPONENT: readonly ConnectionConstraint[] = [
-  {
-    side: 'target',
-    option: 'infra',
-    equals: 'component-version',
-    reason:
-      'A component generated with --infra none publishes no ComponentVersion for the deployment to reference. Generate it with --infra component-version first.',
-  },
-];
-
 const GATEWAY_TO_AGENT: readonly ConnectionConstraint[] = [
   {
     side: 'source',
@@ -485,10 +465,6 @@ export const CONNECTION_CONSTRAINTS = {
         'The source gateway signs its request with IAM, so the target gateway must accept IAM.',
     },
   ],
-  'greengrass-deployment -> py#greengrass-component':
-    DEPLOYMENT_TO_GREENGRASS_COMPONENT,
-  'greengrass-deployment -> ts#greengrass-component':
-    DEPLOYMENT_TO_GREENGRASS_COMPONENT,
 } as const satisfies Partial<
   Record<ConnectionKey, readonly ConnectionConstraint[]>
 >;

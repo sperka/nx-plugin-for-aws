@@ -6,7 +6,8 @@
 
 /**
  * One option's control inside a command card: pills for a fixed set of values, a
- * checkbox for a flag, a text or number box otherwise.
+ * checkbox for a flag with a declared default, a three-state select for a
+ * defaultless boolean, and a text or number box otherwise.
  *
  * `value` is what the control starts on — the value the page pins, or a boolean's
  * own default, so the command reads as the guide intends until the reader changes
@@ -102,6 +103,17 @@ const values = locked ? option.values.filter((v) => v === value) : option.values
           </button>
         )}
       </div>
+    ) : option.control === 'boolean' && option.default === undefined ? (
+      <select
+        class="command-card-input command-card-boolean-select"
+        id={id}
+        data-option-select={option.key}
+        disabled={locked}
+      >
+        <option value="" selected={value === ''}>{strings.defaultValue}</option>
+        <option value="true" selected={value === 'true'}>true</option>
+        <option value="false" selected={value === 'false'}>false</option>
+      </select>
     ) : option.control === 'boolean' ? (
       <label class="command-card-check">
         <input

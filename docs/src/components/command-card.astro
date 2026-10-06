@@ -9,10 +9,11 @@
  * in, since the run-generator card offers an Nx Console route alongside it), and
  * the controls that write it.
  *
- * A control per option — pills for a fixed set of values, a checkbox for a flag, a
- * text box otherwise — rewrites the command as the reader types, so they leave
- * with their own invocation rather than one to edit afterwards. A walkthrough
- * whose prose is written around the values it passes locks them instead.
+ * A control per option - pills for a fixed set of values, a checkbox for a
+ * declared-default flag, a three-state select for a defaultless flag, a text box
+ * otherwise - rewrites the command as the reader types, so they leave with their
+ * own invocation rather than one to edit afterwards. A walkthrough whose prose
+ * is written around the values it passes locks them instead.
  */
 import CommandCardField from './command-card-field.astro';
 import type { CardConfig } from '../lib/command-card';
@@ -198,6 +199,9 @@ const isPinned = shown.every((option) => locked.has(option.key));
     const checks = Array.from(
       card.querySelectorAll<HTMLInputElement>('[data-option-check]'),
     );
+    const selects = Array.from(
+      card.querySelectorAll<HTMLSelectElement>('[data-option-select]'),
+    );
     const pills = Array.from(
       card.querySelectorAll<HTMLButtonElement>('[data-option-pill]'),
     );
@@ -207,9 +211,12 @@ const isPinned = shown.every((option) => locked.has(option.key));
       ).map((field) => [field.dataset.commandCardField!, field]),
     );
     // The controls the guide itself fixes, which stay that way whatever applies.
-    const locked = new Set<HTMLInputElement | HTMLButtonElement>([
+    const locked = new Set<
+      HTMLInputElement | HTMLSelectElement | HTMLButtonElement
+    >([
       ...inputs.filter((input) => input.readOnly),
       ...checks.filter((check) => check.disabled),
+      ...selects.filter((select) => select.disabled),
       ...pills.filter((pill) => pill.disabled),
     ]);
     const dryRun = card.querySelector<HTMLInputElement>(
@@ -226,6 +233,7 @@ const isPinned = shown.every((option) => locked.has(option.key));
     const initial = {
       inputs: inputs.map((input) => input.value),
       checks: checks.map((check) => check.checked),
+      selects: selects.map((select) => select.value),
       pills: pills.map((pill) => pill.getAttribute('aria-pressed') === 'true'),
     };
 
@@ -246,6 +254,9 @@ const isPinned = shown.every((option) => locked.has(option.key));
       }
       for (const check of checks) {
         values[check.dataset.optionCheck!] = String(check.checked);
+      }
+      for (const select of selects) {
+        values[select.dataset.optionSelect!] = select.value;
       }
       for (const pill of pills) {
         if (pill.getAttribute('aria-pressed') === 'true') {
@@ -309,8 +320,10 @@ const isPinned = shown.every((option) => locked.has(option.key));
         const field = fields.get(option.key);
         field?.classList.toggle('is-inapplicable', !applies);
         for (const control of field?.querySelectorAll<
-          HTMLInputElement | HTMLButtonElement
-        >('[data-option-pill], [data-option-check], [data-option-input]') ?? []) {
+          HTMLInputElement | HTMLSelectElement | HTMLButtonElement
+        >(
+          '[data-option-pill], [data-option-check], [data-option-select], [data-option-input]',
+        ) ?? []) {
           const fixed = locked.has(control);
           if (control instanceof HTMLInputElement && control.type === 'text') {
             control.readOnly = fixed || !applies;
@@ -395,6 +408,7 @@ const isPinned = shown.every((option) => locked.has(option.key));
         const changed =
           inputs.some((input, i) => input.value !== initial.inputs[i]) ||
           checks.some((check, i) => check.checked !== initial.checks[i]) ||
+          selects.some((select, i) => select.value !== initial.selects[i]) ||
           pills.some(
             (pill, i) =>
               (pill.getAttribute('aria-pressed') === 'true') !==
@@ -411,7 +425,13 @@ const isPinned = shown.every((option) => locked.has(option.key));
     // what the options panel highlights.
     let published = '';
     const publish = (command: Record<string, string>) => {
-      const detail = { values: entered(), command };
+      // An empty control is not a page choice. This matters for a defaultless
+      // boolean: its "Default" state leaves the generator free to resolve the
+      // conditional default, and filters must treat it as "Any" too.
+      const values = Object.fromEntries(
+        Object.entries(entered()).filter(([, value]) => value !== ''),
+      );
+      const detail = { values, command };
       const payload = JSON.stringify(detail);
       if (payload === published) return;
       published = payload;
@@ -444,6 +464,9 @@ const isPinned = shown.every((option) => locked.has(option.key));
         syncCheckLabel(check);
         render();
       });
+    }
+    for (const select of selects) {
+      select.addEventListener('change', render);
     }
     dryRun?.addEventListener('change', render);
 
@@ -485,6 +508,9 @@ const isPinned = shown.every((option) => locked.has(option.key));
         check.checked = initial.checks[i];
         syncCheckLabel(check);
       });
+      selects.forEach((select, i) => {
+        select.value = initial.selects[i];
+      });
       pills.forEach((pill, i) => {
         pill.setAttribute('aria-pressed', String(initial.pills[i]));
       });
@@ -522,8 +548,16 @@ const isPinned = shown.every((option) => locked.has(option.key));
       for (const [key, value] of Object.entries(selected)) {
         if (!filterKeys.has(key) || pinned.has(key)) continue;
         const owned = pills.filter((pill) => pill.dataset.optionPill === key);
-        if (!owned.some((pill) => pill.dataset.value === value)) continue;
-        setPill(key, value);
+        if (owned.some((pill) => pill.dataset.value === value)) {
+          setPill(key, value);
+          continue;
+        }
+        const select = selects.find(
+          (candidate) => candidate.dataset.optionSelect === key,
+        );
+        if (select && ['', 'true', 'false'].includes(value)) {
+          select.value = value;
+        }
       }
     };
     if (owns && pageOptions) {
@@ -537,11 +571,28 @@ const isPinned = shown.every((option) => locked.has(option.key));
         const { key, value } = (event as CustomEvent).detail ?? {};
         if (typeof key !== 'string' || typeof value !== 'string') return;
         const owned = pills.filter((pill) => pill.dataset.optionPill === key);
-        if (owned.length === 0 || owned.some((pill) => pill.disabled)) return;
-        if (value !== '' && !owned.some((pill) => pill.dataset.value === value)) {
+        if (owned.length > 0 && !owned.some((pill) => pill.disabled)) {
+          if (
+            value !== '' &&
+            !owned.some((pill) => pill.dataset.value === value)
+          ) {
+            return;
+          }
+          setPill(key, value);
+          render();
           return;
         }
-        setPill(key, value);
+        const select = selects.find(
+          (candidate) => candidate.dataset.optionSelect === key,
+        );
+        if (
+          !select ||
+          select.disabled ||
+          !['', 'true', 'false'].includes(value)
+        ) {
+          return;
+        }
+        select.value = value;
         render();
       });
     }

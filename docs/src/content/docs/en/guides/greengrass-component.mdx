@@ -1,0 +1,513 @@
+---
+title: Greengrass Component
+description: Add an AWS IoT Greengrass v2 component to an existing Python or TypeScript project, with reusable CDK or Terraform building blocks for publishing and deploying it
+generator: greengrass#component
+---
+
+import { FileTree, Tabs, TabItem } from '@astrojs/starlight/components';
+import ArchitectureDiagram from '@components/architecture-diagram.astro';
+import GeneratorParameters from '@components/generator-parameters.astro';
+import Infrastructure from '@components/infrastructure.astro';
+import Link from '@components/link.astro';
+import NxCommands from '@components/nx-commands.astro';
+import OptionFilter from '@components/option-filter.astro';
+import RunGenerator from '@components/run-generator.astro';
+import Snippet from '@components/snippet.astro';
+
+The `greengrass#component` generator adds an [AWS IoT Greengrass v2](https://docs.aws.amazon.com/greengrass/v2/developerguide/what-is-iot-greengrass.html) component to an existing Python or TypeScript project. It creates the recipe, the entrypoint, a unit test for Python components, and the Nx targets that package the component for a core device. With the default `infra`, it also vends reusable CDK constructs or Terraform modules that publish the component version, own an artifact repository, and describe a deployment. You compose those building blocks in your own infrastructure code; the generator never creates a device, a fleet or a deployment on its own.
+
+The host project must already exist. Create one with <Link path="guides/python-project">`py#project`</Link> or <Link path="guides/typescript-project">`ts#project`</Link> first.
+
+## Usage
+
+### Generate a component
+
+<RunGenerator generator="greengrass#component" requiredParameters={{ project: 'telemetry', name: 'pulse', language: 'python' }} />
+
+Pass `language` explicitly in scripts and documentation. When it is omitted, the generator infers `typescript` from a `tsconfig.json` in the selected project, or `python` from a `pyproject.toml` there. A project with both files must pass `--language`; a project with neither is not a supported host.
+
+`ipc` defaults to `true` for Python and `false` for TypeScript. Pass `--ipc=true` or `--ipc=false` when the default is not what you need.
+
+`--project` accepts the unqualified project name. Generated projects are namespace-qualified, so `nx run` needs the full name: `<scope>.telemetry` for a Python project and `@<scope>/telemetry` for a TypeScript project. The examples below write `<project>` for that name, and `@my-scope/infra` for an infrastructure project generated with `--name=infra` in a workspace whose npm scope is `my-scope`.
+
+### Options
+
+<GeneratorParameters generator="greengrass#component" />
+
+## Generator Output
+
+<OptionFilter when={{ language: 'python' }} description="Python component layout">
+<FileTree>
+  - greengrass
+    - pulse
+      - recipe.yaml the component recipe
+      - main.py the component entrypoint
+  - tests
+    - greengrass
+      - test_pulse.py a unit test that loads main.py by path
+</FileTree>
+
+The `pulse-vendor` target vendors the project's dependencies for the selected device platform with `uv pip install --only-binary :all:`, and the recipe's `Run` step pins the interpreter the wheels were vendored for, for example `python3.14`. With `platform: linux-amd64-arm64`, it vendors once per architecture and the recipe carries one manifest per architecture.
+</OptionFilter>
+
+<OptionFilter when={{ language: 'typescript' }} description="TypeScript component layout">
+<FileTree>
+  - greengrass
+    - pulse
+      - recipe.yaml the component recipe
+  - src
+    - greengrass
+      - pulse
+        - main.ts the component entrypoint
+</FileTree>
+
+The project's `bundle` target bundles the entrypoint before packaging. With `ipc: true`, the `pulse-vendor` target also stages the `aws-crt` native addon for the selected architecture, and the recipe's `Run` step needs Node.js on the core device.
+</OptionFilter>
+
+The recipe, the entrypoint and, for Python, the test are yours from the first run: a rerun never rewrites them. The targets, metadata and dependency declarations are framework-managed and converge on every run. The shared packaging scripts under `packages/common/scripts/src/greengrass/` are created once; delete that directory and rerun the generator to refresh them.
+
+The targets use the kebab-case component name:
+
+| Target | Purpose |
+| --- | --- |
+| `<component>-vendor` | Vendors Python dependencies, or the TypeScript CRT addon when IPC is enabled |
+| `<component>-artifact` | Writes the resolved recipe and the deployable archive under `dist/<project-root>/greengrass/<component>/greengrass-build/` |
+| `<component>-deploy-local` | Creates a local deployment through `greengrass-cli` on a core device and waits for a settled component state |
+| `<component>-logs` | Tails the component log on a core device |
+
+`<component>-artifact` is a dependency of the host project's `build` and `assemble` targets, so a normal build produces the artifact.
+
+## Infrastructure
+
+<OptionFilter when={{ infra: 'component-version' }} description="Building blocks vended with infra=component-version">
+<Snippet name="shared-constructs" />
+
+The default `infra: component-version` adds the Greengrass core files below when they are missing and one app wrapper per component. Existing core files are preserved, so local edits survive later runs. It does not create a device, a thing group or a deployment.
+
+<Infrastructure>
+<Fragment slot="cdk">
+<FileTree>
+  - packages/common/constructs/src
+    - core/greengrass
+      - artifact-bucket.ts `GreengrassArtifactBucket`: a retained, versioned, TLS-only repository with `grantReadTo`
+      - component-version.ts `GreengrassComponentVersion`: uploads the artifact and publishes the version
+      - deployment.ts `GreengrassDeployment`: the deployment, an optional thing group, and `addComponent`
+      - next-version.ts the deploy-time resolver for `NEXT_PATCH`, `NEXT_MINOR` and `NEXT_MAJOR`
+      - recipe.ts recipe reading and artifact URI substitution at synth time
+    - app/greengrass
+      - pulse.ts `Pulse`, a `GreengrassComponentVersion` pinned to this component's build output
+</FileTree>
+
+The shared constructs project's `build` and `assemble` targets depend on the host project's, so an infrastructure build or deploy always reads a fresh artifact.
+</Fragment>
+<Fragment slot="terraform">
+<FileTree>
+  - packages/common/terraform/src
+    - core/greengrass
+      - artifact-bucket a retained, versioned, TLS-only repository with an optional token exchange role grant
+      - component-version uploads the artifact and publishes the version through `awscc_greengrassv2_component_version`
+      - deployment `awscc_greengrassv2_deployment` with an optional `aws_iot_thing_group`
+    - app/greengrass-component
+      - pulse a module wrapping `component-version` with this component's build paths and a `bucket_name` input
+  - packages/common/terraform/src/tests
+    - greengrass.tftest.hcl mocked provider tests for the core modules
+</FileTree>
+
+Neither Greengrass resource exists in the `hashicorp/aws` provider. The modules use [`hashicorp/awscc`](https://registry.terraform.io/providers/hashicorp/awscc/latest/docs), which <Link path="guides/terraform-project">`terraform#project`</Link> configures with the same `var.aws_region` as `provider "aws"`.
+</Fragment>
+</Infrastructure>
+
+#### Architecture
+
+The component version publishes a built artifact into an explicitly owned repository. Your stack or root module grants the core devices' token exchange role read access and adds the version to one or more deployments.
+
+<ArchitectureDiagram />
+</OptionFilter>
+
+<OptionFilter when={{ infra: 'none' }} description="Local-only component">
+`infra: none` creates the recipe, the entrypoint, the Python test, the targets and the shared scripts only. No infrastructure project or shared constructs are created or changed. Rerun with `infra: component-version` later to add the infrastructure. A rerun cannot switch a component that already owns infrastructure back to `none`.
+</OptionFilter>
+
+## Build and run locally
+
+Build the artifact on your development machine:
+
+<NxCommands commands={['run <project>:pulse-artifact']} />
+
+The output under `dist/<project-root>/greengrass/pulse/greengrass-build/` holds `recipes/` with the resolved recipe and `artifacts/<ComponentName>/<ComponentVersion>/` with the archives. A Python component builds one archive per manifest, named `<component>-<architecture>.zip` when it targets both architectures. A TypeScript component builds one archive that every manifest shares; with `ipc: true` it carries the `aws-crt` addon for each architecture and each manifest's `Setenv` selects its own. The `BUCKET_NAME`, `COMPONENT_NAME` and `COMPONENT_VERSION` placeholders in the recipe's artifact URI are substituted at publish time, and the archive basename must stay the one the `Run` step unarchives to.
+
+The next two targets run on a machine with the classic Greengrass nucleus and `greengrass-cli` installed, not on an ordinary workstation:
+
+<NxCommands commands={['run <project>:pulse-deploy-local', 'run <project>:pulse-logs']} />
+
+`GREENGRASS_ROOT` defaults to `/greengrass/v2`. `pulse-deploy-local` submits a local deployment, then polls the component's lifecycle state and exits non-zero unless it stays `RUNNING` or `FINISHED` across three checks. A local deployment pins that version on the device and conflicts with a later cloud deployment of a different version; read <Link path="guides/greengrass-operations#local-and-cloud-deployments-on-one-device">local and cloud deployments on one device</Link>.
+
+<OptionFilter when={{ infra: 'component-version' }} description="Composing the vended building blocks into a deployment">
+## Deploying
+
+Deployment composition lives in your infrastructure project. The normal flow is one repository, one read grant, one app wrapper per component, and one deployment per fleet. Further fleets and components are more of the same calls.
+
+<Infrastructure>
+<Fragment slot="cdk">
+Create a CDK application if the workspace has none:
+
+<RunGenerator generator="ts#infra" requiredParameters={{ name: 'infra' }} />
+
+The token exchange role and the target thing group already exist in the account: the role is what your core devices assume, and the group is where they are registered. The stack imports both through CloudFormation parameters.
+
+```ts title="packages/infra/src/stacks/application-stack.ts"
+import {
+  GreengrassArtifactBucket,
+  GreengrassDeployment,
+  Pulse,
+} from '@my-scope/common-constructs';
+import { CfnParameter, Stack, type StackProps } from 'aws-cdk-lib';
+import { Role } from 'aws-cdk-lib/aws-iam';
+import type { Construct } from 'constructs';
+
+export class ApplicationStack extends Stack {
+  constructor(scope: Construct, id: string, props?: StackProps) {
+    super(scope, id, props);
+
+    const tokenExchangeRoleArn = new CfnParameter(
+      this,
+      'TokenExchangeRoleArn',
+      { type: 'String' },
+    );
+    const thingGroupArn = new CfnParameter(this, 'ThingGroupArn', {
+      type: 'String',
+    });
+
+    // One explicitly owned repository, and the grant the devices need.
+    const artifacts = new GreengrassArtifactBucket(this, 'Artifacts');
+    const tokenExchangeRole = Role.fromRoleArn(
+      this,
+      'TokenExchangeRole',
+      tokenExchangeRoleArn.valueAsString,
+    );
+    artifacts.grantReadTo(tokenExchangeRole, 'com.example.Pulse/*');
+
+    // The generated wrapper takes the repository construct itself.
+    const pulse = new Pulse(this, 'Pulse', { bucket: artifacts });
+
+    // addComponent records the resolved version and orders the deployment
+    // resource after the component version resource.
+    const fleet = new GreengrassDeployment(this, 'Fleet', {
+      targetArn: thingGroupArn.valueAsString,
+    });
+    fleet.addComponent(pulse);
+  }
+}
+```
+
+Synchronize project references, bootstrap the account and Region once, then deploy. The `deploy` target runs `cdk deploy --require-approval=never` in the infrastructure project after `^assemble`, which rebuilds the component artifact first. The generated `main.ts` places every stack in a stage named after the project, `my-scope-infra-sandbox` for `@my-scope/infra`, so `cdk deploy` needs a selector for that stage. Take the stage name from `packages/infra/src/main.ts` and pass it with `/**` after `--`, together with the parameter values:
+
+<NxCommands env={{ AWS_PROFILE: '<profile>', AWS_REGION: '<region>' }} commands={['sync', 'run @my-scope/infra:bootstrap', "run @my-scope/infra:deploy -- 'my-scope-infra-sandbox/**' --parameters TokenExchangeRoleArn=<role-arn> --parameters ThingGroupArn=<thing-group-arn>"]} />
+
+`deploy` waits for full stabilization and accepts the replacement update that every later deployment revision is. `deploy-sandbox` selects the same stage by itself but uses express mode, which refuses a replacement update unless you pass `--rollback`; read <Link path="guides/greengrass-operations#deployment-revisions">deployment revisions</Link> before using it for Greengrass.
+
+`fleet.addComponent(pulse)` is required, not decorative. With a fixed `ComponentVersion` the deployment's component map holds a literal string, so CloudFormation sees no dependency between the deployment and the component version and creates them in parallel. The IoT job can then reach devices before the version exists, and they fail with `FAILED_NO_STATE_CHANGE`. With `NEXT_PATCH` the map holds the component version resource's `ComponentVersion` attribute, and synth fails with a message naming `addComponent` if a raw `NEXT_*` string reaches the deployment.
+
+#### Two components in one fleet
+
+Generate a second component into the same or another project, then add both to one deployment. Overrides replace the named top-level field of that component's entry; the version always comes from the construct.
+
+```ts
+const pulse = new Pulse(this, 'Pulse', { bucket: artifacts });
+const uploader = new Uploader(this, 'Uploader', { bucket: artifacts });
+
+const cameras = new GreengrassDeployment(this, 'Cameras', {
+  thingGroupName: 'cameras',
+});
+cameras.addComponent(pulse);
+cameras.addComponent(uploader, {
+  configurationUpdate: { merge: { uploadIntervalSeconds: 60 } },
+});
+```
+
+`thingGroupName` creates a new `AWS::IoT::ThingGroup`. It does not enroll devices; a device joins a group through its provisioning process. Use `targetArn` or `thingName` for a group or thing that already exists.
+
+#### One component in two fleets
+
+Register the same construct with two deployments. Each deployment carries its own configuration:
+
+```ts
+new GreengrassDeployment(this, 'WestFleet', {
+  thingGroupName: 'west-fleet',
+}).addComponent(pulse);
+
+new GreengrassDeployment(this, 'EastFleet', {
+  thingGroupName: 'east-fleet',
+}).addComponent(pulse, {
+  configurationUpdate: { merge: { sampleIntervalSeconds: 60 } },
+});
+```
+
+Adding the same construct twice to one deployment is a no-op unless the second call supplies overrides, which update the entry. Adding a different construct under the same component name to one deployment fails at construction time.
+
+#### Public components and raw entries
+
+Components you did not build in this workspace go into the `components` map. A published public component needs no dependency, because it already exists. A raw entry for a version created in the same stack, for example a hand-written `CfnComponentVersion`, needs the ordering edge you would otherwise get from `addComponent`:
+
+```ts
+import { CfnComponentVersion } from 'aws-cdk-lib/aws-greengrassv2';
+
+const fleet = new GreengrassDeployment(this, 'Fleet', {
+  targetArn: thingGroupArn.valueAsString,
+  components: {
+    // Published by AWS; pick a version from
+    // `aws greengrassv2 list-component-versions`.
+    'aws.greengrass.LogManager': {
+      componentVersion: '2.3.8',
+      configurationUpdate: {
+        merge: {
+          logsUploaderConfiguration: {
+            systemLogsConfiguration: { uploadToCloudWatch: 'true' },
+          },
+        },
+      },
+    },
+    // Created in this stack, so the deployment must wait for it.
+    'com.example.Handwritten': { componentVersion: '1.2.0' },
+  },
+});
+fleet.addComponent(pulse);
+
+const handwritten = new CfnComponentVersion(this, 'Handwritten', {
+  inlineRecipe: handwrittenRecipe,
+});
+fleet.deployment.node.addDependency(handwritten);
+```
+
+`configurationUpdate.merge` is a plain object here. The construct serializes it to the JSON string CloudFormation expects.
+
+#### Import an existing repository
+
+One stack owns the repository. Every other stack imports it by name and adds its own grant in the owning stack, or attaches an equivalent `s3:GetObject` policy to the token exchange role itself:
+
+```ts
+const artifacts = new GreengrassArtifactBucket(this, 'Artifacts', {
+  existingBucketName: 'central-greengrass-artifacts',
+});
+const pulse = new Pulse(this, 'Pulse', { bucket: artifacts });
+```
+
+An imported bucket keeps its own encryption, versioning and access settings. The resolver includes the bucket name in the content identity of a `NEXT_*` version, so moving a component to another repository allocates a new version for unchanged bytes.
+</Fragment>
+<Fragment slot="terraform">
+Create a Terraform application if the workspace has none:
+
+<RunGenerator generator="terraform#project" requiredParameters={{ name: 'infra', type: 'application' }} />
+
+Declare the token exchange role as an input and set its value in the environment file the vended `plan` target reads with `-var-file=env/dev.tfvars`. The role is what your core devices assume, and it exists before this configuration runs:
+
+```hcl title="packages/infra/src/variables.tf"
+variable "token_exchange_role_arn" {
+  description = "ARN of the IAM role the core devices assume"
+  type        = string
+}
+```
+
+```hcl title="packages/infra/src/env/dev.tfvars"
+environment             = "dev"
+token_exchange_role_arn = "arn:aws:iam::123456789012:role/GreengrassCoreTokenExchangeRole"
+```
+
+Reference the component module's outputs directly in the core deployment module's `components` map. The `component_version` output carries a `depends_on` onto the component version resource, so the deployment waits for the version to exist even when its number is known at plan time. No module-level `depends_on` is needed for this flow.
+
+```hcl title="packages/infra/src/main.tf"
+module "artifacts" {
+  source                    = "../../common/terraform/src/core/greengrass/artifact-bucket"
+  token_exchange_role_arn   = var.token_exchange_role_arn
+  token_exchange_key_prefix = "com.example.Pulse/*"
+}
+
+module "pulse" {
+  source      = "../../common/terraform/src/app/greengrass-component/pulse"
+  bucket_name = module.artifacts.bucket_name
+}
+
+module "fleet" {
+  source           = "../../common/terraform/src/core/greengrass/deployment"
+  thing_group_name = "pumps"
+  components = {
+    (module.pulse.component_name) = {
+      component_version = module.pulse.component_version
+    }
+  }
+}
+```
+
+Bootstrap the remote state once, then plan and apply. `plan` depends on `init`, `validate` and `assemble`, which rebuilds the component artifact first, and `apply` applies the plan file that `plan` wrote:
+
+<NxCommands env={{ AWS_PROFILE: '<profile>', AWS_REGION: '<region>' }} commands={['run @my-scope/infra:bootstrap', 'run @my-scope/infra:plan', 'run @my-scope/infra:apply']} />
+
+`thing_group_name` creates a new `aws_iot_thing_group`; it does not enroll devices. Use `target_arn` for a group or thing that already exists, or `thing_name` for one thing. A literal `target_arn` is checked against the current partition, account and Region at plan time.
+
+A `NEXT_*` sentinel that reaches the deployment module as a literal fails the plan with:
+
+```text
+Component(s) com.example.Pulse use NEXT_* version markers. Wire each resolved component output directly in components: components = { (module.<x>.component_name) = { component_version = module.<x>.component_version } }.
+```
+
+#### Two components in one fleet
+
+```hcl
+module "uploader" {
+  source      = "../../common/terraform/src/app/greengrass-component/uploader"
+  bucket_name = module.artifacts.bucket_name
+}
+
+module "cameras" {
+  source           = "../../common/terraform/src/core/greengrass/deployment"
+  thing_group_name = "cameras"
+  components = {
+    (module.pulse.component_name) = {
+      component_version = module.pulse.component_version
+    }
+    (module.uploader.component_name) = {
+      component_version = module.uploader.component_version
+      configuration_update = {
+        merge = jsonencode({ uploadIntervalSeconds = 60 })
+      }
+    }
+  }
+}
+```
+
+`configuration_update.merge` must already be a JSON string, so wrap it in `jsonencode`. This differs from the CDK construct, which takes an object.
+
+#### One component in two fleets
+
+Two deployment modules reference the same component outputs:
+
+```hcl
+module "west_fleet" {
+  source           = "../../common/terraform/src/core/greengrass/deployment"
+  thing_group_name = "west-fleet"
+  components = {
+    (module.pulse.component_name) = {
+      component_version = module.pulse.component_version
+    }
+  }
+}
+
+module "east_fleet" {
+  source           = "../../common/terraform/src/core/greengrass/deployment"
+  thing_group_name = "east-fleet"
+  components = {
+    (module.pulse.component_name) = {
+      component_version = module.pulse.component_version
+      configuration_update = {
+        merge = jsonencode({ sampleIntervalSeconds = 60 })
+      }
+    }
+  }
+}
+```
+
+#### Public components and literal versions
+
+A published public component is a literal entry and needs no dependency. A literal version for a resource created in the same apply, for example a hand-written `awscc_greengrassv2_component_version`, is the one case for a module-level `depends_on`. `var.thing_group_arn` below is declared and set like `token_exchange_role_arn` above. With `depends_on`, Terraform cannot read the deployment module's identity data sources until the dependency exists, so its target checks are deferred from plan to apply. They still fail before the deployment is created.
+
+```hcl
+module "fleet" {
+  source     = "../../common/terraform/src/core/greengrass/deployment"
+  target_arn = var.thing_group_arn
+  components = {
+    "aws.greengrass.LogManager" = {
+      component_version = "2.3.8"
+      configuration_update = {
+        merge = jsonencode({
+          logsUploaderConfiguration = {
+            systemLogsConfiguration = { uploadToCloudWatch = "true" }
+          }
+        })
+      }
+    }
+    "com.example.Handwritten" = {
+      component_version = "1.2.0"
+    }
+    (module.pulse.component_name) = {
+      component_version = module.pulse.component_version
+    }
+  }
+
+  # Only for the literal version created by awscc_greengrassv2_component_version.handwritten.
+  depends_on = [awscc_greengrassv2_component_version.handwritten]
+}
+```
+
+#### Import an existing repository
+
+Set `existing_bucket_name` on the `artifact-bucket` module. The module then manages neither the bucket's settings nor its policy, so grant the token exchange role `s3:GetObject` on the artifact prefix in the configuration that owns the bucket:
+
+```hcl
+module "artifacts" {
+  source               = "../../common/terraform/src/core/greengrass/artifact-bucket"
+  existing_bucket_name = "central-greengrass-artifacts"
+}
+```
+</Fragment>
+</Infrastructure>
+
+### Verify on the device
+
+A completed stack update or apply proves that the deployment resource exists. A deployment and its IoT job can both report `SUCCEEDED` while the component on the device is `BROKEN`. Check the device and the component state after every deployment:
+
+```bash
+aws --profile <profile> --region <region> greengrassv2 get-core-device \
+  --core-device-thing-name <thing-name> --query status
+aws --profile <profile> --region <region> greengrassv2 list-installed-components \
+  --core-device-thing-name <thing-name>
+```
+
+Read <Link path="guides/greengrass-device-validation#a-successful-deployment-is-not-a-running-component">A successful deployment is not a running component</Link> for the failure mode, and <Link path="guides/greengrass-device-validation#verifying-on-a-real-device">Verifying on a real device</Link> for the full procedure.
+</OptionFilter>
+
+## Recipes and IPC
+
+<Tabs syncKey="greengrass-language">
+<TabItem label="Python" _filter={{ language: 'python' }}>
+With `ipc: true`, `main.py` publishes a heartbeat to the component's own local topic every 30 seconds through `GreengrassCoreIPCClientV2`:
+
+```python title="greengrass/pulse/main.py"
+client.publish_to_topic(
+    topic=TOPIC,
+    publish_message=PublishMessage(json_message=JsonMessage(message={"sequence": sequence})),
+)
+```
+
+The recipe grants `aws.greengrass#PublishToTopic` on `<ComponentName>/heartbeat` under `aws.greengrass.ipc.pubsub`. Local pub/sub reaches other components on the same core device and never AWS IoT Core. To publish to AWS IoT Core, call `publish_to_iot_core(topic_name=..., qos="1", payload=...)`, grant `aws.greengrass#PublishToIoTCore` under `aws.greengrass.ipc.mqttproxy` in the recipe, and give the device's IoT policy `iot:Publish` on the exact topic. The <Link path="get_started/tutorials/greengrass/overview">tutorial</Link> makes that change end to end.
+
+With `ipc: false`, `main.py` logs a line every 30 seconds and the recipe carries no access control.
+</TabItem>
+<TabItem label="TypeScript" _filter={{ language: 'typescript' }}>
+With the default `ipc: false`, `main.ts` logs a line every 30 seconds and the recipe carries no access control. With `ipc: true`, it publishes a heartbeat to the component's own local topic through the AWS IoT Device SDK's Greengrass IPC client, the recipe grants `aws.greengrass#PublishToTopic` on `<ComponentName>/heartbeat`, and `pulse-vendor` stages the `aws-crt` native addon for the selected architecture. Publishing to AWS IoT Core uses the same client's `publishToIoTCore` operation, an `aws.greengrass.ipc.mqttproxy` authorization in the recipe, and `iot:Publish` in the device's IoT policy.
+</TabItem>
+</Tabs>
+
+Access control in the recipe is enforced by the nucleus on the device. Depending on the SDK alone authorizes nothing, so widen `operations` and `resources` as the component grows.
+
+The generated recipes target the classic `aws.greengrass.Nucleus`. [Nucleus Lite](https://docs.aws.amazon.com/greengrass/v2/developerguide/greengrass-nucleus-lite-component.html) implements a subset of the IPC operations, does not run plugin components, and gained container support only in v2.15. Verify the recipe against the nucleus your fleet runs; the generator does not detect nucleus capabilities.
+
+On a core device whose `sudo` is `sudo-rs`, the default on Ubuntu 25.10 and later, no IPC component starts under nucleus 2.18.3. Read <Link path="guides/greengrass-device-validation#ipc-components-fail-on-a-sudo-rs-device">IPC components fail on a sudo-rs device</Link> for the diagnosis and the fix.
+
+## Automatic versioning
+
+Set `ComponentVersion` in `recipe.yaml` to `NEXT_PATCH`, `NEXT_MINOR` or `NEXT_MAJOR` to allocate the version at deploy time from the highest version already published in the account and Region:
+
+| Sentinel | Highest published `1.4.2` becomes | Nothing published yet |
+| --- | --- | --- |
+| `NEXT_PATCH` | `1.4.3` | `1.0.0` |
+| `NEXT_MINOR` | `1.5.0` | `1.0.0` |
+| `NEXT_MAJOR` | `2.0.0` | `1.0.0` |
+
+Unchanged content redeploys the published version; changed content publishes the next one. The generator never rewrites `recipe.yaml`. Read <Link path="guides/greengrass-operations#automatic-versioning">automatic versioning</Link> in the operations guide for the resolver's rules, the Terraform resolver's credential requirements, and the quotas that bound a bump-per-deploy habit.
+
+## Next steps
+
+- <Link path="get_started/tutorials/greengrass/overview">Greengrass MQTT tutorial</Link>: Python, CDK, an EC2 core device, a cloud MQTT heartbeat, and a `NEXT_PATCH` update.
+- <Link path="guides/greengrass-operations">Greengrass operations</Link>: versioning, the artifact repository, deployment revisions, retention, teardown and quotas.
+- <Link path="guides/greengrass-device-validation">Validating Greengrass components on real devices</Link>: what each validation tier proves and the defects only a device exposed.
+- <Link path="guides/greengrass-out-of-scope">Greengrass beyond the generators</Link>: provisioning, client devices, containers and other patterns the generator does not scaffold.

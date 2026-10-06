@@ -25,9 +25,16 @@ interface RunCliOpts {
  * Pass `{ preferInstallDependencies: true }` to install after every generator
  * instead — the idempotency test needs this so lockfiles (including `uv.lock`)
  * are fully synced before it snapshots the workspace.
+ *
+ * In the deferred mode the manifests deliberately run ahead of the lockfile
+ * between generators. pnpm 11 checks that before every `pnpm exec nx` and,
+ * under CI, tries a frozen install that fails with ERR_PNPM_OUTDATED_LOCKFILE,
+ * so that check is disabled for this function's own commands only. The caller's
+ * `opts` is copied, never mutated: its later explicit install, sync and build
+ * keep pnpm's default verification.
  */
 export const runGeneratorMatrix = async (
-  opts: RunCliOpts,
+  callerOpts: RunCliOpts,
   {
     preferInstallDependencies = false,
   }: { preferInstallDependencies?: boolean } = {},
@@ -35,6 +42,12 @@ export const runGeneratorMatrix = async (
   const deferFlag = preferInstallDependencies
     ? ''
     : ' --prefer-install-dependencies=false';
+  const opts: RunCliOpts = preferInstallDependencies
+    ? callerOpts
+    : {
+        ...callerOpts,
+        env: { ...callerOpts.env, PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false' },
+      };
   // Websites (with and without TanStack Router), plus auth on each.
   await runCLI(
     `generate @aws/nx-plugin:ts#website --name=website --no-interactive${deferFlag}`,
@@ -542,11 +555,11 @@ export const runGeneratorMatrix = async (
     opts,
   );
 
-  // Greengrass component, escalated to a published component version, plus
-  // the deployment project that publishes and deploys it. `AWS::GreengrassV2`
-  // resources exist in the `hashicorp/awscc` Terraform provider (pinned), so
-  // this runs under both the CDK and Terraform pipelines. A dedicated host
-  // project: vendoring uses `--only-binary :all:`, which refuses the
+  // Greengrass components, each escalated to a published component version.
+  // `AWS::GreengrassV2` resources exist in the `hashicorp/awscc` Terraform
+  // provider (pinned), so this runs under both the CDK and Terraform
+  // pipelines. A dedicated Python host: vendoring uses `--only-binary :all:`,
+  // which refuses the
   // source-built workspace members other matrix entries add to the shared
   // py_project — and one component per project is the documented production
   // default.
@@ -556,22 +569,18 @@ export const runGeneratorMatrix = async (
   );
   // --platform=linux-amd64-arm64 covers the two-artifact path (multiple
   // manifests, multiple built files, the aggregate sha256 key prefix); the
-  // ts#greengrass-component component below stays single-arch on purpose so
-  // the one-artifact key-prefix hinge keeps its CI coverage too.
+  // TypeScript component below stays single-arch on purpose so the
+  // one-artifact key-prefix hinge keeps its CI coverage too.
   // The TypeScript component below carries --ipc=true (the vendored aws-crt
   // addon path) and --componentVersion=NEXT_PATCH (the deploy-time resolver
   // wiring), which no other entry exercises.
   await runCLI(
-    `generate @aws/nx-plugin:py#greengrass-component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --platform=linux-amd64-arm64 --gdkConfig=true --no-interactive${deferFlag}`,
-    opts,
-  );
-  await runCLI(
-    `generate @aws/nx-plugin:greengrass-deployment --name=my-greengrass-deployment --target=thing-group --thingGroupName=my-greengrass-things --no-interactive${deferFlag}`,
+    `generate @aws/nx-plugin:greengrass#component --project=e2e_test.py_greengrass_project --name=my-greengrass-component --language=python --platform=linux-amd64-arm64 --gdkConfig=true --no-interactive${deferFlag}`,
     opts,
   );
 
   // TypeScript Greengrass component. A dedicated host project, mirroring the
-  // py#greengrass-component decision above: the shared `bundle` target this
+  // Python component decision above: the shared `bundle` target this
   // generator wires (via addTypeScriptBundleTarget) rebuilds every bundled
   // entrypoint in its project together, so hosting it alongside the
   // cloud-oriented `my-function` Lambda would couple this device-oriented
@@ -582,14 +591,7 @@ export const runGeneratorMatrix = async (
     opts,
   );
   await runCLI(
-    `generate @aws/nx-plugin:ts#greengrass-component --project=ts-greengrass-project --name=my-ts-greengrass-component --ipc=true --componentVersion=NEXT_PATCH --no-interactive${deferFlag}`,
-    opts,
-  );
-
-  // Connect the deployment to the Python component - the connection generator
-  // writes the component into `my-greengrass-deployment`'s `components` map.
-  await runCLI(
-    `generate @aws/nx-plugin:connection --sourceProject=my-greengrass-deployment --targetProject=e2e_test.py_greengrass_project --no-interactive${deferFlag}`,
+    `generate @aws/nx-plugin:greengrass#component --project=ts-greengrass-project --name=my-ts-greengrass-component --language=typescript --ipc=true --componentVersion=NEXT_PATCH --no-interactive${deferFlag}`,
     opts,
   );
 };

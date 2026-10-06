@@ -5,7 +5,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { ensureDirSync } from 'fs-extra';
-import { createTestWorkspace, runCLI, tmpProjPath } from '../utils';
+import { createTestWorkspace, runCLI, runInstall, tmpProjPath } from '../utils';
 import { runGeneratorMatrix } from './generator-matrix';
 
 /**
@@ -250,6 +250,12 @@ describe('smoke test - idempotency', () => {
     // The compiler is the real arbiter: a sparse array fails to typecheck, and a
     // clobbered Prisma schema or Python model fails to build.
     await runCLI(`sync`, opts);
+    // `nx sync` declares the `workspace:*` dependency the connections above
+    // introduced, which leaves pnpm-lock.yaml behind package.json. Under CI,
+    // pnpm's pre-run dependency check then installs with a frozen lockfile and
+    // fails with ERR_PNPM_OUTDATED_LOCKFILE before the build starts, so install
+    // explicitly (lockfile updates allowed) first.
+    await runInstall(opts);
     await runCLI(`run-many --target build --all --output-style=stream`, opts);
   });
 });

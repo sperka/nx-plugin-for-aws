@@ -1,5 +1,5 @@
 variable "bucket_name" {
-  description = "Name of the shared artifact bucket this component version's artifact is uploaded to - typically the `bucket_name` output of a deployment's `<name>-artifact-bucket` module, whose own `depends_on` orders this upload after the bucket is hardened."
+  description = "Name of the shared artifact bucket this component version's artifact is uploaded to - typically the `bucket_name` output of a `core/greengrass/artifact-bucket` module, whose own `depends_on` orders this upload after the bucket is hardened."
   type        = string
 }
 

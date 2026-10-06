@@ -1172,6 +1172,14 @@ p.badges > a {
   color: var(--sl-color-gray-4);
 }
 
+.command-card-boolean-select {
+  cursor: pointer;
+}
+
+.command-card-boolean-select:disabled {
+  cursor: default;
+}
+
 .command-card-input:focus-visible {
   outline: none;
   border-color: var(--sl-color-accent);
@@ -1257,6 +1265,7 @@ p.badges > a {
 /* A locked option belongs to a walkthrough step: it states its value rather than
    inviting a change. */
 .command-card-field.is-locked .command-card-input,
+.command-card-field.is-locked .command-card-boolean-select,
 .command-card-field.is-locked .command-card-pill,
 .command-card-field.is-locked .command-card-check input {
   cursor: default;

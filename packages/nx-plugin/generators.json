@@ -88,24 +88,16 @@
         "connection/agentcore-gateway-mcp",
         "connection/agentcore-gateway-gateway",
         "connection/agentcore-gateway-agent",
-        "connection/react-agentcore-gateway",
-        "connection/greengrass-deployment-greengrass-component"
+        "connection/react-agentcore-gateway"
       ]
     },
-    "greengrass-deployment": {
-      "factory": "./src/greengrass-deployment/generator",
-      "schema": "./src/greengrass-deployment/schema.json",
-      "description": "Generate a Greengrass deployment project, vending component-version and deployment infrastructure",
-      "metric": "g74",
-      "guidePages": ["greengrass-deployment"],
+    "greengrass#component": {
+      "factory": "./src/greengrass/component/generator",
+      "schema": "./src/greengrass/component/schema.json",
+      "description": "Add an AWS IoT Greengrass component to an existing Python or TypeScript project",
+      "metric": "g77",
+      "guidePages": ["greengrass-component", "greengrass-operations"],
       "experimental": true
-    },
-    "greengrass-deployment#component-connection": {
-      "factory": "./src/greengrass-deployment/component-connection/generator",
-      "schema": "./src/greengrass-deployment/component-connection/schema.json",
-      "description": "Connect a Greengrass component to a greengrass-deployment project, adding it to the deployment's component map",
-      "metric": "g76",
-      "hidden": true
     },
     "license": {
       "factory": "./src/license/generator",
@@ -184,14 +176,6 @@
       "metric": "g4",
       "hidden": true
     },
-    "py#greengrass-component": {
-      "factory": "./src/py/greengrass-component/generator",
-      "schema": "./src/py/greengrass-component/schema.json",
-      "description": "Add an AWS IoT Greengrass component to a Python project",
-      "metric": "g73",
-      "guidePages": ["py-greengrass-component"],
-      "experimental": true
-    },
     "py#lambda-function": {
       "factory": "./src/py/lambda-function/generator",
       "schema": "./src/py/lambda-function/schema.json",
@@ -269,14 +253,6 @@
       "metric": "g37",
       "guidePages": ["astro-docs"],
       "hidden": true
-    },
-    "ts#greengrass-component": {
-      "factory": "./src/ts/greengrass-component/generator",
-      "schema": "./src/ts/greengrass-component/schema.json",
-      "description": "Add an AWS IoT Greengrass component to a TypeScript project",
-      "metric": "g75",
-      "guidePages": ["ts-greengrass-component"],
-      "experimental": true
     },
     "ts#infra": {
       "factory": "./src/infra/app/generator",

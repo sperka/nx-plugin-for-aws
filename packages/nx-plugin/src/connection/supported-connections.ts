@@ -17,7 +17,6 @@ export const SUPPORTED_PROJECT_TYPES = [
   'ts#dynamodb',
   'py#dynamodb',
   'agentcore-gateway',
-  'greengrass-deployment',
 ] as const;
 
 // The single source of truth for supported connections, in a dependency-free
@@ -59,8 +58,6 @@ export const SUPPORTED_CONNECTIONS = [
   { source: 'py#fast-api', target: 'py#rdb' },
   { source: 'py#agent', target: 'py#rdb' },
   { source: 'py#mcp-server', target: 'py#rdb' },
-  { source: 'greengrass-deployment', target: 'py#greengrass-component' },
-  { source: 'greengrass-deployment', target: 'ts#greengrass-component' },
 ] as const satisfies readonly Connection[];
 
 // `<source> -> <target>` string union of every supported connection. Used to

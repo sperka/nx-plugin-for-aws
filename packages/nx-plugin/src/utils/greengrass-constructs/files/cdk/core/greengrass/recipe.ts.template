@@ -3,7 +3,7 @@ import yaml from 'js-yaml';
 /**
  * A deliberately narrow view of a Greengrass v2 recipe: only the fields this
  * construct reads or rewrites. There is no full model here and no drift
- * surface against the recipe zod schema `py#greengrass-component` validates
+ * surface against the recipe zod schema `greengrass#component` validates
  * with (`src/utils/greengrass/recipe.ts` in the plugin) - this file only ever
  * runs at synth time, on a recipe that generator has already validated.
  */

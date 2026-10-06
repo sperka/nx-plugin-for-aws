@@ -20,12 +20,15 @@ import ts from 'typescript';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import terraformProjectGenerator from '../../terraform/project/generator.js';
 import { declareDependencies } from '../declared-dependencies.js';
+import {
+  SHARED_CONSTRUCTS_DEPENDENCIES,
+  sharedConstructsGenerator,
+} from '../shared-constructs.js';
 import { createTreeUsingTsSolutionSetup } from '../test.js';
 import { cdkLambdaRuntime } from '../versions.js';
 import {
   addGreengrassComponentAppConstruct,
   addGreengrassCoreConstructs,
-  addGreengrassDeploymentAppConstruct,
   GREENGRASS_CONSTRUCTS_DEPENDENCIES,
 } from './greengrass-constructs.js';
 
@@ -165,19 +168,19 @@ interface ComponentVersionModuleShape {
   };
 }
 
+interface GreengrassDeploymentInstance {
+  readonly thingGroup?: unknown;
+  readonly targetArn: unknown;
+  readonly deployment: import('aws-cdk-lib').CfnResource;
+  addComponent: (...args: any[]) => GreengrassDeploymentInstance;
+}
+
 interface DeploymentModuleShape {
   readonly GreengrassDeployment: new (
     scope: import('constructs').Construct,
     id: string,
     props: any,
-  ) => {
-    readonly thingGroup?: unknown;
-    readonly targetArn: unknown;
-    readonly deployment: import('aws-cdk-lib').CfnResource;
-    dependOn: (
-      ...componentVersions: import('constructs').IDependable[]
-    ) => unknown;
-  };
+  ) => GreengrassDeploymentInstance;
 }
 
 interface SynthesizedResource {
@@ -1336,160 +1339,247 @@ describe('GreengrassDeployment', () => {
     expect(deployment.thingGroup).toBeDefined();
   });
 
-  it('uses resolved componentVersions to override declared component versions', () => {
+  const addComponent = (
+    stack: import('aws-cdk-lib').Stack,
+    id: string,
+    componentName: string,
+    componentVersion: string,
+  ) => {
+    const { recipesDir, artifactsDir } = writeBuildOutput(
+      componentName,
+      componentVersion,
+      `${id} artifact`,
+    );
+    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
+      stack,
+      `${id}Bucket`,
+    );
+    return new ComponentVersionModule.GreengrassComponentVersion(stack, id, {
+      recipesDir,
+      artifactsDir,
+      bucket,
+    });
+  };
+
+  it('adds a fixed component with an explicit deployment dependency', () => {
     const app = new cdkLib.App();
     const stack = new cdkLib.Stack(app, 'TestStack');
     const deployment = new DeploymentModule.GreengrassDeployment(
       stack,
       'Deployment',
-      {
-        thingGroupName: 'my-things',
-        components: {
-          'com.example.NextVersion': { componentVersion: 'NEXT_PATCH' },
-        },
-        componentVersions: {
-          'com.example.NextVersion': '1.0.1',
-        },
-      },
+      { thingGroupName: 'my-things' },
     );
+    const component = addComponent(
+      stack,
+      'Component',
+      'com.example.Fixed',
+      '1.0.0',
+    );
+    deployment.addComponent(component);
 
     const resources = assertionsLib.Template.fromStack(stack).toJSON()
       .Resources as Record<string, any>;
+    const deploymentResource =
+      resources[stack.getLogicalId(deployment.deployment)];
+    const componentLogicalId = stack.getLogicalId(
+      component.cfnComponentVersion,
+    );
+    expect(deploymentResource.DependsOn).toContain(componentLogicalId);
     expect(
-      resources[stack.getLogicalId(deployment.deployment)].Properties
-        .Components['com.example.NextVersion'].ComponentVersion,
-    ).toBe('1.0.1');
+      deploymentResource.Properties.Components['com.example.Fixed']
+        .ComponentVersion,
+    ).toBe('1.0.0');
   });
 
-  it('reports an unwired sentinel at synth and rejects an override for an unknown component', () => {
+  it('uses the published version resource token for NEXT_* components', () => {
     const app = new cdkLib.App();
     const stack = new cdkLib.Stack(app, 'TestStack');
-    new DeploymentModule.GreengrassDeployment(stack, 'Sentinel', {
-      thingGroupName: 'my-things',
+    const component = addComponent(
+      stack,
+      'Component',
+      'com.example.Next',
+      'NEXT_PATCH',
+    );
+    const deployment = new DeploymentModule.GreengrassDeployment(
+      stack,
+      'Deployment',
+      { thingGroupName: 'my-things' },
+    ).addComponent(component);
+    const resources = assertionsLib.Template.fromStack(stack).toJSON()
+      .Resources as Record<string, any>;
+    const componentLogicalId = stack.getLogicalId(
+      component.cfnComponentVersion,
+    );
+    const deploymentResource =
+      resources[stack.getLogicalId(deployment.deployment)];
+    // The published version's own attribute, not the resolver's token.
+    expect(
+      deploymentResource.Properties.Components['com.example.Next']
+        .ComponentVersion,
+    ).toEqual({
+      'Fn::GetAtt': [componentLogicalId, 'ComponentVersion'],
+    });
+    // The GetAtt already orders the deployment; the explicit edge is kept so
+    // fixed and sentinel versions behave alike.
+    expect(deploymentResource.DependsOn).toContain(componentLogicalId);
+  });
+
+  it('accumulates components and makes repeated registration idempotent', () => {
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const deployment = new DeploymentModule.GreengrassDeployment(
+      stack,
+      'Deployment',
+      { thingGroupName: 'my-things' },
+    );
+    const first = addComponent(stack, 'First', 'com.example.First', '1.0.0');
+    const second = addComponent(stack, 'Second', 'com.example.Second', '1.0.0');
+    deployment.addComponent(first).addComponent(second).addComponent(first);
+
+    const resources = assertionsLib.Template.fromStack(stack).toJSON()
+      .Resources as Record<string, any>;
+    const deploymentResource =
+      resources[stack.getLogicalId(deployment.deployment)];
+    expect(
+      Object.keys(deploymentResource.Properties.Components).sort(),
+    ).toEqual(['com.example.First', 'com.example.Second']);
+    // Two components in one fleet: the deployment resource waits for both
+    // published versions, and re-adding one does not duplicate the edge.
+    const firstId = stack.getLogicalId(first.cfnComponentVersion);
+    const secondId = stack.getLogicalId(second.cfnComponentVersion);
+    expect(deploymentResource.DependsOn).toContain(firstId);
+    expect(deploymentResource.DependsOn).toContain(secondId);
+    expect(
+      deploymentResource.DependsOn.filter((id: string) => id === firstId),
+    ).toHaveLength(1);
+    // The edge sits on the deployment L1 only: the thing group created next
+    // to it must not wait for the component versions.
+    expect(
+      resources[stack.getLogicalId(deployment.thingGroup as any)].DependsOn,
+    ).toBeUndefined();
+  });
+
+  it('preserves raw configuration and runWith, replaces top-level overrides, and keeps caller input unchanged', () => {
+    const input = {
+      'com.example.Raw': {
+        componentVersion: '1.0.0',
+        configurationUpdate: { merge: { retained: true } },
+        runWith: { posixUser: 'ggc_user' },
+      },
+    };
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const component = addComponent(
+      stack,
+      'Component',
+      'com.example.Raw',
+      '1.0.1',
+    );
+    const deployment = new DeploymentModule.GreengrassDeployment(
+      stack,
+      'Deployment',
+      { thingGroupName: 'my-things', components: input },
+    );
+    deployment.addComponent(component);
+    expect(
+      (deployment.deployment as any).components?.['com.example.Raw'],
+    ).toMatchObject({
+      componentVersion: '1.0.1',
+      configurationUpdate: { merge: JSON.stringify({ retained: true }) },
+      runWith: { posixUser: 'ggc_user' },
+    });
+    deployment.addComponent(component, {
+      configurationUpdate: { reset: ['/replace'] },
+      runWith: { windowsUser: 'Administrator' },
+      componentVersion: 'hostile' as never,
+    } as any);
+
+    const rendered =
+      assertionsLib.Template.fromStack(stack).toJSON().Resources[
+        stack.getLogicalId(deployment.deployment)
+      ].Properties.Components['com.example.Raw'];
+    expect(rendered.ComponentVersion).toBe('1.0.1');
+    expect(rendered.ConfigurationUpdate).toEqual({ Reset: ['/replace'] });
+    expect(rendered.RunWith).toEqual({ WindowsUser: 'Administrator' });
+    expect(input['com.example.Raw']).toEqual({
+      componentVersion: '1.0.0',
+      configurationUpdate: { merge: { retained: true } },
+      runWith: { posixUser: 'ggc_user' },
+    });
+  });
+
+  it('rejects a different construct with the same component name', () => {
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    const deployment = new DeploymentModule.GreengrassDeployment(
+      stack,
+      'Deployment',
+      { thingGroupName: 'my-things' },
+    );
+    deployment.addComponent(
+      addComponent(stack, 'First', 'com.example.Duplicate', '1.0.0'),
+    );
+    expect(() =>
+      deployment.addComponent(
+        addComponent(stack, 'Second', 'com.example.Duplicate', '1.0.1'),
+      ),
+    ).toThrow(/different GreengrassComponentVersion/);
+  });
+
+  it('keeps raw entries and empty deployments valid, and reports raw sentinels', () => {
+    const app = new cdkLib.App();
+    const stack = new cdkLib.Stack(app, 'TestStack');
+    new DeploymentModule.GreengrassDeployment(stack, 'Empty', {
+      thingGroupName: 'empty',
+    });
+    new DeploymentModule.GreengrassDeployment(stack, 'ConfigOnly', {
+      thingGroupName: 'config',
       components: {
-        'com.example.NextVersion': { componentVersion: 'NEXT_PATCH' },
+        'com.example.Config': {
+          configurationUpdate: { reset: ['/enabled'] },
+        },
+      },
+    });
+    new DeploymentModule.GreengrassDeployment(stack, 'Sentinel', {
+      thingGroupName: 'sentinel',
+      components: {
+        'com.example.Next': { componentVersion: 'NEXT_PATCH' },
       },
     });
     expect(() => app.synth()).toThrow(
-      /TestStack\/Sentinel.*com\.example\.NextVersion.*deployment\.dependOn\(myComponent\).*componentVersions/s,
+      /com\.example\.Next.*addComponent\(myComponent\)/s,
     );
-    expect(
-      () =>
-        new DeploymentModule.GreengrassDeployment(stack, 'UnknownOverride', {
-          thingGroupName: 'my-other-things',
-          components: {},
-          componentVersions: { 'com.example.Unknown': '1.0.0' },
-        }),
-    ).toThrow(/componentVersions names "com\.example\.Unknown"/);
   });
 
-  it('dependOn orders the deployment and wires the resolved component version', () => {
-    const { recipesDir, artifactsDir } = writeBuildOutput(
-      'com.example.DependOnOrdering',
-      'NEXT_PATCH',
-      'artifact bytes',
-    );
-
+  it('allows one component construct to be registered with two deployments and retains raw L1 dependency wiring', () => {
     const app = new cdkLib.App();
     const stack = new cdkLib.Stack(app, 'TestStack');
-    const deployment = new DeploymentModule.GreengrassDeployment(
+    const component = addComponent(
       stack,
-      'Deployment',
-      {
-        thingGroupName: 'my-things',
-        components: {
-          'com.example.DependOnOrdering': { componentVersion: 'NEXT_PATCH' },
-        },
-      },
+      'Component',
+      'com.example.Shared',
+      '1.0.0',
     );
-    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
-      stack,
-      'ArtifactBucket',
-    );
-    const componentVersion =
-      new ComponentVersionModule.GreengrassComponentVersion(
-        stack,
-        'ComponentVersion',
-        { recipesDir, artifactsDir, bucket },
-      );
-
-    deployment.dependOn(componentVersion);
-
-    const json = assertionsLib.Template.fromStack(stack).toJSON();
-    const resources = json.Resources as Record<string, any>;
-    const deploymentResource =
-      resources[stack.getLogicalId(deployment.deployment)];
-    const dependsOn: string[] = Array.isArray(deploymentResource.DependsOn)
-      ? deploymentResource.DependsOn
-      : [deploymentResource.DependsOn].filter(Boolean);
-
-    // CloudFormation creates unrelated resources in parallel; without this edge
-    // the IoT job can reach devices before the version exists in the registry.
-    const componentVersionLogicalId = stack.getLogicalId(
-      componentVersion.cfnComponentVersion,
-    );
-    expect(resources[componentVersionLogicalId].Type).toBe(
-      'AWS::GreengrassV2::ComponentVersion',
-    );
-    expect(dependsOn).toContain(componentVersionLogicalId);
-    expect(
-      deploymentResource.Properties.Components['com.example.DependOnOrdering']
-        .ComponentVersion,
-    ).toEqual({
-      'Fn::GetAtt': [componentVersionLogicalId, 'ComponentVersion'],
+    const first = new DeploymentModule.GreengrassDeployment(stack, 'First', {
+      thingGroupName: 'first',
+    }).addComponent(component);
+    const second = new DeploymentModule.GreengrassDeployment(stack, 'Second', {
+      thingGroupName: 'second',
+    }).addComponent(component);
+    const raw = new cdkLib.CfnResource(stack, 'RawVersion', {
+      type: 'AWS::GreengrassV2::ComponentVersion',
     });
-  });
-
-  it('componentVersions wired from a sentinel component orders the deployment after the published version', () => {
-    const componentName = 'com.example.WiredOrdering';
-    const { recipesDir, artifactsDir } = writeBuildOutput(
-      componentName,
-      'NEXT_PATCH',
-      'artifact bytes',
-    );
-
-    const app = new cdkLib.App();
-    const stack = new cdkLib.Stack(app, 'TestStack');
-    const bucket = new ArtifactBucketModule.GreengrassArtifactBucket(
-      stack,
-      'ArtifactBucket',
-    );
-    const sentinelComponent =
-      new ComponentVersionModule.GreengrassComponentVersion(
-        stack,
-        'ComponentVersion',
-        { recipesDir, artifactsDir, bucket },
-      );
-    const deployment = new DeploymentModule.GreengrassDeployment(
-      stack,
-      'Deployment',
-      {
-        thingGroupName: 'my-things',
-        components: { [componentName]: { componentVersion: 'NEXT_PATCH' } },
-        componentVersions: {
-          [sentinelComponent.componentName]: sentinelComponent.componentVersion,
-        },
-      },
-    );
+    first.deployment.node.addDependency(raw);
 
     const resources = assertionsLib.Template.fromStack(stack).toJSON()
       .Resources as Record<string, any>;
-    const deploymentResource =
-      resources[stack.getLogicalId(deployment.deployment)];
-    const publishedVersionLogicalId = stack.getLogicalId(
-      sentinelComponent.cfnComponentVersion,
-    );
-
-    // No dependOn call here: the GetAtt on the published version is itself the
-    // ordering edge, so CloudFormation cannot create the deployment first.
-    expect(deploymentResource.DependsOn ?? []).not.toContain(
-      publishedVersionLogicalId,
+    const rawId = stack.getLogicalId(raw);
+    expect(resources[stack.getLogicalId(first.deployment)].DependsOn).toContain(
+      rawId,
     );
     expect(
-      deploymentResource.Properties.Components[componentName].ComponentVersion,
-    ).toEqual({
-      'Fn::GetAtt': [publishedVersionLogicalId, 'ComponentVersion'],
-    });
+      resources[stack.getLogicalId(second.deployment)].DependsOn,
+    ).toContain(stack.getLogicalId(component.cfnComponentVersion));
   });
 
   it('imports an existing thing by name without creating a thing group', () => {
@@ -1640,7 +1730,7 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     );
   });
 
-  it('vends the shared next-version resolver and CDK carrier with overwrite', async () => {
+  it('preserves customized core and resolver files on later component runs', async () => {
     await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
     const terraformResolver =
       'packages/common/terraform/src/core/greengrass/component-version/next-version.cjs';
@@ -1649,10 +1739,20 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
       'exports.resolveNextVersion',
     );
     tree.write(terraformResolver, 'stale terraform resolver');
+    tree.write(
+      'packages/common/terraform/src/tests/greengrass.tftest.hcl',
+      '# custom terraform fixture',
+    );
     await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
-    expect(tree.read(terraformResolver, 'utf-8')).not.toBe(
+    expect(tree.read(terraformResolver, 'utf-8')).toBe(
       'stale terraform resolver',
     );
+    expect(
+      tree.read(
+        'packages/common/terraform/src/tests/greengrass.tftest.hcl',
+        'utf-8',
+      ),
+    ).toBe('# custom terraform fixture');
 
     tree.write(
       'packages/common/constructs/package.json',
@@ -1667,7 +1767,7 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     );
     tree.write(cdkResolver, 'stale cdk resolver');
     await addGreengrassCoreConstructs(tree, { iac: 'cdk' }, declaration);
-    expect(tree.read(cdkResolver, 'utf-8')).not.toBe('stale cdk resolver');
+    expect(tree.read(cdkResolver, 'utf-8')).toBe('stale cdk resolver');
 
     const cdkNextVersion = tree.read(
       'packages/common/constructs/src/core/greengrass/next-version.ts',
@@ -1690,7 +1790,8 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
       'packages/common/constructs/src/core/greengrass/deployment.ts',
       'utf-8',
     )!;
-    expect(cdkDeployment).toContain('componentVersions');
+    expect(cdkDeployment).toContain('addComponent(');
+    expect(cdkDeployment).not.toContain('componentVersions');
     expect(cdkDeployment).toContain('addValidation');
     expect(cdkDeployment).toContain(
       'this.deployment.components = this.renderComponents();',
@@ -1853,7 +1954,7 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     );
     expect(content).toContain('next_version_sentinel_components');
     expect(content).toContain(
-      'component_versions = { (module.<x>.component_name) = module.<x>.component_version }',
+      'components = { (module.<x>.component_name) = { component_version = module.<x>.component_version } }',
     );
   });
 
@@ -1910,48 +2011,6 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     expect(content).not.toContain('yamlencode(');
   });
 
-  it('suppresses the checkov secret check on a literal token exchange role arn', async () => {
-    await addGreengrassDeploymentAppConstruct(
-      tree,
-      {
-        iac: 'terraform',
-        name: 'MyDeployment',
-        nameClassName: 'MyDeployment',
-        nameKebabCase: 'my-deployment',
-        targetPropLine: `thingGroupName: 'my-things',`,
-        targetPropLineTf: `thing_group_name = "my-things"`,
-        targetDescription: 'a new thing group ("my-things")',
-        parentTargetArn: undefined,
-        tokenExchangeRoleArn: 'arn:aws:iam::123456789012:role/GreengrassTes',
-        tokenExchangeKeyPrefix: undefined,
-        artifactBucketImported: false,
-        artifactBucketName: undefined,
-        deploymentPoliciesLiteral: undefined,
-        deploymentPoliciesLiteralTf: undefined,
-        libraryImportPath: '@proj/my-deployment',
-        componentsJsonPathFromRoot:
-          'packages/my-deployment/src/components.json',
-      },
-      declaration,
-    );
-
-    const content = tree.read(
-      'packages/common/terraform/src/app/greengrass-deployment/my-deployment-artifact-bucket/my-deployment-artifact-bucket.tf',
-      'utf-8',
-    );
-    // checkov's entropy detector fires on any assignment whose name contains
-    // "token", so a documented option would otherwise fail the generated
-    // workspace's own `build` target on its first run. Only a comment on the
-    // line immediately above the assignment suppresses it.
-    expect(content).toContain('#checkov:skip=CKV_SECRET_6');
-    const lines = content.split('\n');
-    const assignment = lines.findIndex((l) =>
-      l.includes('token_exchange_role_arn ='),
-    );
-    expect(assignment).toBeGreaterThan(0);
-    expect(lines[assignment - 1]).toContain('#checkov:skip=CKV_SECRET_6');
-  });
-
   it('grants s3:GetObject, scoped to the given prefix, when a token exchange role is configured', async () => {
     await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
 
@@ -2002,11 +2061,19 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
     expect(content).toContain('data.aws_region.current[0].region');
   });
 
-  it('is idempotent: re-running fully regenerates the framework-owned core modules', async () => {
+  it('preserves customized core modules while adding missing files', async () => {
     await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
-    const before = readCore('deployment');
+    tree.write(
+      'packages/common/terraform/src/core/greengrass/deployment/main.tf',
+      '# user customization',
+    );
     await addGreengrassCoreConstructs(tree, { iac: 'terraform' }, declaration);
-    expect(readCore('deployment')).toBe(before);
+    expect(readCore('deployment')).toBe('# user customization');
+    expect(
+      tree.exists(
+        'packages/common/terraform/src/core/greengrass/artifact-bucket/main.tf',
+      ),
+    ).toBe(true);
   });
 
   it('adds only the resolver SDK at the root on the Terraform path', async () => {
@@ -2123,124 +2190,6 @@ describe('terraform app modules', () => {
     );
   });
 
-  it('vends the deployment and artifact-bucket modules as separate sibling directories, to avoid a dependency cycle', async () => {
-    await addGreengrassDeploymentAppConstruct(
-      tree,
-      {
-        iac: 'terraform',
-        name: 'MyDeployment',
-        nameClassName: 'MyDeployment',
-        nameKebabCase: 'my-deployment',
-        targetPropLine: `thingGroupName: 'my-things',`,
-        targetPropLineTf: `thing_group_name = "my-things"`,
-        targetDescription: 'a new thing group ("my-things")',
-        parentTargetArn: undefined,
-        tokenExchangeRoleArn: undefined,
-        tokenExchangeKeyPrefix: undefined,
-        artifactBucketImported: false,
-        artifactBucketName: undefined,
-        deploymentPoliciesLiteral: undefined,
-        deploymentPoliciesLiteralTf: undefined,
-        libraryImportPath: '@proj/my-deployment',
-        componentsJsonPathFromRoot:
-          'packages/my-deployment/src/components.json',
-      },
-      declaration,
-    );
-
-    const deploymentPath =
-      'packages/common/terraform/src/app/greengrass-deployment/my-deployment/my-deployment.tf';
-    const bucketPath =
-      'packages/common/terraform/src/app/greengrass-deployment/my-deployment-artifact-bucket/my-deployment-artifact-bucket.tf';
-    expect(tree.exists(deploymentPath)).toBe(true);
-    expect(tree.exists(bucketPath)).toBe(true);
-
-    const deploymentContent = tree.read(deploymentPath, 'utf-8')!;
-    expect(deploymentContent).toContain('thing_group_name = "my-things"');
-    expect(deploymentContent).toContain(
-      'packages/my-deployment/src/components.json',
-    );
-    expect(deploymentContent).toContain('variable "component_versions"');
-    expect(deploymentContent).toContain(
-      'component_version = lookup(var.component_versions, name, try(entry.component_version, null))',
-    );
-    // A mistyped override key fails the plan instead of being dropped.
-    expect(deploymentContent).toContain(
-      'resource "terraform_data" "component_versions_guard"',
-    );
-    // Neither module block references the other - the caller wires the
-    // ordering itself with `depends_on` on the `deployment` module block.
-    expect(deploymentContent).not.toContain('module "artifact_bucket"');
-
-    const bucketContent = tree.read(bucketPath, 'utf-8')!;
-    expect(bucketContent).toContain(
-      'source = "../../../core/greengrass/artifact-bucket"',
-    );
-    // F7: a created (not imported) bucket gets a name tied to this
-    // deployment, not the module's own AWS-generated default.
-    expect(bucketContent).toContain(
-      'bucket_name_prefix = "my-deployment-artifacts"',
-    );
-  });
-
-  it('renders the imported-bucket and token-exchange-role branches without leftover EJS tags', async () => {
-    await addGreengrassDeploymentAppConstruct(
-      tree,
-      {
-        iac: 'terraform',
-        name: 'MyDeployment',
-        nameClassName: 'MyDeployment',
-        nameKebabCase: 'my-deployment',
-        targetPropLine: `targetArn: 'arn:aws:iot:us-east-1:111111111111:thinggroup/my-group',`,
-        targetPropLineTf: `target_arn = "arn:aws:iot:us-east-1:111111111111:thinggroup/my-group"`,
-        targetDescription: 'an existing target',
-        parentTargetArn:
-          'arn:aws:iot:us-east-1:111111111111:thinggroup/parent-group',
-        tokenExchangeRoleArn:
-          'arn:aws:iam::111111111111:role/GreengrassTokenExchangeRole',
-        tokenExchangeKeyPrefix: 'com.example.MyComponent/*',
-        artifactBucketImported: true,
-        artifactBucketName: 'my-existing-bucket',
-        deploymentPoliciesLiteral: `{ failureHandlingPolicy: 'DO_NOTHING' }`,
-        deploymentPoliciesLiteralTf: `{ failure_handling_policy = "DO_NOTHING" }`,
-        libraryImportPath: '@proj/my-deployment',
-        componentsJsonPathFromRoot:
-          'packages/my-deployment/src/components.json',
-      },
-      declaration,
-    );
-
-    const deploymentContent = tree.read(
-      'packages/common/terraform/src/app/greengrass-deployment/my-deployment/my-deployment.tf',
-      'utf-8',
-    )!;
-    expect(deploymentContent).not.toContain('<%');
-    expect(deploymentContent).toContain(
-      'parent_target_arn = "arn:aws:iot:us-east-1:111111111111:thinggroup/parent-group"',
-    );
-    expect(deploymentContent).toContain(
-      'deployment_policies = { failure_handling_policy = "DO_NOTHING" }',
-    );
-
-    const bucketContent = tree.read(
-      'packages/common/terraform/src/app/greengrass-deployment/my-deployment-artifact-bucket/my-deployment-artifact-bucket.tf',
-      'utf-8',
-    )!;
-    expect(bucketContent).not.toContain('<%');
-    expect(bucketContent).toContain(
-      'existing_bucket_name = "my-existing-bucket"',
-    );
-    // bucket_name_prefix only matters for a created bucket - importing one
-    // ignores every creation setting, so it must not be emitted here.
-    expect(bucketContent).not.toContain('bucket_name_prefix');
-    expect(bucketContent).toContain(
-      'token_exchange_role_arn = "arn:aws:iam::111111111111:role/GreengrassTokenExchangeRole"',
-    );
-    expect(bucketContent).toContain(
-      'token_exchange_key_prefix = "com.example.MyComponent/*"',
-    );
-  });
-
   it('is idempotent: re-running twice registers the artifact dependency exactly once', async () => {
     const options = {
       iac: 'terraform' as const,
@@ -2262,6 +2211,101 @@ describe('terraform app modules', () => {
     );
     expect(
       sharedTerraformConfig.targets.build.dependsOn.filter(
+        (d: string) => d === 'my-project:build',
+      ),
+    ).toHaveLength(1);
+  });
+});
+
+describe('cdk app constructs', () => {
+  let tree: Tree;
+  const declaration = declareDependencies()({
+    ts: [...GREENGRASS_CONSTRUCTS_DEPENDENCIES],
+  });
+  const options = {
+    iac: 'cdk' as const,
+    componentNameClassName: 'MyComponent',
+    componentDisplayName: 'com.example.MyComponent',
+    componentDirName: 'my-component',
+    project: 'my-project',
+    hostProjectName: 'my-project',
+    recipesDirFromRoot:
+      'dist/apps/my-project/greengrass/my-component/greengrass-build/recipes',
+    artifactsDirFromRoot:
+      'dist/apps/my-project/greengrass/my-component/greengrass-build/artifacts',
+  };
+  const appConstructPath =
+    'packages/common/constructs/src/app/greengrass/my-component.ts';
+
+  const occurrences = (path: string, needle: string): number =>
+    (tree.read(path, 'utf-8') ?? '').split(needle).length - 1;
+
+  beforeEach(async () => {
+    tree = createTreeUsingTsSolutionSetup();
+    await sharedConstructsGenerator(
+      tree,
+      { iac: 'cdk' },
+      declareDependencies()({ ts: [...SHARED_CONSTRUCTS_DEPENDENCIES] }),
+    );
+  });
+
+  it('vends the app construct at app/greengrass/<component>.ts as a GreengrassComponentVersion subclass', async () => {
+    await addGreengrassComponentAppConstruct(tree, options, declaration);
+
+    const content = tree.read(appConstructPath, 'utf-8')!;
+    expect(content).toContain(
+      'export class MyComponent extends GreengrassComponentVersion',
+    );
+    expect(content).toContain("from '../../core/greengrass/index.js'");
+    expect(content).toContain(
+      'dist/apps/my-project/greengrass/my-component/greengrass-build/recipes',
+    );
+    expect(content).toContain(
+      'dist/apps/my-project/greengrass/my-component/greengrass-build/artifacts',
+    );
+    expect(
+      tree.read(
+        'packages/common/constructs/src/app/greengrass/index.ts',
+        'utf-8',
+      ),
+    ).toContain("export * from './my-component.js';");
+    expect(
+      tree.read('packages/common/constructs/src/app/index.ts', 'utf-8'),
+    ).toContain("export * from './greengrass/index.js';");
+    expect(
+      tree.read('packages/common/constructs/src/core/index.ts', 'utf-8'),
+    ).toContain("export * from './greengrass/index.js';");
+  });
+
+  it('preserves an edited app construct and adds exports and the artifact edge once across re-runs', async () => {
+    await addGreengrassComponentAppConstruct(tree, options, declaration);
+    tree.write(appConstructPath, '// user customization');
+    await addGreengrassComponentAppConstruct(tree, options, declaration);
+
+    expect(tree.read(appConstructPath, 'utf-8')).toBe('// user customization');
+    expect(
+      occurrences(
+        'packages/common/constructs/src/app/greengrass/index.ts',
+        "export * from './my-component.js';",
+      ),
+    ).toBe(1);
+    expect(
+      occurrences(
+        'packages/common/constructs/src/app/index.ts',
+        "export * from './greengrass/index.js';",
+      ),
+    ).toBe(1);
+    expect(
+      occurrences(
+        'packages/common/constructs/src/core/index.ts',
+        "export * from './greengrass/index.js';",
+      ),
+    ).toBe(1);
+    const sharedConstructsConfig = JSON.parse(
+      tree.read('packages/common/constructs/project.json', 'utf-8') ?? '{}',
+    );
+    expect(
+      sharedConstructsConfig.targets.build.dependsOn.filter(
         (d: string) => d === 'my-project:build',
       ),
     ).toHaveLength(1);

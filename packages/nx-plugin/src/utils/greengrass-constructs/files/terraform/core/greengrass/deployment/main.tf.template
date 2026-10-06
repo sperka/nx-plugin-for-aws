@@ -139,8 +139,8 @@ resource "terraform_data" "guard" {
       error_message = "greengrass deployment requires exactly one of thing_group_name, thing_name or target_arn, got: ${length(local.target_inputs_provided) == 0 ? "(none)" : join(", ", local.target_inputs_provided)}."
     }
     # Evaluated at PLAN time only while this module block carries no
-    # `depends_on`. With one - which the generated app module's doc comment
-    # tells you to add, to order the deployment after its component versions -
+    # `depends_on`. With one - which can order this deployment after a
+    # component module whose version is otherwise known at plan time -
     # Terraform cannot read this module's data sources until that dependency
     # exists, so the identity is unknown at plan and the precondition is
     # deferred to apply. It still fails before the deployment is created,
@@ -162,7 +162,7 @@ resource "terraform_data" "guard" {
     }
     precondition {
       condition     = length(local.next_version_sentinel_components) == 0
-      error_message = "Component(s) ${join(", ", local.next_version_sentinel_components)} use NEXT_* version markers. Wire each resolved component output on the deployment app module: component_versions = { (module.<x>.component_name) = module.<x>.component_version }."
+      error_message = "Component(s) ${join(", ", local.next_version_sentinel_components)} use NEXT_* version markers. Wire each resolved component output directly in components: components = { (module.<x>.component_name) = { component_version = module.<x>.component_version } }."
     }
   }
 }

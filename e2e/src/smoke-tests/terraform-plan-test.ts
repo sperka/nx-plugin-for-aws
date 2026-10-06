@@ -19,8 +19,11 @@ import { runCLI } from '../utils';
  *
  * The wiring is the same `main.tf` the terraform-deploy smoke test applies, so
  * this exercises the identical module graph without deploying anything, plus
- * the Greengrass modules from `files/terraform-plan/greengrass.tf.template` -
- * which are plan-only, and deliberately absent from the applied fixture.
+ * the Greengrass composition from `files/terraform-plan/greengrass.tf.template`
+ * (core artifact-bucket and deployment modules wired to the generated component
+ * modules) - which is plan-only, and deliberately absent from the applied
+ * fixture. `scripts/validate-greengrass-terraform.ts` plans the same Greengrass
+ * composition against templates rendered from the repo, without a workspace.
  */
 /**
  * Plan-only instances of the generated REST and HTTP API modules with a custom
@@ -133,9 +136,35 @@ export const runTerraformPlanTest = async (opts: {
       .filter((p) => p !== 'aws')
       .map((p) => `mock_provider "${p}" {}`),
   ].join('\n');
+  // The TypeScript component carries ComponentVersion: NEXT_PATCH, so its
+  // module reads data.external at plan time. Supply the resolver answer the
+  // mocked provider cannot. The address goes through the retained
+  // `greengrass_ts_component` module label of the plan fixture.
   writeFileSync(
     join(infraSrc, 'plan.tftest.hcl'),
-    `${mocks}\n\nvariables {\n  environment = "test"\n  aws_region  = "us-east-1"\n}\n\nrun "plan" {\n  command = plan\n\n  # The TypeScript component carries ComponentVersion: NEXT_PATCH, so its module\n  # reads data.external at plan time. Supply the resolver answer the mocked\n  # provider cannot.\n  override_data {\n    target = module.greengrass_ts_component.module.component_version.data.external.next_version[0]\n    values = {\n      result = {\n        version     = "1.0.0"\n        action      = "create"\n        highest     = ""\n        content_key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n      }\n    }\n  }\n${CUSTOM_DOMAIN_ASSERTIONS}}\n`,
+    `${mocks}
+
+variables {
+  environment = "test"
+  aws_region  = "us-east-1"
+}
+
+run "plan" {
+  command = plan
+
+  override_data {
+    target = module.greengrass_ts_component.module.component_version.data.external.next_version[0]
+    values = {
+      result = {
+        version     = "1.0.0"
+        action      = "create"
+        highest     = ""
+        content_key = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  }
+${CUSTOM_DOMAIN_ASSERTIONS}}
+`,
   );
 
   await runCLI('terraform test -no-color', {

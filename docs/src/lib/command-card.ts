@@ -88,9 +88,10 @@ export const quoteValue = (value: string) =>
  * The value an option contributes to the command, or undefined when it
  * contributes nothing.
  *
- * A boolean is only passed when it differs from the generator's own default —
- * ticking a box that is on by default should leave the command alone, and
- * clearing one should pass `=false` rather than nothing.
+ * A boolean with a schema default is only passed when it differs from that
+ * default. A boolean without one has three states: omitted, true, and false.
+ * Its explicit values must both reach the generator, whose conditional default
+ * decides the omitted case.
  */
 export const emittedValue = (
   value: string | undefined,
@@ -98,8 +99,9 @@ export const emittedValue = (
 ): string | undefined => {
   if (value === undefined || value === '') return undefined;
   if (option?.control === 'boolean') {
-    const fallback = option.default ?? 'false';
-    return value === fallback ? undefined : value;
+    return option.default === undefined || value !== option.default
+      ? value
+      : undefined;
   }
   return value;
 };

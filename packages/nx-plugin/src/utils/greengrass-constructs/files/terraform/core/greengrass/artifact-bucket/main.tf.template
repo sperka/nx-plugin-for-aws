@@ -47,7 +47,7 @@ variable "token_exchange_role_arn" {
 variable "token_exchange_key_prefix" {
   # Default "*": a core device's token exchange role reads whichever
   # component versions get deployed to it, and that set is not knowable here -
-  # it lives in a sibling `greengrass-deployment` module's `components` map,
+  # it lives in the root module's `components` map,
   # which can gain a new component after this bucket module last ran. Narrow
   # it only when every component this role's device(s) will ever fetch shares
   # a prefix (e.g. one Nx workspace's own component namespace).
@@ -115,8 +115,7 @@ resource "random_string" "bucket_suffix" {
 # Deliberately not a shared build-asset bucket and not one bucket per
 # deployment - component versions are immutable and outlive any single
 # deployment's lifecycle. Own this module in one designated root module
-# (typically the `greengrass-deployment` app module) and import it
-# everywhere else via `existing_bucket_name`.
+# and import it everywhere else via `existing_bucket_name`.
 resource "aws_s3_bucket" "bucket" {
   count = local.creating ? 1 : 0
   #checkov:skip=CKV_AWS_18:Server access logs are not configured; artifacts are immutable published bytes and reads are auditable through CloudTrail data events

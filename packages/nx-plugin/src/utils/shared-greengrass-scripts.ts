@@ -59,7 +59,7 @@ const warnOnStaleDeployLocal = (tree: Tree, greengrassScriptsDir: string) => {
 /**
  * Ensures the shared scripts package exists and adds Greengrass local-build
  * and local-deploy scripts to packages/common/scripts/src/greengrass/. Used
- * by both py#greengrass-component and (later) ts#greengrass-component so a
+ * by greengrass#component for Python and TypeScript hosts so a
  * single set of TypeScript scripts serves both.
  */
 export async function sharedGreengrassScriptsGenerator<

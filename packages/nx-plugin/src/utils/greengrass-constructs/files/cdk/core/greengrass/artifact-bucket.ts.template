@@ -48,8 +48,7 @@ export interface GreengrassArtifactBucketProps {
  * Component versions are immutable and outlive any single deployment's
  * lifecycle, and `cdk gc` can collect an asset object a published version
  * still needs when a new core device joins later. Own this construct in one
- * designated stack (typically the `greengrass-deployment` project's app
- * construct) and import it everywhere else via
+ * designated stack and import it everywhere else via
  * {@link GreengrassArtifactBucketProps.existingBucketName} -
  * `tryFindChild`-style deduplication doesn't reach across stacks, so which
  * stack owns the bucket is a decision this construct leaves to its caller
@@ -97,20 +96,17 @@ export class GreengrassArtifactBucket extends Construct {
   }
 
   /**
-   * Grant `s3:GetObject`, scoped to `keyPrefix`, to `grantee` - the shape the
-   * `tokenExchangeRoleArn` deployment option needs.
+   * Grant `s3:GetObject`, scoped to `keyPrefix`, to a token exchange role or
+   * other caller that retrieves component artifacts.
    *
    * Defaults to the whole bucket (`'*'`) rather than a narrower prefix: a
    * Greengrass core device's token exchange role reads whichever component
-   * versions get deployed to it, and that set lives in this deployment's own
-   * `components` map, which can gain an entry after this grant is created -
-   * there is no generation-time input this default could derive a narrower
-   * prefix from. Pass `keyPrefix` when every component this role's device(s)
-   * will ever fetch is known to share one (e.g. one Nx workspace's own
-   * component namespace). The `tokenExchangeKeyPrefix` generator option bakes
-   * it into the generated app construct at generation time; that construct is
-   * then left alone on a re-run, so an existing deployment narrows its grant
-   * by editing the `grantReadTo` call there.
+   * versions get deployed to it, and callers can add components to a
+   * deployment after this grant is created. Pass `keyPrefix` when every
+   * component this role's device(s) will ever fetch is known to share one
+   * (for example, one component namespace). Call this method from user IaC
+   * with the desired role and prefix; update that call when the ownership or
+   * component namespace changes.
    *
    * Deliberately a single action rather than `bucket.grantRead()`'s broader
    * set (which also adds `s3:GetBucket*` / KMS actions where relevant) - the

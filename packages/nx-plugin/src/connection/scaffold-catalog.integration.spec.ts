@@ -9,12 +9,10 @@ import type { Tree } from '@nx/devkit';
 import GeneratorsJson from '../../generators.json' with { type: 'json' };
 import { agentcoreGatewayGenerator } from '../sdk/agentcore-gateway.js';
 import { connectionGenerator } from '../sdk/connection.js';
-import { greengrassDeploymentGenerator } from '../sdk/greengrass-deployment.js';
 import {
   pyAgentGenerator,
   pyApiGenerator,
   pyDynamoDBGenerator,
-  pyGreengrassComponentGenerator,
   pyMcpServerGenerator,
   pyProjectGenerator,
   pyRdbGenerator,
@@ -23,7 +21,6 @@ import {
   tsAgentGenerator,
   tsApiGenerator,
   tsDynamoDBGenerator,
-  tsGreengrassComponentGenerator,
   tsMcpServerGenerator,
   tsProjectGenerator,
   tsRdbGenerator,
@@ -213,29 +210,6 @@ describe('scaffold catalog integration', () => {
       pyMcpServerGenerator(tree, {
         ...schemaDefaults('py#mcp-server'),
         project: await ensurePyHost(tree, 'py-host'),
-        name,
-        ...defaults,
-        ...options,
-      } as any),
-    'greengrass-deployment': (tree, name, options) =>
-      greengrassDeploymentGenerator(tree, {
-        ...schemaDefaults('greengrass-deployment'),
-        name,
-        ...projectDefaults,
-        ...options,
-      } as any),
-    'py#greengrass-component': async (tree, name, options) =>
-      pyGreengrassComponentGenerator(tree, {
-        ...schemaDefaults('py#greengrass-component'),
-        project: await ensurePyHost(tree, 'py-host'),
-        name,
-        ...defaults,
-        ...options,
-      } as any),
-    'ts#greengrass-component': async (tree, name, options) =>
-      tsGreengrassComponentGenerator(tree, {
-        ...schemaDefaults('ts#greengrass-component'),
-        project: await ensureTsHost(tree, 'ts-host'),
         name,
         ...defaults,
         ...options,

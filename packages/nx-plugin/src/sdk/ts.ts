@@ -24,9 +24,6 @@ export type { TsDocsGeneratorSchema } from '../ts/docs/schema';
 // DynamoDB Generator
 export { tsDynamoDBGenerator } from '../ts/dynamodb/generator.js';
 export type { TsDynamoDBGeneratorSchema } from '../ts/dynamodb/schema';
-// TsGreengrassComponent Generator
-export { tsGreengrassComponentGenerator } from '../ts/greengrass-component/generator';
-export type { TsGreengrassComponentGeneratorSchema } from '../ts/greengrass-component/schema';
 // TypeScript Lambda Function
 export { tsLambdaFunctionGenerator } from '../ts/lambda-function/generator.js';
 export type { TsLambdaFunctionGeneratorSchema } from '../ts/lambda-function/schema';

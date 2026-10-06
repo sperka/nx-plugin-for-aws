@@ -9,7 +9,7 @@ import {
   type ConnectionGeneratorSchema,
   connectionGenerator,
 } from '../../sdk/connection.js';
-import { greengrassDeploymentGenerator } from '../../sdk/greengrass-deployment.js';
+import { greengrassComponentGenerator } from '../../sdk/greengrass.js';
 import { licenseGenerator } from '../../sdk/license.js';
 import {
   type PyAgentGeneratorSchema,
@@ -18,7 +18,6 @@ import {
   pyAgentGenerator,
   pyApiGenerator,
   pyDynamoDBGenerator,
-  pyGreengrassComponentGenerator,
   pyLambdaFunctionGenerator,
   pyMcpServerGenerator,
   pyProjectGenerator,
@@ -36,7 +35,6 @@ import {
   tsDcrProxyGenerator,
   tsDocsGenerator,
   tsDynamoDBGenerator,
-  tsGreengrassComponentGenerator,
   tsInfraGenerator,
   tsLambdaFunctionGenerator,
   tsMcpServerGenerator,
@@ -243,26 +241,15 @@ export const internalTestMatrixGenerator = async (
     type: 'application',
     ...projectDefaults,
   });
-  await pyGreengrassComponentGenerator(tree, {
+  await greengrassComponentGenerator(tree, {
     project: py('py-greengrass-project'),
     name: 'my-greengrass-component',
+    language: 'python',
     platform: 'linux-amd64-arm64',
     gdkConfig: true,
     iac: 'inherit',
     ...defaults,
   });
-  await greengrassDeploymentGenerator(tree, {
-    name: 'my-greengrass-deployment',
-    target: 'thing-group',
-    thingGroupName: 'my-greengrass-things',
-    artifactBucket: 'create',
-    deploymentPolicy: 'default',
-    nucleus: 'classic',
-    infra: 'deployment',
-    iac: 'inherit',
-    ...projectDefaults,
-  });
-
   // The TypeScript component gets a dedicated host project for the same
   // reason: the shared `bundle` target this generator wires rebuilds every
   // bundled entrypoint in its project together, so hosting it alongside
@@ -272,20 +259,13 @@ export const internalTestMatrixGenerator = async (
     name: 'ts-greengrass-project',
     ...projectDefaults,
   });
-  await tsGreengrassComponentGenerator(tree, {
+  await greengrassComponentGenerator(tree, {
     project: 'ts-greengrass-project',
     name: 'my-ts-greengrass-component',
+    language: 'typescript',
     ipc: true,
     componentVersion: 'NEXT_PATCH',
     iac: 'inherit',
-    ...defaults,
-  });
-
-  // Connect the deployment to the Python component - writes it into
-  // `my-greengrass-deployment`'s `components` map.
-  await connectionGenerator(tree, {
-    sourceProject: 'my-greengrass-deployment',
-    targetProject: py('py-greengrass-project'),
     ...defaults,
   });
 

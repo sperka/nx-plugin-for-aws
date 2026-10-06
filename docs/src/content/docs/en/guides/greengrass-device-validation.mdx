@@ -1,11 +1,12 @@
 ---
 title: Validating Greengrass Components on Real Devices
-description: What each Greengrass validation tier proves, and what only a real device can prove
+description: What each Greengrass validation tier proves, what only a real device can prove, and how to diagnose a deployment that succeeded while the component broke
 ---
 
 import Link from '@components/link.astro';
+import NxCommands from '@components/nx-commands.astro';
 
-Greengrass component generators produce software for a physical or virtual core device
+The `greengrass#component` generator produces software for a physical or virtual core device
 managed by the AWS IoT Greengrass nucleus. Unit tests, snapshots, and a successful
 CloudFormation deployment cannot observe every part of that software's correctness.
 
@@ -45,23 +46,61 @@ These defects passed unit tests, built cleanly, and in most cases deployed succe
    This was invisible to every other tier.
 7. **A deployment can report `SUCCEEDED` while the component is `BROKEN`.**
 
-## Two findings to understand before you deploy
+## A Successful Deployment Is Not a Running Component
 
-### `sudo-rs` breaks every IPC component on recent Ubuntu
+A deployment and its IoT job can both report `SUCCEEDED` while the component on the device is
+`BROKEN`. Observed on real hardware: the nucleus logged the component `BROKEN` at
+04:47:50.169Z and wrote `DeploymentStatus=SUCCEEDED` 14 seconds later, at 04:48:04.732Z:
 
-Nucleus 2.18.3 launches each component through `sudo -E`. This is how the component
-receives `AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT` and `SVCUID`.
-Ubuntu 25.10+ ships `sudo-rs` as the default `sudo`.
-`sudo-rs` accepts `-E` and then discards the environment, printing a warning.
-The component starts, imports its architecture-specific native extension successfully,
-and dies:
+```text
+DeploymentStatusKeeper: Stored deployment status. {DeploymentStatus=SUCCEEDED}
+IotJobsHelper: ... {Status=SUCCEEDED, StatusDetails={detailed-deployment-status=SUCCESSFUL}}
+```
+
+The IoT job reported `SUCCEEDED` too, and no rollback happened despite
+`failureHandlingPolicy: ROLLBACK` in the deployment document. `get-core-device` reported the
+device `UNHEALTHY` throughout.
+
+So a green deployment means the device accepted and applied the document, not that anything
+it installed runs. Two things are evidence:
+
+```bash
+# UNHEALTHY means at least one component on the device is not running
+aws --profile <profile> --region <region> greengrassv2 get-core-device \
+  --core-device-thing-name <thing-name> --query status
+
+# the component's own lifecycle state: RUNNING, FINISHED, BROKEN, ERRORED, ...
+aws --profile <profile> --region <region> greengrassv2 list-installed-components \
+  --core-device-thing-name <thing-name>
+```
+
+Check both after every cloud deployment, and treat a CloudFormation stack that reaches
+`UPDATE_COMPLETE` or a completed Terraform apply the same way: it reports that the deployment
+resource was created, nothing about the device. On a development device the
+`<component>-deploy-local` target does this check for you: it polls the component's lifecycle
+state after submitting the local deployment, prints the tail of the component's log, and
+exits non-zero unless the component holds `RUNNING` or `FINISHED` across three checks. Three,
+because the nucleus reports `RUNNING` as soon as it starts the process; a single sample also
+passes for a component that is about to crash.
+
+## IPC Components Fail on a sudo-rs Device
+
+This is a distribution-versus-nucleus incompatibility, not a defect in the generated
+component. Ubuntu 25.10 and later ship [sudo-rs](https://github.com/trifectatechfoundation/sudo-rs)
+as the default `sudo`. Greengrass nucleus 2.18.3 launches every component through `sudo -E`
+to pass `AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT` and `SVCUID` into the
+component's environment. `sudo-rs` accepts `-E`, prints
+`sudo: preserving the entire environment is not supported, '-E' is ignored`, and then
+discards the environment. The two variables never arrive, so **every** IPC-using component on
+that device starts, imports its architecture-specific native extension successfully, and dies:
 
 ```text
 stderr. sudo: preserving the entire environment is not supported, '-E' is ignored
 KeyError: 'AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT'
 ```
 
-Three crash loops, then `BROKEN`. The nucleus uses this invocation shape:
+The nucleus restarts it three times and then marks it `BROKEN`. The nucleus uses this
+invocation shape, reproduced here with the two `sudo` binaries Ubuntu ships:
 
 ```bash
 $ sudo env FOO=abc sudo    -n -E -H -u ggc_user -g ggc_group sh -c 'echo [$FOO]'
@@ -71,35 +110,25 @@ $ sudo env FOO=abc sudo.ws -n -E -H -u ggc_user -g ggc_group sh -c 'echo [$FOO]'
 [abc]
 ```
 
-Classic sudo ships on Ubuntu already. It is not the selected alternative.
-Fix the device and restart Greengrass:
+`ipc` defaults to **true** for a Python `greengrass#component`, so the default generated
+Python component is exactly this case.
+
+Classic `sudo` is already installed on Ubuntu: the `sudo` package provides `/usr/bin/sudo.ws`,
+and `sudo-rs` provides the `/usr/bin/sudo` alternative that is selected by default. Select the
+classic binary and restart the nucleus on the device:
 
 ```bash
 sudo update-alternatives --set sudo /usr/bin/sudo.ws
 sudo systemctl restart greengrass
 ```
 
-A privileged `Install` step in the recipe applies the same switch fleet-wide, without the restart:
-see <Link path="guides/greengrass-out-of-scope#scenario-switch-a-sudo-rs-fleet-back-to-classic-sudo-from-the-recipe">Beyond the generators</Link>.
-
-`ipc` defaults to `true` on `py#greengrass-component`. The default generated Python
-component is therefore the failing case. This is a distribution-versus-nucleus
-incompatibility, not a generator defect.
-
-### `SUCCEEDED` is not evidence that a component runs
-
-On one failing run, the nucleus marked the component `BROKEN` at 04:47:50.169Z.
-14 seconds later, it wrote:
-
-```text
-DeploymentStatusKeeper: Stored deployment status. {DeploymentStatus=SUCCEEDED}
-IotJobsHelper: ... {Status=SUCCEEDED, StatusDetails={detailed-deployment-status=SUCCESSFUL}}
-```
-
-`get-core-device` at the same moment reported `UNHEALTHY`. No rollback ran despite
-`failureHandlingPolicy: ROLLBACK` in the deployment document. Check `get-core-device`
-status and `list-installed-components` lifecycle state. Do not use deployment status as
-evidence that a component runs.
+A recipe cannot change how the nucleus launches a component, because the nucleus builds the
+`sudo` command line. A privileged `Install` step can switch the device back to classic `sudo`
+before the `Run` step, fleet-wide and without the restart: see
+<Link path="guides/greengrass-out-of-scope#scenario-switch-a-sudo-rs-fleet-back-to-classic-sudo-from-the-recipe">Beyond the generators</Link>.
+`<component>-deploy-local` recognises the signature in the component's log and prints the two
+commands above when it sees it. The <Link path="get_started/tutorials/greengrass/2">tutorial's setup script</Link>
+selects `sudo.ws` on its Ubuntu 26.04 instance before it installs the nucleus.
 
 ## Multi-architecture results
 
@@ -127,8 +156,91 @@ This result has two limits:
 
 - The x86 device is Ubuntu and the aarch64 device is Amazon Linux 2023. OS and
   architecture varied together, so the run cannot separate their effects.
-- `ts#greengrass-component` accepts the same option and was not exercised. Its
-  multi-architecture path remains unit-tested only.
+- The TypeScript `greengrass#component` adapter accepts the same option and was not
+  exercised. Its multi-architecture path remains unit-tested only.
+
+These results were recorded against the previous generator surface. They prove the packaging
+and recipe behaviour the current generator reuses, not the current generator itself.
+
+## Verifying on a real device
+
+CI proves that `CreateComponentVersion` and `CreateDeployment` succeed, not that the component
+runs. This is the procedure the receipts behind this guide followed, in order.
+
+1. **The device as the cloud sees it.** Nucleus version, platform and health in one call.
+   `architecture` is `aarch64` on 64-bit ARM and `amd64` on x86_64; those tokens are what the
+   recipe manifests must carry.
+
+   ```bash
+   aws --profile <profile> --region <region> greengrassv2 get-core-device \
+     --core-device-thing-name <thing-name> \
+     --query '{status:status,coreVersion:coreVersion,platform:platform,architecture:architecture}'
+   ```
+
+2. **Deployment status, then component state.** A deployment and its IoT job can report
+   `SUCCEEDED` while the component is `BROKEN` and the device is `UNHEALTHY`, with no rollback.
+   Read both, and treat only the second as evidence.
+
+   ```bash
+   aws --profile <profile> --region <region> greengrassv2 list-effective-deployments \
+     --core-device-thing-name <thing-name>
+   aws --profile <profile> --region <region> greengrassv2 list-installed-components \
+     --core-device-thing-name <thing-name>
+   ```
+
+   On a device that has the Greengrass CLI component, before and after the deployment:
+
+   ```bash
+   sudo /greengrass/v2/bin/greengrass-cli component list
+   ```
+
+3. **The bytes the device fetched.** One archive per manifest the device matched, and nothing
+   from any other architecture.
+
+   ```bash
+   sudo ls /greengrass/v2/packages/artifacts/<ComponentName>/<version>/
+   sudo ls /greengrass/v2/packages/artifacts-unarchived/<ComponentName>/<version>/
+   sudo find /greengrass/v2/packages -iname "*<other-architecture>*"   # expect no output
+   ```
+
+4. **The machine code and the interpreter.** `file` on one vendored native extension must name
+   the device's architecture, and the nucleus log's `shell-runner-start` line must show the
+   pinned interpreter the wheels were vendored for.
+
+   ```bash
+   # Python: the awscrt extension
+   sudo file /greengrass/v2/packages/artifacts-unarchived/<ComponentName>/<version>/<component>/_awscrt.abi3.so
+   # TypeScript with ipc: true: the aws-crt Node addon
+   sudo find /greengrass/v2/packages/artifacts-unarchived/<ComponentName>/<version>/ -name "aws-crt-nodejs.node" -exec file {} \;
+   sudo grep -m1 shell-runner-start /greengrass/v2/logs/greengrass.log
+   # ... command=["python3.14 .../<component>/main.py"]
+   ```
+
+5. **Liveness.** Two samples of the component's own log, spaced apart, with no restart between
+   them. With `ipc: true` the first lines also show the IPC connection and a published message.
+
+   <NxCommands commands={['run <project>:<component>-logs']} />
+
+   ```text
+   INFO:awsiot.eventstreamrpc:<Connection ...> /greengrass/v2/ipc.socket:0> connected
+   INFO:<ComponentName>:Published heartbeat 0 to <ComponentName>/heartbeat
+   INFO:<ComponentName>:Published heartbeat 8 to <ComponentName>/heartbeat
+   ```
+
+   Without the Greengrass CLI on the device, read `/greengrass/v2/logs/<ComponentName>.log`
+   over SSH or Systems Manager, as the <Link path="get_started/tutorials/greengrass/3">tutorial</Link> does.
+
+6. **The teardown sweep.** After the infrastructure is destroyed and the retained resources
+   are deleted, nothing of the component remains in the registry, in the bucket, or on the
+   device.
+
+   ```bash
+   aws --profile <profile> --region <region> greengrassv2 list-component-versions \
+     --arn arn:aws:greengrass:<region>:<account>:components:<ComponentName>
+   aws --profile <profile> --region <region> s3api head-bucket --bucket <artifact-bucket>   # expect a 404
+   aws --profile <profile> --region <region> greengrassv2 list-installed-components \
+     --core-device-thing-name <thing-name>
+   ```
 
 ## Why this does not run in the upstream e2e suite
 
@@ -162,9 +274,10 @@ not belong in that suite for six independent reasons:
 ## What each tier owns
 
 - **Upstream CI, every change:** unit tests, snapshots, and the existing
-  generate-and-build e2e smoke matrix. This tier owns option handling, idempotency, and
-  file content. It is fast and hermetic. Do not add Greengrass assertions to
-  `deploy-invocations.ts`.
+  generate-and-build e2e smoke matrix, including the `greengrass-tutorial` lane that runs
+  the tutorial's commands, edits, build and synth. This tier owns option handling,
+  idempotency, and file content. It is fast and hermetic. Do not add Greengrass assertions
+  to `deploy-invocations.ts`.
 - **Manual or nightly, owned by the contributor:** cloud publish and deploy, plus
   on-device verification. The Greengrass Test Framework (GTF) is the eventual home for
   automating this tier. It is deliberately out of initial scope.
@@ -172,6 +285,7 @@ not belong in that suite for six independent reasons:
   shipped code, complete one full release cycle with no schema or layout changes, and
   keep the e2e suites stable.
 
-## Verifying on a real device
-
-Use the real-device procedure in the <Link path="guides/py-greengrass-component#verifying-on-a-real-device">Python component guide</Link> or the <Link path="guides/ts-greengrass-component#verifying-on-a-real-device">TypeScript component guide</Link>.
+The deployment composition itself is described in the
+<Link path="guides/greengrass-component#deploying">Greengrass component guide</Link>, and the
+<Link path="get_started/tutorials/greengrass/overview">tutorial</Link> provisions one disposable
+EC2 core device to run this procedure against.
