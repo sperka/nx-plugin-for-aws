@@ -25,7 +25,7 @@ import {
   sharedConstructsGenerator,
 } from '../shared-constructs.js';
 import { createTreeUsingTsSolutionSetup } from '../test.js';
-import { cdkLambdaRuntime } from '../versions.js';
+import { cdkLambdaRuntime, TS_VERSIONS } from '../versions.js';
 import {
   addGreengrassComponentAppConstruct,
   addGreengrassCoreConstructs,
@@ -2092,9 +2092,11 @@ describe('terraform core modules (via hashicorp/awscc)', () => {
       tree.read('pnpm-workspace.yaml', 'utf-8') ?? '',
     ) as { catalog?: Record<string, string> };
     expect(workspaceYaml.catalog?.['@aws-sdk/client-greengrassv2']).toBe(
-      '3.1126.0',
+      TS_VERSIONS['@aws-sdk/client-greengrassv2'],
     );
-    expect(workspaceYaml.catalog?.['@aws-sdk/client-sts']).toBe('3.1126.0');
+    expect(workspaceYaml.catalog?.['@aws-sdk/client-sts']).toBe(
+      TS_VERSIONS['@aws-sdk/client-sts'],
+    );
     expect(rootPackageJson.dependencies?.['js-yaml']).toBeUndefined();
     expect(rootPackageJson.devDependencies?.['js-yaml']).toBeUndefined();
 

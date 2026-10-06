@@ -13,7 +13,7 @@ import {
 } from '@nx/devkit';
 import { FsTree, flushChanges } from 'nx/src/generators/tree';
 import { declareDependencies } from '../../../utils/declared-dependencies.js';
-import { expectHasMetricTags } from '../../../utils/metrics.spec.js';
+import { expectHasMetricTags } from '../../../utils/metrics-assertions.js';
 import { sortObjectKeys } from '../../../utils/object.js';
 import {
   SHARED_CONSTRUCTS_DEPENDENCIES,
