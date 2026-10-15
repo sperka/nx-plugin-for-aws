@@ -133,7 +133,24 @@ selects `sudo.ws` on its Ubuntu 26.04 instance before it installs the nucleus.
 ## Multi-architecture results
 
 `platform: linux-amd64-arm64` vendors dependencies per architecture and writes one recipe
-manifest each. One component version can serve a mixed fleet. Two real devices proved:
+manifest each. One component version can serve a mixed fleet. Live validation on
+2026-09-11 exercised the unified `greengrass#component` generator with both languages,
+both IaC providers, and two core devices running nucleus 2.18.3:
+
+| Component | CDK | Terraform | Artifact layout |
+| --- | --- | --- | --- |
+| Python, IPC enabled | RUNNING on aarch64 and x86_64 | RUNNING on aarch64 and x86_64 | One dependency-vendored archive per architecture |
+| TypeScript, IPC enabled | RUNNING on aarch64 and x86_64 | RUNNING on aarch64 and x86_64 | One archive containing both CRT addons, selected by each manifest's environment |
+
+Both providers passed initial publication, unchanged version reuse, Python source-only
+and recipe-only updates, and removal through an empty deployment revision. The
+TypeScript component remained running at its unchanged version during the Python updates.
+The independent MQTT tutorial also passed initial delivery, a `NEXT_PATCH` update,
+unchanged version reuse, component removal and cleanup on a fresh EC2 core.
+All 34 cleanup audit checks passed, with the existing devices and permissions restored
+to their recorded baseline.
+
+Earlier Python packaging checks established which bytes each device fetched:
 
 - One component version, `com.gg-validate.MultiArch` 1.0.0, exactly one in the registry,
   two platforms on it, both artifacts under one aggregate-sha256 prefix.
@@ -152,20 +169,17 @@ recipe is byte-identical on both devices
 The **amd64 manifest is first** in both. The aarch64 device resolved to the *second*
 entry. One device cannot establish that distinction.
 
-This result has two limits:
-
-- The x86 device is Ubuntu and the aarch64 device is Amazon Linux 2023. OS and
-  architecture varied together, so the run cannot separate their effects.
-- The TypeScript `greengrass#component` adapter accepts the same option and was not
-  exercised. Its multi-architecture path remains unit-tested only.
-
-These results were recorded against the previous generator surface. They prove the packaging
-and recipe behaviour the current generator reuses, not the current generator itself.
+The x86 device ran Ubuntu 26.04 and the aarch64 device ran Amazon Linux 2023.
+OS and architecture varied together, so these runs cannot separate their effects.
+The x86 device used classic `sudo`, as required by the IPC workaround above.
+These are dated validation results; later generator or dependency changes require
+fresh validation before making the same claims about another build.
 
 ## Verifying on a real device
 
-CI proves that `CreateComponentVersion` and `CreateDeployment` succeed, not that the component
-runs. This is the procedure the receipts behind this guide followed, in order.
+A successful cloud deployment proves that `CreateComponentVersion` and `CreateDeployment`
+accepted the output. Checking that the component runs requires a core device.
+This is the procedure the receipts behind this guide followed, in order.
 
 1. **The device as the cloud sees it.** Nucleus version, platform and health in one call.
    `architecture` is `aarch64` on 64-bit ARM and `amd64` on x86_64; those tokens are what the
@@ -260,8 +274,8 @@ not belong in that suite for six independent reasons:
    group per run. All are stateful and slow.
 3. **A green deployment is not a green component.** A device-less API assertion would
    produce false confidence.
-4. **Cost and wall-clock.** The two validation devices are a `t4g.2xlarge` and a
-   `t2.large` running continuously. A single deploy-and-verify cycle takes minutes.
+4. **Cost and wall-clock.** The recorded validation used a `t4g.2xlarge` and a
+   `t2.large`. A single deploy-and-verify cycle takes minutes.
    Per-architecture wheel vendoring makes the build slow. The option matrix multiplies
    both costs on every push.
 5. **Hard service ceilings turn the matrix into a cliff.** CloudFormation permits at
@@ -273,11 +287,12 @@ not belong in that suite for six independent reasons:
 
 ## What each tier owns
 
-- **Upstream CI, every change:** unit tests, snapshots, and the existing
-  generate-and-build e2e smoke matrix, including the `greengrass-tutorial` lane that runs
-  the tutorial's commands, edits, build and synth. This tier owns option handling,
-  idempotency, and file content. It is fast and hermetic. Do not add Greengrass assertions
-  to `deploy-invocations.ts`.
+- **Configured CI:** unit tests, snapshots, and the existing generate-and-build
+  e2e smoke matrices cover option handling, idempotency and generated file content.
+  The dedicated `greengrass-component` and `greengrass-tutorial` lanes passed locally
+  on 2026-09-11 but are not scheduled in the GitHub Actions smoke matrices.
+  The tutorial lane runs its commands, edits, build and synth without deploying.
+  Do not add Greengrass device assertions to `deploy-invocations.ts`.
 - **Manual or nightly, owned by the contributor:** cloud publish and deploy, plus
   on-device verification. The Greengrass Test Framework (GTF) is the eventual home for
   automating this tier. It is deliberately out of initial scope.
