@@ -1,0 +1,99 @@
+import {
+  Dice,
+  DungeonDb,
+  GameApi,
+  GameUI,
+  GreengrassArtifactBucket,
+  GreengrassDeployment,
+  InventoryMcpServer,
+  StoryAgent,
+  UserIdentity,
+  suppressRules,
+} from '@dungeon-adventure/common-constructs';
+import { ArnFormat, CfnOutput, CfnParameter, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
+import { TableEncryption } from 'aws-cdk-lib/aws-dynamodb';
+import { PolicyStatement, Role } from 'aws-cdk-lib/aws-iam';
+import { CfnPolicy, CfnPolicyPrincipalAttachment } from 'aws-cdk-lib/aws-iot';
+import type { Construct } from 'constructs';
+
+export class ApplicationStack extends Stack {
+  constructor(scope: Construct, id: string, props?: StackProps) {
+    super(scope, id, props);
+    const thing = new CfnParameter(this, 'DiceThingName', {
+      type: 'String', allowedPattern: '[a-zA-Z0-9:_-]+',
+    });
+    const endpoint = new CfnParameter(this, 'DiceEndpoint', { type: 'String' });
+    const certificate = new CfnParameter(this, 'DiceCertificateArn', { type: 'String' });
+    const tokenExchangeRole = new CfnParameter(this, 'TokenExchangeRoleArn', { type: 'String' });
+    const group = new CfnParameter(this, 'ThingGroupArn', { type: 'String' });
+
+    const userIdentity = new UserIdentity(this, 'UserIdentity');
+    const dungeonDb = new DungeonDb(this, 'DungeonDb', {
+      deletionProtection: false,
+      removalPolicy: RemovalPolicy.DESTROY,
+      encryption: TableEncryption.DEFAULT,
+    });
+    suppressRules(dungeonDb.table, ['CKV_AWS_119'],
+      'Sandbox stack uses the AWS owned key so it can be torn down and recreated freely');
+    const gameApi = new GameApi(this, 'GameApi', {
+      integrations: GameApi.defaultIntegrations(this).build(),
+    });
+    dungeonDb.grantReadData(gameApi.integrations['games.query'].handler);
+    dungeonDb.grantReadData(gameApi.integrations['inventory.query'].handler);
+    dungeonDb.grantReadWriteData(gameApi.integrations['games.save'].handler);
+
+    const mcpServer = new InventoryMcpServer(this, 'InventoryMcpServer', {
+      environmentVariables: {
+        DICE_THING_NAME: thing.valueAsString,
+        DICE_IOT_ENDPOINT: endpoint.valueAsString,
+        DICE_AWS_REGION: this.region,
+      },
+    });
+    dungeonDb.grantReadWriteData(mcpServer.agentCoreRuntime);
+    mcpServer.agentCoreRuntime.addToRolePolicy(new PolicyStatement({
+      actions: ['iot:GetThingShadow', 'iot:UpdateThingShadow'],
+      resources: [this.formatArn({
+        service: 'iot', resource: 'thing', resourceName: thing.valueAsString,
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+      })],
+    }));
+
+    const shadowBase = `$aws/things/${thing.valueAsString}/shadow/name/dungeon-dice`;
+    const topicArn = (resource: string, suffix: string) => this.formatArn({
+      service: 'iot', resource, resourceName: `${shadowBase}/${suffix}`,
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+    });
+    const incoming = ['get/accepted', 'update/delta', 'update/rejected'];
+    const policy = new CfnPolicy(this, 'DicePolicy', {
+      policyDocument: {
+        Version: '2012-10-17',
+        Statement: [
+          { Effect: 'Allow', Action: 'iot:Publish', Resource: ['get', 'update'].map((suffix) => topicArn('topic', suffix)) },
+          { Effect: 'Allow', Action: 'iot:Subscribe', Resource: incoming.map((suffix) => topicArn('topicfilter', suffix)) },
+          { Effect: 'Allow', Action: 'iot:Receive', Resource: incoming.map((suffix) => topicArn('topic', suffix)) },
+        ],
+      },
+    });
+    const attachment = new CfnPolicyPrincipalAttachment(this, 'DicePolicyAttachment', {
+      policyName: policy.ref, principal: certificate.valueAsString,
+    });
+    const artifacts = new GreengrassArtifactBucket(this, 'DiceArtifacts');
+    artifacts.grantReadTo(Role.fromRoleArn(this, 'DiceTokenExchangeRole', tokenExchangeRole.valueAsString),
+      'com.example.DungeonDice/*');
+    const dice = new Dice(this, 'DiceComponent', { bucket: artifacts });
+    const fleet = new GreengrassDeployment(this, 'DiceFleet', { targetArn: group.valueAsString });
+    fleet.addComponent(dice);
+    fleet.deployment.node.addDependency(attachment);
+    new CfnOutput(this, 'DiceArtifactBucket', { value: artifacts.bucket.bucketName });
+    new CfnOutput(this, 'DiceComponentArn', { value: dice.cfnComponentVersion.attrArn });
+    new CfnOutput(this, 'DiceDeploymentId', { value: fleet.deployment.attrDeploymentId });
+
+    const storyAgent = new StoryAgent(this, 'StoryAgent', { identity: userIdentity });
+    storyAgent.sessionBucket.grantRead(gameApi.integrations['actions.query'].handler);
+    new CfnOutput(this, 'StoryAgentArn', { value: storyAgent.agentCoreRuntime.agentRuntimeArn });
+    new CfnOutput(this, 'InventoryMcpArn', { value: mcpServer.agentCoreRuntime.agentRuntimeArn });
+    mcpServer.grantInvokeAccess(storyAgent);
+    gameApi.grantInvokeAccess(userIdentity.identityPool.authenticatedRole);
+    new GameUI(this, 'GameUI');
+  }
+}

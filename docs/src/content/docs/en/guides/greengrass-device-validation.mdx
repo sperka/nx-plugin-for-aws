@@ -42,7 +42,8 @@ These defects passed unit tests, built cleanly, and in most cases deployed succe
    `AlreadyExists`. DOS-epoch timestamps and sorted entries fix this.
 5. **A missing `ComponentVersion` -> `Deployment` dependency edge** let the IoT job reach
    devices before the version existed.
-6. **Greengrass nucleus 2.18.3 cannot run IPC components on Ubuntu 25.10+.**
+6. **Greengrass nucleus 2.18.3 loses IPC environment variables with Ubuntu 25.10+'s
+   default sudo-rs.** Selecting classic `sudo` resolves this.
    This was invisible to every other tier.
 7. **A deployment can report `SUCCEEDED` while the component is `BROKEN`.**
 
@@ -133,8 +134,39 @@ selects `sudo.ws` on its Ubuntu 26.04 instance before it installs the nucleus.
 ## Multi-architecture results
 
 `platform: linux-amd64-arm64` vendors dependencies per architecture and writes one recipe
-manifest each. One component version can serve a mixed fleet. Live validation on
-2026-09-11 exercised the unified `greengrass#component` generator with both languages,
+manifest each. One component version can serve a mixed fleet.
+
+### Refresh on 2026-10-15
+
+The branch rebased onto upstream v1.0.9 was generated, built and deployed again
+through CDK to the existing Amazon Linux 2023 ARM64 and Ubuntu 26.04 x86_64
+cores, both running nucleus 2.18.3:
+
+| Check | Result |
+| --- | --- |
+| Python and TypeScript with IPC | Both languages `RUNNING` on both architectures |
+| Unchanged redeploy | Reused version `1.0.0` |
+| Python source-only update | Version `1.0.1` running on both cores |
+| Python recipe-only update | Version `1.0.2` running on both cores; TypeScript stayed at `1.0.0` |
+| Empty deployment revisions | Removed the validation components; original components remained running |
+| Dungeon dice tool on the x86_64 core | MCP calls returned the device's correlated shadow result; a stopped component returned an error, and a restarted component returned a fresh roll |
+
+The temporary stack, deployments, component versions, artifact bucket, thing
+groups and dice shadow were removed. Both cores were healthy afterward, with
+their original component versions and group memberships restored.
+
+The dedicated component and standalone tutorial smoke tests also passed locally,
+and all 15 Terraform module/composition tests passed with mocked providers.
+This refresh did not repeat Terraform cloud deployment or fresh-core
+provisioning. Their last complete live acceptance remains the September run
+below. A Raspberry Pi and ESP32 were not tested; see the
+<Link path="guides/greengrass-component#hardware-and-operating-systems">hardware support table</Link>.
+The dice check exercised the real MCP tool and IoT/device exchange; it did not
+deploy the complete dungeon or exercise a hosted model's choice to call the tool.
+
+### Full acceptance on 2026-09-11
+
+Live validation exercised the unified `greengrass#component` generator with both languages,
 both IaC providers, and two core devices running nucleus 2.18.3:
 
 | Component | CDK | Terraform | Artifact layout |

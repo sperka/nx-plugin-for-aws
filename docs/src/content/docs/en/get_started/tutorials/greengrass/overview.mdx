@@ -53,7 +53,7 @@ export TUTORIAL_PREFIX=gg-tutorial
 
 ## What is verified automatically
 
-The commands, source edits, build and CDK synthesis of this tutorial are covered by this repository's `greengrass-tutorial` e2e lane. It passed locally on 2026-09-11; it is not scheduled in the GitHub Actions smoke matrices. The setup script's identity, refusal and cleanup behaviour runs against a recorded AWS CLI in the docs test suite.
+The commands, source edits, build and CDK synthesis of this tutorial are covered by this repository's `greengrass-tutorial` e2e lane. It passed locally on 2026-10-15 against the branch rebased onto upstream v1.0.9; it is not scheduled in the GitHub Actions smoke matrices. The setup script's identity, refusal and cleanup behaviour runs against a recorded AWS CLI in the docs test suite.
 
 Live validation on 2026-09-11 also completed provisioning, initial MQTT delivery, a `NEXT_PATCH` update, unchanged version reuse, component removal and cleanup. Those steps require an AWS account and remain outside the automated lane. Repeat them in a disposable account and Region when validating a new build. The <Link path="guides/greengrass-device-validation#multi-architecture-results">device validation guide</Link> records the tested platforms and limits.
 

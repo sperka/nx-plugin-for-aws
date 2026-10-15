@@ -30,6 +30,37 @@ Pass `language` explicitly in scripts and documentation. When it is omitted, the
 
 `--project` accepts the unqualified project name. Generated projects are namespace-qualified, so `nx run` needs the full name: `<scope>.telemetry` for a Python project and `@<scope>/telemetry` for a TypeScript project. The examples below write `<project>` for that name, and `@my-scope/infra` for an infrastructure project generated with `--name=infra` in a workspace whose npm scope is `my-scope`.
 
+### Hardware and operating systems
+
+`platform` selects the operating system and CPU architecture of the **core
+device**, not its board name. The current targets are 64-bit Linux with glibc:
+
+| Device | Generator target | Status |
+| --- | --- | --- |
+| Linux PC, industrial gateway or EC2 x86_64 instance | `linux-amd64` | Supported; validated on an EC2 core |
+| Raspberry Pi with a 64-bit CPU and 64-bit Linux, or another Linux ARM64 gateway | `linux-arm64` | Packaging is supported; Raspberry Pi hardware has not been validated |
+| A fleet containing both of the above | `linux-amd64-arm64` | One component version with architecture-specific manifests |
+| Raspberry Pi running 32-bit Linux / ARMv7 | None | Not supported by this generator, although the classic Greengrass nucleus supports ARMv7 |
+| Raspberry Pi Pico, ESP32 or another microcontroller | None | Use as an IoT client or peripheral of a core device |
+
+On a Raspberry Pi, check both `uname -m` and `getconf LONG_BIT`; this path needs
+`aarch64` and `64`. A 64-bit processor running a 32-bit userspace is not an
+ARM64 deployment target. The device also needs the Python interpreter named in
+the generated recipe or Node.js for TypeScript, plus the
+[Greengrass nucleus prerequisites](https://docs.aws.amazon.com/greengrass/v2/developerguide/greengrass-nucleus-component.html).
+Python dependency vendoring targets `manylinux_2_28`, so use glibc 2.28 or later.
+GPIO libraries and custom native dependencies must provide compatible binaries
+for the selected platform. The generator does not provision those peripherals.
+
+ESP32 firmware runs separately from these Python and TypeScript components.
+It can send MQTT messages to AWS IoT Core, or connect to a local Greengrass core
+using [client device support](https://docs.aws.amazon.com/greengrass/v2/developerguide/interact-with-local-iot-devices.html).
+The local route requires a broker, client authentication and MQTT bridge
+configuration; this generator does not scaffold them or the firmware.
+ARMv7, Windows, musl Linux and other CPU architectures require additional
+packaging and runtime work. Changing the recipe's architecture label alone is
+not sufficient.
+
 ### Options
 
 <GeneratorParameters generator="greengrass#component" />

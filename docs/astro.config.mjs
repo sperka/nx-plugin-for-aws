@@ -3,18 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 // @ts-check
-import { defineConfig, passthroughImageService } from 'astro/config';
+
+import react from '@astrojs/react';
 
 import starlight from '@astrojs/starlight';
+import tailwindcss from '@tailwindcss/vite';
+import { defineConfig, passthroughImageService } from 'astro/config';
 import astroD2 from 'astro-d2';
+import * as fs from 'fs';
 import starlightBlog from 'starlight-blog';
 import starlightLinksValidator from 'starlight-links-validator';
 import starlightVideos from 'starlight-videos';
-
-import tailwindcss from '@tailwindcss/vite';
-
-import react from '@astrojs/react';
-import * as fs from 'fs';
 
 import remarkLinkValidator from './src/plugins/remark-link-validator.ts';
 import remarkOptionFilter from './src/plugins/remark-option-filter.ts';
@@ -343,6 +342,10 @@ export default defineConfig({
                         vi: '4. Xây dựng giao diện',
                       },
                       link: '/get_started/tutorials/dungeon-game/4',
+                    },
+                    {
+                      label: 'Optional: Greengrass dice',
+                      link: '/get_started/tutorials/dungeon-game/greengrass-dice',
                     },
                     {
                       label: 'Wrap up',

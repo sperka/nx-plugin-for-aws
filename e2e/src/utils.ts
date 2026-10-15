@@ -416,6 +416,9 @@ export const assertWorkspaceUsesPackageManager = (
 export const getDungeonAdventureElectroDbDependencies = () =>
   `@aws-sdk/client-s3@${TS_VERSIONS['@aws-sdk/client-s3']}`;
 
+export const getDungeonDiceDependencies = () =>
+  `@aws-sdk/client-iot-data-plane@${TS_VERSIONS['@aws-sdk/client-s3']}`;
+
 /** Send `signal` to a pid (or a process group when negative), ignoring exited ones. */
 function signalProcess(pid: number, signal: NodeJS.Signals | 0): boolean {
   try {

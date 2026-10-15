@@ -14,10 +14,12 @@ import {
   createTestWorkspace,
   getDungeonAdventureElectroDbDependencies,
   killProcess,
+  pinAwsScopeToLocalRegistry,
   runCLI,
   tmpProjPath,
 } from '../utils';
 import { startLlmMock } from '../utils/llm-mock';
+import { exerciseDungeonDice } from './dungeon-dice';
 
 const LLM_MOCK_PORT = 19824;
 const STARTUP_TIMEOUT_MS = 120_000;
@@ -195,6 +197,7 @@ describe('smoke test - dungeon-adventure', () => {
       rmSync(targetDir, { force: true, recursive: true });
     }
     ensureDirSync(targetDir);
+    pinAwsScopeToLocalRegistry(targetDir);
     cleanupDynamoLocal();
   });
 
@@ -607,5 +610,6 @@ describe('smoke test - dungeon-adventure', () => {
     expect(agentRes.status).toBe(200);
     expect(agentBody).toContain('data:');
     await stopAll();
+    await exerciseDungeonDice(projectRoot);
   });
 });
