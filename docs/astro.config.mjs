@@ -676,7 +676,7 @@ export default defineConfig({
               ],
             },
             {
-              label: 'Greengrass',
+              label: 'IoT',
               collapsed: true,
               items: [
                 {
