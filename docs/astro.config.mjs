@@ -345,6 +345,10 @@ export default defineConfig({
                       link: '/get_started/tutorials/dungeon-game/4',
                     },
                     {
+                      label: 'Optional: Greengrass dice',
+                      link: '/get_started/tutorials/dungeon-game/greengrass-dice',
+                    },
+                    {
                       label: 'Wrap up',
                       translations: {
                         jp: 'まとめ',
@@ -373,6 +377,32 @@ export default defineConfig({
                     vi: 'Đóng góp trình tạo',
                   },
                   link: '/get_started/tutorials/contribute-generator',
+                },
+                {
+                  label: 'Greengrass MQTT',
+                  collapsed: true,
+                  items: [
+                    {
+                      label: 'Overview',
+                      link: '/get_started/tutorials/greengrass/overview',
+                    },
+                    {
+                      label: '1. Create the component',
+                      link: '/get_started/tutorials/greengrass/1',
+                    },
+                    {
+                      label: '2. Provision the core device',
+                      link: '/get_started/tutorials/greengrass/2',
+                    },
+                    {
+                      label: '3. Deploy, observe and update',
+                      link: '/get_started/tutorials/greengrass/3',
+                    },
+                    {
+                      label: '4. Remove and clean up',
+                      link: '/get_started/tutorials/greengrass/cleanup',
+                    },
+                  ],
                 },
               ],
             },

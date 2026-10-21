@@ -1,0 +1,82 @@
+import {
+  Dice,
+  GreengrassArtifactBucket,
+  GreengrassDeployment,
+} from '@dungeon-adventure/common-constructs';
+import { ArnFormat, CfnOutput, CfnParameter, Stack } from 'aws-cdk-lib';
+import { Grant, type IGrantable, Role } from 'aws-cdk-lib/aws-iam';
+import { CfnPolicy, CfnPolicyPrincipalAttachment } from 'aws-cdk-lib/aws-iot';
+import { Construct } from 'constructs';
+
+export class DiceResources extends Construct {
+  readonly environmentVariables: Record<string, string>;
+  readonly deployment: GreengrassDeployment;
+  private readonly thingArn: string;
+
+  constructor(scope: Construct, id: string) {
+    super(scope, id);
+    const stack = Stack.of(this);
+    const thing = new CfnParameter(stack, 'DiceThingName', {
+      type: 'String',
+      allowedPattern: '[a-zA-Z0-9:_-]+',
+    });
+    const endpoint = new CfnParameter(stack, 'DiceEndpoint', { type: 'String' });
+    const certificate = new CfnParameter(stack, 'DiceCertificateArn', { type: 'String' });
+    const tokenExchangeRole = new CfnParameter(stack, 'TokenExchangeRoleArn', { type: 'String' });
+    const group = new CfnParameter(stack, 'ThingGroupArn', { type: 'String' });
+
+    this.environmentVariables = {
+      DICE_THING_NAME: thing.valueAsString,
+      DICE_IOT_ENDPOINT: endpoint.valueAsString,
+      DICE_AWS_REGION: stack.region,
+    };
+    this.thingArn = stack.formatArn({
+      service: 'iot',
+      resource: 'thing',
+      resourceName: thing.valueAsString,
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+    });
+    const shadowBase = `$aws/things/${thing.valueAsString}/shadow/name/dungeon-dice`;
+    const topicArn = (resource: string, suffix: string) => stack.formatArn({
+      service: 'iot',
+      resource,
+      resourceName: `${shadowBase}/${suffix}`,
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+    });
+    const incoming = ['get/accepted', 'update/delta', 'update/rejected'];
+    const policy = new CfnPolicy(this, 'DicePolicy', {
+      policyDocument: {
+        Version: '2012-10-17',
+        Statement: [
+          { Effect: 'Allow', Action: 'iot:Publish', Resource: ['get', 'update'].map((suffix) => topicArn('topic', suffix)) },
+          { Effect: 'Allow', Action: 'iot:Subscribe', Resource: incoming.map((suffix) => topicArn('topicfilter', suffix)) },
+          { Effect: 'Allow', Action: 'iot:Receive', Resource: incoming.map((suffix) => topicArn('topic', suffix)) },
+        ],
+      },
+    });
+    const attachment = new CfnPolicyPrincipalAttachment(this, 'DicePolicyAttachment', {
+      policyName: policy.ref,
+      principal: certificate.valueAsString,
+    });
+    const artifacts = new GreengrassArtifactBucket(this, 'Artifacts');
+    artifacts.grantReadTo(
+      Role.fromRoleArn(this, 'TokenExchangeRole', tokenExchangeRole.valueAsString),
+      'com.example.DungeonDice/*',
+    );
+    const component = new Dice(this, 'Component', { bucket: artifacts });
+    this.deployment = new GreengrassDeployment(this, 'Fleet', { targetArn: group.valueAsString });
+    this.deployment.addComponent(component);
+    this.deployment.deployment.node.addDependency(attachment);
+    new CfnOutput(stack, 'DiceArtifactBucket', { value: artifacts.bucket.bucketName });
+    new CfnOutput(stack, 'DiceComponentArn', { value: component.cfnComponentVersion.attrArn });
+    new CfnOutput(stack, 'DiceDeploymentId', { value: this.deployment.deployment.attrDeploymentId });
+  }
+
+  grantShadowAccess(grantee: IGrantable): Grant {
+    return Grant.addToPrincipal({
+      grantee,
+      actions: ['iot:GetThingShadow', 'iot:UpdateThingShadow'],
+      resourceArns: [this.thingArn],
+    });
+  }
+}
