@@ -53,6 +53,23 @@ export default async function () {
     process.env.npm_config_audit = 'false';
     process.env.npm_config_fund = 'false';
 
+    const publicVersion = process.env.NX_E2E_PUBLIC_VERSION;
+    if (publicVersion) {
+      if (!/^\d+\.\d+\.\d+$/.test(publicVersion)) {
+        throw new Error(
+          'NX_E2E_PUBLIC_VERSION must be an exact release version',
+        );
+      }
+      process.env.NX_E2E_PRESET_VERSION = publicVersion;
+      delete process.env.NX_E2E_LOCAL_REGISTRY;
+      process.env.npm_config_registry = PUBLIC_REGISTRY;
+      process.env.BUN_CONFIG_REGISTRY = PUBLIC_REGISTRY;
+      process.env.YARN_REGISTRY = PUBLIC_REGISTRY;
+      process.env.YARN_NPM_REGISTRY_SERVER = PUBLIC_REGISTRY;
+      console.info(`Using public @aws packages at ${publicVersion}`);
+      return;
+    }
+
     // On shared Windows runners the verdaccio storage outlives the process
     // and `clearStorage: true` below doesn't fully reset it, so publishes
     // on the next run hit "409 Conflict: already present". Wipe first.
